@@ -41,6 +41,11 @@ pub fn set_up() -> super::NetworkResult {
 }
 
 #[cfg(target_os = "linux")]
+pub fn apply(net: &lns_session::GuestNet) -> Result<super::Applied, lns_session::BrokerExitReason> {
+    super::apply_plan(&RealCommandRunner, &RealFsWriter, net)
+}
+
+#[cfg(target_os = "linux")]
 pub fn configure_dns() -> Result<(), String> {
     let dhcp_dns = parse_dhcp_dns(&std::fs::read_to_string(DHCP_DNS_PATH).unwrap_or_default());
     configure_dns_with(&dhcp_dns, &RealFsWriter)

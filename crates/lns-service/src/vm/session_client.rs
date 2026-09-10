@@ -13,7 +13,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-mod real;
+pub(crate) mod real;
 pub use real::capture_session_exec;
 pub use real::capture_session_output;
 pub use real::run_session_on_fd;
@@ -105,8 +105,6 @@ pub struct SessionParams {
     pub confine: bool,
     /// Tell the broker this session exists only for its host client, so a vanished stream hangs the child up.
     pub dies_with_client: bool,
-    pub expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
-    pub address_selection: Option<crate::vm::guest_addr::real::AddressSelection>,
 }
 
 pub(super) fn input_to_frame(input: SessionInput) -> ClientFrame {
@@ -119,7 +117,7 @@ pub(super) fn input_to_frame(input: SessionInput) -> ClientFrame {
     }
 }
 
-async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
+pub(super) async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<Option<ServerFrame>> {
     let mut len_buf = [0u8; 4];
@@ -140,23 +138,15 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
     Ok(Some(frame))
 }
 
-/// The reader runs as its own task, so it is given the run's span explicitly: an address the guest reports has to reach the run that owns it, not the service's own log.
+/// The reader runs as its own task, so it is given the run's span explicitly: what the guest says belongs to the run that owns it, not to the service's own log.
 pub(super) fn spawn_server_frame_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     reader: R,
     frame_tx: mpsc::Sender<WireFrame>,
-    expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
-    address_selection: Option<crate::vm::guest_addr::real::AddressSelection>,
     stop: tokio::sync::broadcast::Sender<()>,
 ) -> tokio::task::JoinHandle<Result<Option<i32>>> {
     tokio::spawn(
         async move {
-            let outcome = read_server_frames(
-                reader,
-                frame_tx,
-                expected_guest_addresses,
-                address_selection,
-            )
-            .await;
+            let outcome = read_server_frames(reader, frame_tx).await;
             // Without an explicit wake-up, detached-run input loops hang because nobody else closes input_rx.
             let _ = stop.send(());
             outcome
@@ -168,26 +158,13 @@ pub(super) fn spawn_server_frame_reader<R: tokio::io::AsyncRead + Unpin + Send +
 pub(super) async fn read_server_frames<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     frame_tx: mpsc::Sender<WireFrame>,
-    expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
-    address_selection: Option<crate::vm::guest_addr::real::AddressSelection>,
 ) -> Result<Option<i32>> {
     while let Some(frame) = read_one_frame(&mut reader).await? {
         match frame {
             ServerFrame::NetworkApplied { address } => {
-                let address: std::net::Ipv4Addr = address
-                    .parse()
-                    .context("the guest reported a malformed assigned address")?;
-                let expected = expected_guest_addresses
-                    .as_ref()
-                    .context("the guest reported an address when the host offered none")?;
-                anyhow::ensure!(
-                    expected.contains(&address),
-                    "the guest reported unoffered assigned address {address}"
+                anyhow::bail!(
+                    "the guest reported address {address} on a workload session; addressing is settled on its own channel before any workload starts"
                 );
-                if let Some(selection) = &address_selection {
-                    selection.confirm(address)?;
-                }
-                log::info!("Address", "guest assigned {address}");
             }
             ServerFrame::StdoutBytes(bytes) => {
                 if frame_tx.send(WireFrame::Stdout(bytes)).await.is_err() {
@@ -382,7 +359,7 @@ mod tests {
         bytes.extend(framed(&ServerFrame::StderrBytes(b"err".to_vec())));
         bytes.extend(framed(&ServerFrame::ExitStatus(42)));
         let (tx, mut rx) = mpsc::channel(8);
-        let code = read_server_frames(io::Cursor::new(bytes), tx, None, None)
+        let code = read_server_frames(io::Cursor::new(bytes), tx)
             .await
             .unwrap();
         assert!(matches!(rx.recv().await, Some(WireFrame::Stdout(b)) if b == b"out"));
@@ -395,118 +372,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assigned_address_report_is_validated_before_normal_session_frames() {
-        let reported = ServerFrame::NetworkApplied {
-            address: "192.168.64.254".into(),
-        };
-        let mut bytes = framed(&reported);
-        bytes.extend(framed(&ServerFrame::ExitStatus(0)));
+    async fn an_address_report_on_a_workload_session_is_refused_rather_than_believed() {
         let (tx, _rx) = mpsc::channel(2);
-        let code = read_server_frames(
-            io::Cursor::new(bytes),
-            tx,
-            Some(vec!["192.168.64.254".parse().expect("address")]),
-            None,
-        )
-        .await
-        .expect("offered address");
-        assert_eq!(code, Some(0));
-
-        for address in ["192.168.64.200", "not-an-address"] {
-            let (tx, _rx) = mpsc::channel(1);
-            let error = read_server_frames(
-                io::Cursor::new(framed(&ServerFrame::NetworkApplied {
-                    address: address.into(),
-                })),
-                tx,
-                Some(vec!["192.168.64.254".parse().expect("address")]),
-                None,
-            )
-            .await
-            .expect_err("untrusted report");
-            assert!(error.to_string().contains("reported"), "{error:#}");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_reported_address_narrows_the_host_reservation_and_an_unheld_one_fails_the_session() {
-        use crate::vm::guest_addr::real::AddressSelection;
-        use crate::vm::guest_addr::tests::empty_host;
-
-        let allocator = std::sync::Arc::new(empty_host());
-        let plan = allocator
-            .reserve("run-a", "52:54:00:00:00:01")
-            .expect("free host");
-        let taken = plan.candidates[1];
-        let (tx, _rx) = mpsc::channel(2);
-        let mut bytes = framed(&ServerFrame::NetworkApplied {
-            address: taken.to_string(),
-        });
-        bytes.extend(framed(&ServerFrame::ExitStatus(0)));
-        read_server_frames(
-            io::Cursor::new(bytes),
-            tx,
-            Some(plan.candidates.clone()),
-            Some(AddressSelection::new(allocator.clone(), "run-a")),
-        )
-        .await
-        .expect("the guest took an offered address");
-        assert_eq!(
-            allocator.reserved()[0].candidates,
-            vec![taken],
-            "the spares the guest did not take go back to the host"
-        );
-
-        let (tx, _rx) = mpsc::channel(1);
         let error = read_server_frames(
             io::Cursor::new(framed(&ServerFrame::NetworkApplied {
-                address: taken.to_string(),
+                address: "192.168.64.254".into(),
             })),
             tx,
-            Some(plan.candidates.clone()),
-            Some(AddressSelection::new(allocator.clone(), "run-gone")),
         )
         .await
-        .expect_err("a run whose reservation is gone cannot confirm an address");
+        .expect_err("a session is not where a guest is addressed");
         assert!(
-            error.to_string().contains("no address reservation"),
+            error.to_string().contains("before any workload starts"),
             "{error:#}"
         );
     }
 
-    #[test]
-    fn the_spawned_reader_reports_the_assigned_address_into_its_own_runs_log() {
-        let mut bytes = framed(&ServerFrame::NetworkApplied {
-            address: "192.168.64.254".into(),
-        });
-        bytes.extend(framed(&ServerFrame::ExitStatus(0)));
-        let (outcome, frames) = crate::log::testing::capture_run_frames_spawned(|| {
-            let (tx, _rx) = mpsc::channel(2);
-            let (stop, _stopped) = tokio::sync::broadcast::channel::<()>(1);
-            spawn_server_frame_reader(
-                io::Cursor::new(bytes),
-                tx,
-                Some(vec!["192.168.64.254".parse().expect("address")]),
-                None,
-                stop,
-            )
-        });
-        assert_eq!(outcome.expect("an offered address"), Some(0));
-        assert!(
-            frames.iter().any(|frame| matches!(
-                frame,
-                WireFrame::Json(lns_ipc::Response::RunLog { message, .. })
-                    if message.contains("guest assigned 192.168.64.254")
-            )),
-            "the address the guest took is the user's, so it must reach the run that owns it: {frames:?}"
+    #[tokio::test]
+    async fn the_spawned_reader_wakes_the_session_input_loop_when_the_guest_stops_talking() {
+        let (tx, _rx) = mpsc::channel(2);
+        let (stop, mut stopped) = tokio::sync::broadcast::channel::<()>(1);
+        let reader = spawn_server_frame_reader(
+            io::Cursor::new(framed(&ServerFrame::ExitStatus(3))),
+            tx,
+            stop,
         );
+        assert_eq!(reader.await.expect("reader task").expect("frames"), Some(3));
+        stopped
+            .recv()
+            .await
+            .expect("nobody else closes the input loop, so the reader must");
     }
 
     #[tokio::test]
     async fn a_typed_broker_refusal_surfaces_without_borrowing_a_workload_code() {
         let bytes = framed(&ServerFrame::Refused(BrokerExitReason::NoDhcpLease));
         let (tx, _rx) = mpsc::channel(1);
-        let error = read_server_frames(io::Cursor::new(bytes), tx, None, None)
+        let error = read_server_frames(io::Cursor::new(bytes), tx)
             .await
             .expect_err("a refusal is not a workload exit");
         let refusal = error
@@ -524,7 +426,7 @@ mod tests {
     async fn returns_none_when_stream_closes_without_exit_status() {
         let bytes = framed(&ServerFrame::StdoutBytes(b"out".to_vec()));
         let (tx, _rx) = mpsc::channel(8);
-        let code = read_server_frames(io::Cursor::new(bytes), tx, None, None)
+        let code = read_server_frames(io::Cursor::new(bytes), tx)
             .await
             .expect("EOF after a frame ends the loop cleanly");
         assert_eq!(
@@ -538,7 +440,7 @@ mod tests {
         let bytes = framed(&ServerFrame::StdoutBytes(b"out".to_vec()));
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
-        let code = read_server_frames(io::Cursor::new(bytes), tx, None, None)
+        let code = read_server_frames(io::Cursor::new(bytes), tx)
             .await
             .expect("dropped stdout receiver ends the loop cleanly");
         assert_eq!(code, None);
@@ -549,7 +451,7 @@ mod tests {
         let bytes = framed(&ServerFrame::StderrBytes(b"err".to_vec()));
         let (tx, rx) = mpsc::channel(8);
         drop(rx);
-        let code = read_server_frames(io::Cursor::new(bytes), tx, None, None)
+        let code = read_server_frames(io::Cursor::new(bytes), tx)
             .await
             .expect("dropped stderr receiver ends the loop cleanly");
         assert_eq!(code, None);

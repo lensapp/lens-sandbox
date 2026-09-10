@@ -3,7 +3,8 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::host_net::{HostFiles, HostNetwork, Neighbors, read_active_leases};
+use super::host_net::{HostFiles, HostNetwork, HostNetworkSource, Neighbors, read_active_leases};
+use super::net_bootstrap::{BootstrapError, Bootstrapped};
 use crate::clock::Clock;
 use lns_session::GuestNet;
 
@@ -12,7 +13,7 @@ pub mod real;
 /// Off by default: an address lns picks can still be leased to someone else's guest later, and that race has no fix on macOS 15 (see `docs/running-workloads.md`).
 pub const ENABLE_ENV: &str = "LNS_STATIC_GUEST_NET";
 
-/// The guest cannot ask again once its kernel command line is built, so it carries spares.
+/// The guest picks from what it is sent without asking again, so it is sent spares.
 pub const CANDIDATES_PER_GUEST: usize = 3;
 
 /// A guest that keeps its hardware address keeps whatever the host has learned about it, so the address is derived from the run rather than drawn at random.
@@ -79,6 +80,8 @@ impl std::error::Error for AllocError {}
 pub enum ReserveError {
     Network(std::io::Error),
     Alloc(AllocError),
+    Bootstrap(BootstrapError),
+    Select(SelectError),
 }
 
 impl ReserveError {
@@ -87,6 +90,7 @@ impl ReserveError {
             Self::Network(_) => "host_network_undiscoverable",
             Self::Alloc(AllocError::Exhausted { .. }) => "host_addresses_exhausted",
             Self::Alloc(_) => "host_address_state_unreadable",
+            Self::Bootstrap(_) | Self::Select(_) => "guest_address_not_applied",
         }
     }
 
@@ -103,26 +107,115 @@ impl std::fmt::Display for ReserveError {
         match self {
             Self::Network(e) => write!(f, "the host shared network could not be discovered: {e}"),
             Self::Alloc(e) => write!(f, "{e}"),
+            Self::Bootstrap(e) => write!(f, "{e}"),
+            Self::Select(e) => write!(
+                f,
+                "the address the guest reported is not the one the host holds for it: {e}"
+            ),
         }
     }
 }
 
 impl std::error::Error for ReserveError {}
 
-/// The one reservation path both boot paths take: discover the network the guest will be attached to, then reserve on it.
+/// The one reservation path both boot paths take: observe the shared network the running VMM brought up, then reserve on it. There is nothing to read before the VMM starts — `bridge100` is created by the first guest attached to it — so this is asked afterwards and never guessed at.
 pub async fn reserve_on(
     allocator: &Allocator,
-    host: &crate::vm::host_net::HostView<'_>,
+    live: &dyn HostNetworkSource,
     owner: &str,
     mac: &str,
     attempts: usize,
     retry: Duration,
 ) -> Result<GuestNet, ReserveError> {
-    let network = crate::vm::host_net::host_network_for_boot(host, attempts, retry)
+    let network = crate::vm::host_net::observe_host_network(live, attempts, retry)
         .await
         .map_err(ReserveError::Network)?;
     allocator.set_network(network);
     allocator.reserve(owner, mac).map_err(ReserveError::Alloc)
+}
+
+/// How long the host waits for the shared network the VMM is bringing up, and for the guest to answer the plan it is sent.
+#[derive(Debug, Clone, Copy)]
+pub struct BootTiming {
+    pub attempts: usize,
+    pub retry: Duration,
+    pub reply: Duration,
+}
+
+/// The address a guest is running on, and the reservation narrowed to it.
+#[derive(Debug)]
+pub struct Addressed {
+    pub net: GuestNet,
+    pub address: Ipv4Addr,
+}
+
+/// Why no workload started: the host could not address the guest, or the guest named its own reason for taking no address.
+#[derive(Debug)]
+pub enum AddressError {
+    Reserve(ReserveError),
+    Refused(lns_session::BrokerExitReason),
+}
+
+impl std::fmt::Display for AddressError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reserve(e) => write!(f, "{e}"),
+            Self::Refused(reason) => write!(f, "{}", reason.summary()),
+        }
+    }
+}
+
+impl std::error::Error for AddressError {}
+
+/// Everything between a started VMM and a started workload: observe the network the VMM brought up, reserve on it, tell the guest over the control channel, and narrow the reservation to the address the guest proved it could take. A guest that answers nothing usable holds nothing.
+pub async fn address_guest<S, F, Fut>(
+    allocator: &Allocator,
+    live: &dyn HostNetworkSource,
+    connect: F,
+    owner: &str,
+    mac: &str,
+    timing: BootTiming,
+) -> Result<Addressed, AddressError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+{
+    let net = reserve_on(allocator, live, owner, mac, timing.attempts, timing.retry)
+        .await
+        .map_err(AddressError::Reserve)?;
+    let outcome = bootstrap_guest(connect, &net, timing.reply).await;
+    let address = match outcome {
+        Ok(Bootstrapped::Applied(address)) => address,
+        Ok(Bootstrapped::Refused(reason)) => {
+            allocator.release(owner);
+            return Err(AddressError::Refused(reason));
+        }
+        Err(e) => {
+            allocator.release(owner);
+            return Err(AddressError::Reserve(ReserveError::Bootstrap(e)));
+        }
+    };
+    if let Err(e) = allocator.select(owner, address) {
+        allocator.release(owner);
+        return Err(AddressError::Reserve(ReserveError::Select(e)));
+    }
+    crate::log::info!("Address", "guest assigned {address}");
+    Ok(Addressed { net, address })
+}
+
+async fn bootstrap_guest<S, F, Fut>(
+    connect: F,
+    net: &GuestNet,
+    reply: Duration,
+) -> Result<Bootstrapped, BootstrapError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+{
+    let stream = connect().await.map_err(BootstrapError::Io)?;
+    crate::vm::net_bootstrap::configure(stream, net, reply).await
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -316,10 +409,7 @@ impl ConflictSource for Allocator {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::vm::host_net::{
-        HostView, LEASES_PATH,
-        tests::{FakeHostFiles, FakeNetworkMemory},
-    };
+    use crate::vm::host_net::{LEASES_PATH, tests::FakeHostFiles};
 
     struct FixedClock(u64);
     impl Clock for FixedClock {
@@ -419,56 +509,53 @@ pub(crate) mod tests {
         assert_eq!(allocator.reserved().len(), 2);
     }
 
-    #[tokio::test]
-    async fn a_workload_and_a_provisioner_both_boot_first_on_a_host_with_no_bridge_yet() {
-        use crate::vm::host_net::{HostNetworkSource, VMNET_PLIST_PATH};
-
-        struct AbsentBridge;
-        impl HostNetworkSource for AbsentBridge {
-            fn observe(&self) -> std::io::Result<String> {
-                Err(std::io::Error::other("ifconfig bridge100 exited with 1"))
-            }
+    struct Bridge(&'static str);
+    impl crate::vm::host_net::HostNetworkSource for Bridge {
+        fn observe(&self) -> std::io::Result<String> {
+            Ok(self.0.to_string())
         }
+    }
 
-        let declared = "<plist><dict>
-            <key>Shared_Net_Address</key><string>192.168.66.1</string>
-            <key>Shared_Net_Mask</key><string>255.255.255.0</string>
-            </dict></plist>";
+    struct BridgeAfter(std::sync::atomic::AtomicUsize, usize);
+    impl crate::vm::host_net::HostNetworkSource for BridgeAfter {
+        fn observe(&self) -> std::io::Result<String> {
+            let seen = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if seen < self.1 {
+                return Err(std::io::Error::other("ifconfig bridge100 exited with 1"));
+            }
+            Ok("\tinet 192.168.66.1 netmask 0xffffff00 broadcast 192.168.66.255".to_string())
+        }
+    }
+
+    const LIVE: &str = "\tinet 192.168.66.1 netmask 0xffffff00 broadcast 192.168.66.255";
+
+    #[tokio::test]
+    async fn a_workload_and_a_provisioner_are_both_addressed_on_the_network_the_vmm_brought_up() {
         let allocator = allocator_with(
             FakeHostFiles::new().with(LEASES_PATH, ""),
             Vec::new(),
             1_000,
         );
-        let files = FakeHostFiles::new().with(VMNET_PLIST_PATH, declared);
-
         let workload = reserve_on(
             &allocator,
-            &HostView {
-                live: &AbsentBridge,
-                files: &files,
-                memory: &FakeNetworkMemory::empty(),
-            },
+            &Bridge(LIVE),
             "run-a",
             "52:54:00:00:00:01",
             20,
             Duration::from_secs(10),
         )
         .await
-        .expect("the very first guest is the one that creates bridge100");
+        .expect("the guest is addressed on the network its own boot brought up");
         let provisioner = reserve_on(
             &allocator,
-            &HostView {
-                live: &AbsentBridge,
-                files: &files,
-                memory: &FakeNetworkMemory::empty(),
-            },
+            &Bridge(LIVE),
             "run-a/tools",
             "52:54:00:00:00:11",
             20,
             Duration::from_secs(10),
         )
         .await
-        .expect("a sessionless provisioner boots the same way");
+        .expect("a sessionless provisioner is addressed the same way");
 
         assert_eq!(
             workload.candidates,
@@ -488,45 +575,23 @@ pub(crate) mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_first_static_boot_is_addressed_when_the_declaration_is_root_only() {
-        use crate::vm::host_net::{HostNetwork, HostNetworkSource, VMNET_PLIST_PATH};
-
-        struct AbsentBridge;
-        impl HostNetworkSource for AbsentBridge {
-            fn observe(&self) -> std::io::Result<String> {
-                Err(std::io::Error::other("ifconfig bridge100 exited with 1"))
-            }
-        }
-
-        let files = FakeHostFiles::new().with(LEASES_PATH, "").failing(
-            VMNET_PLIST_PATH,
-            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-        );
-        let memory = FakeNetworkMemory::holding(HostNetwork {
-            network: Ipv4Addr::new(192, 168, 66, 0),
-            prefix_len: 24,
-            gateway: Ipv4Addr::new(192, 168, 66, 1),
-        });
+    #[tokio::test(start_paused = true)]
+    async fn a_bridge_the_vmm_is_still_creating_is_waited_for_rather_than_guessed_at() {
+        let live = BridgeAfter(std::sync::atomic::AtomicUsize::new(0), 3);
         let net = reserve_on(
             &allocator_with(
                 FakeHostFiles::new().with(LEASES_PATH, ""),
                 Vec::new(),
                 1_000,
             ),
-            &HostView {
-                live: &AbsentBridge,
-                files: &files,
-                memory: &memory,
-            },
+            &live,
             "run-a",
             "52:54:00:00:00:01",
-            3,
-            Duration::from_secs(2),
+            20,
+            Duration::from_millis(250),
         )
         .await
-        .expect("a stock macOS host keeps the declaration to root, and the guest still needs one");
-        assert_eq!(net.candidates[0], Ipv4Addr::new(192, 168, 66, 254));
+        .expect("the bridge appears as the guest attaches to it");
         assert_eq!(net.gateway, Ipv4Addr::new(192, 168, 66, 1));
     }
 
@@ -555,6 +620,21 @@ pub(crate) mod tests {
             explained.contains(ENABLE_ENV),
             "no remedy named: {explained}"
         );
+
+        let unanswered = ReserveError::Bootstrap(
+            crate::vm::net_bootstrap::BootstrapError::Timeout(Duration::from_secs(20)),
+        );
+        assert_eq!(
+            unanswered.as_str(),
+            "guest_address_not_applied",
+            "a guest that never applied the plan is its own failure, not an exhausted host"
+        );
+        let unheld = ReserveError::Select(SelectError::UnknownOwner);
+        assert_eq!(unheld.as_str(), "guest_address_not_applied");
+        assert!(
+            unheld.to_string().contains("not the one the host holds"),
+            "{unheld}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -570,11 +650,7 @@ pub(crate) mod tests {
 
         let error = reserve_on(
             &empty_host(),
-            &HostView {
-                live: &AbsentBridge,
-                files: &FakeHostFiles::new(),
-                memory: &FakeNetworkMemory::empty(),
-            },
+            &AbsentBridge,
             "run-a",
             "52:54:00:00:00:01",
             2,
@@ -1064,6 +1140,238 @@ pub(crate) mod tests {
         assert!(!enabled(|_| None));
         assert!(!enabled(|_| Some("0".into())));
         assert!(enabled(|key| (key == ENABLE_ENV).then(|| "1".to_string())));
+    }
+
+    /// A guest that answers the plan it is sent with `reply`.
+    fn scripted_guest(reply: Option<lns_session::ServerFrame>) -> tokio::io::DuplexStream {
+        let (host, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut len = [0u8; 4];
+            tokio::io::AsyncReadExt::read_exact(&mut server, &mut len)
+                .await
+                .expect("the host sends the plan first");
+            let mut body = vec![0u8; lns_session::decode_length_prefix(&len).expect("length")];
+            tokio::io::AsyncReadExt::read_exact(&mut server, &mut body)
+                .await
+                .expect("the plan body");
+            if let Some(frame) = reply {
+                let bytes = lns_session::encode_frame(&frame).expect("encode");
+                tokio::io::AsyncWriteExt::write_all(&mut server, &bytes)
+                    .await
+                    .expect("answer the host");
+                tokio::io::AsyncWriteExt::flush(&mut server)
+                    .await
+                    .expect("flush");
+                std::future::pending::<()>().await;
+            }
+        });
+        host
+    }
+
+    fn timing() -> BootTiming {
+        BootTiming {
+            attempts: 2,
+            retry: Duration::from_millis(250),
+            reply: Duration::from_secs(20),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_guest_is_told_the_plan_and_the_reservation_narrows_to_the_address_it_took() {
+        let allocator = allocator_with(
+            FakeHostFiles::new().with(LEASES_PATH, ""),
+            Vec::new(),
+            1_000,
+        );
+        let taken = Ipv4Addr::new(192, 168, 66, 253);
+        let addressed = address_guest(
+            &allocator,
+            &Bridge(LIVE),
+            || async {
+                Ok(scripted_guest(Some(
+                    lns_session::ServerFrame::NetworkApplied {
+                        address: taken.to_string(),
+                    },
+                )))
+            },
+            "run-a",
+            "52:54:00:00:00:01",
+            timing(),
+        )
+        .await
+        .expect("the guest took an address the host reserved for it");
+        assert_eq!(addressed.address, taken);
+        assert_eq!(addressed.net.gateway, Ipv4Addr::new(192, 168, 66, 1));
+        assert_eq!(
+            allocator.reserved(),
+            vec![Reservation {
+                owner: "run-a".into(),
+                mac: "52:54:00:00:00:01".into(),
+                candidates: vec![taken],
+            }],
+            "the spares the guest did not take go back for the next guest"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_never_answers_gives_the_address_back_instead_of_holding_it() {
+        let allocator = allocator_with(
+            FakeHostFiles::new().with(LEASES_PATH, ""),
+            Vec::new(),
+            1_000,
+        );
+        let error = address_guest(
+            &allocator,
+            &Bridge(LIVE),
+            || async { Ok(scripted_guest(None)) },
+            "run-a",
+            "52:54:00:00:00:01",
+            BootTiming {
+                reply: Duration::from_millis(50),
+                ..timing()
+            },
+        )
+        .await
+        .expect_err("a guest that reports nothing has taken nothing");
+        assert!(
+            matches!(
+                error,
+                AddressError::Reserve(ReserveError::Bootstrap(
+                    crate::vm::net_bootstrap::BootstrapError::Disconnected
+                ))
+            ),
+            "{error:?}"
+        );
+        assert!(
+            allocator.reserved().is_empty(),
+            "an address no guest took must not be held against the next run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_refuses_the_plan_stops_the_run_with_its_own_reason() {
+        let allocator = allocator_with(
+            FakeHostFiles::new().with(LEASES_PATH, ""),
+            Vec::new(),
+            1_000,
+        );
+        let reason = lns_session::BrokerExitReason::NoStaticAddress {
+            offered: vec!["192.168.66.254".into()],
+        };
+        let error = address_guest(
+            &allocator,
+            &Bridge(LIVE),
+            || async {
+                Ok(scripted_guest(Some(lns_session::ServerFrame::Refused(
+                    reason.clone(),
+                ))))
+            },
+            "run-a",
+            "52:54:00:00:00:01",
+            timing(),
+        )
+        .await
+        .expect_err("a refusal is not a booted guest");
+        assert!(
+            matches!(&error, AddressError::Refused(got) if got.as_str() == "no_static_address"),
+            "{error:?}"
+        );
+        assert!(
+            allocator.reserved().is_empty(),
+            "{:?}",
+            allocator.reserved()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_guest_the_host_cannot_reach_holds_no_address_and_starts_no_workload() {
+        let allocator = allocator_with(
+            FakeHostFiles::new().with(LEASES_PATH, ""),
+            Vec::new(),
+            1_000,
+        );
+        let error = address_guest(
+            &allocator,
+            &Bridge(LIVE),
+            || async {
+                Err::<tokio::io::DuplexStream, _>(std::io::Error::other("vsock connect refused"))
+            },
+            "run-a",
+            "52:54:00:00:00:01",
+            timing(),
+        )
+        .await
+        .expect_err("an unreachable guest is not an addressed one");
+        assert!(
+            error.to_string().contains("vsock connect refused"),
+            "{error}"
+        );
+        assert!(allocator.reserved().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_that_cannot_discover_its_network_never_opens_a_control_channel() {
+        struct AbsentBridge;
+        impl crate::vm::host_net::HostNetworkSource for AbsentBridge {
+            fn observe(&self) -> std::io::Result<String> {
+                Err(std::io::Error::other("ifconfig bridge100 exited with 1"))
+            }
+        }
+        let error = address_guest(
+            &empty_host(),
+            &AbsentBridge,
+            || async {
+                panic!("nothing is sent to a guest before the host knows what to send it");
+                #[allow(unreachable_code)]
+                Ok::<tokio::io::DuplexStream, std::io::Error>(unreachable!())
+            },
+            "run-a",
+            "52:54:00:00:00:01",
+            timing(),
+        )
+        .await
+        .expect_err("an undiscoverable network addresses nothing");
+        assert!(
+            matches!(error, AddressError::Reserve(ReserveError::Network(_))),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_address_the_guest_took_is_reported_into_its_own_runs_log() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let frames = crate::log::testing::capture_run_frames(|| {
+            runtime.block_on(async {
+                address_guest(
+                    &allocator_with(
+                        FakeHostFiles::new().with(LEASES_PATH, ""),
+                        Vec::new(),
+                        1_000,
+                    ),
+                    &Bridge(LIVE),
+                    || async {
+                        Ok(scripted_guest(Some(
+                            lns_session::ServerFrame::NetworkApplied {
+                                address: "192.168.66.254".into(),
+                            },
+                        )))
+                    },
+                    "run-a",
+                    "52:54:00:00:00:01",
+                    timing(),
+                )
+                .await
+                .expect("the guest reported its address");
+            });
+        });
+        let rendered = format!("{frames:?}");
+        assert!(
+            rendered.contains("guest assigned 192.168.66.254"),
+            "the user reads the address in their own run's log: {rendered}"
+        );
     }
 }
 

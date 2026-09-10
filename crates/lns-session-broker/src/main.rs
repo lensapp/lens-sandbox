@@ -1,3 +1,4 @@
+mod bootstrap;
 mod exit;
 mod forker;
 mod forward;
@@ -43,7 +44,6 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 fn run() -> Result<i32, String> {
     let network = network::narrate(network::set_up());
-    let applied_address = network.applied_address.clone();
     eprintln!("lns-session-broker: {}", network.line);
     // Only a lease stashes DNS servers for the broker to read back; a host-assigned address carries its own.
     if network.dhcp_dns
@@ -66,6 +66,17 @@ fn run() -> Result<i32, String> {
 
     let listen_fd = vsock::listen(BROKER_PORT).map_err(|e| format!("listen: {e}"))?;
 
+    if network.awaiting_bootstrap {
+        let conn = vsock::accept(listen_fd).map_err(|e| format!("accept(bootstrap): {e}"))?;
+        let outcome = bootstrap::respond(session::read_client_frame(conn), network::apply);
+        eprintln!("lns-session-broker: {}", bootstrap::narrate(&outcome));
+        let refused = matches!(outcome, bootstrap::Bootstrap::Refused(_));
+        session::answer_bootstrap(conn, &bootstrap::reply(&outcome));
+        if refused {
+            return Ok(1);
+        }
+    }
+
     let primary_conn = vsock::accept(listen_fd).map_err(|e| format!("accept(primary): {e}"))?;
 
     if let Some(reason) = network.refusal {
@@ -82,8 +93,7 @@ fn run() -> Result<i32, String> {
     });
 
     let forker = forker::LibcForker;
-    let primary_outcome =
-        session::handle_session(primary_conn, None, &forker, applied_address.as_deref());
+    let primary_outcome = session::handle_session(primary_conn, None, &forker);
 
     // SAFETY: listen_fd is owned and unused after this block.
     unsafe {
@@ -141,7 +151,7 @@ fn run_exec_session(conn: std::os::fd::RawFd, pid_slot: Arc<Mutex<Option<libc::p
         }
     });
     let forker = forker::LibcForker;
-    if let Err(e) = session::handle_session(conn, Some(tx), &forker, None) {
+    if let Err(e) = session::handle_session(conn, Some(tx), &forker) {
         eprintln!("lns-session-broker: exec session ended: {e}");
     }
 }

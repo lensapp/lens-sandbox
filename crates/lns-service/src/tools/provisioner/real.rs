@@ -171,11 +171,9 @@ async fn run_provisioner(
     let run_as = vm::resolve_run_as(Some("0"), Some(0), None, None);
     let argv = vec!["/bin/sh".to_string(), DRIVER.to_string()];
     let provisioner_owner = format!("{scratch_id}/tools");
-    let address = vm::guest_addr::real::reserve(&provisioner_owner, &provisioner_owner)
-        .await
-        .context("reserving an address on the host network for the tool provisioner")?;
+    let planned_mac = vm::guest_addr::real::planned_mac(&provisioner_owner);
     let exec = vm::ExecSpec::for_run(&run_as, None, &argv, rootfs.config.as_ref(), None)
-        .with_guest_net(address.as_ref().map(|held| &held.net));
+        .with_guest_net_bootstrap(planned_mac.is_some());
 
     #[cfg(target_os = "macos")]
     let console_fd = vm::diag_console::spawn(
@@ -217,13 +215,11 @@ async fn run_provisioner(
         console_fd,
         debug: false,
         exec,
-        mac: address.as_ref().map(|held| held.mac.clone()),
+        mac: planned_mac.clone(),
     };
 
-    let expected_guest_addresses = address.as_ref().map(|lease| lease.net.candidates.clone());
-    let address_selection = address.as_ref().map(vm::guest_addr::real::Lease::selection);
-    let address_monitor = address.as_ref().map(vm::guest_addr::real::Lease::monitor);
-    let mut vm_task = tokio::spawn(vm::boot_with_owner(spec, None, (address, address_monitor)));
+    let (address_tx, address_rx) = tokio::sync::oneshot::channel();
+    let mut vm_task = tokio::spawn(vm::boot_with_owner(spec, None, address_rx));
     let mut connector_rx = connector_rx;
     let connector = tokio::select! {
         biased;
@@ -238,6 +234,14 @@ async fn run_provisioner(
     };
     let _stop_guard = vm::VmStopGuard::new(connector.clone());
 
+    if let Some(mac) = &planned_mac {
+        let lease =
+            vm::guest_addr::real::address_guest(connector.as_ref(), &provisioner_owner, mac)
+                .await?;
+        let monitor = lease.monitor();
+        let _ = address_tx.send((lease, monitor));
+    }
+
     let env: Vec<String> = mise::provision_env()
         .into_iter()
         .map(|(key, value)| format!("{key}={value}"))
@@ -250,8 +254,6 @@ async fn run_provisioner(
         env,
         std::time::Duration::from_secs(timeout),
         MAX_DRIVER_OUTPUT_BYTES,
-        expected_guest_addresses,
-        address_selection,
     )
     .await
     .context("driving the provisioner install script")?;

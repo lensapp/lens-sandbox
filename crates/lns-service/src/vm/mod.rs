@@ -8,6 +8,7 @@ mod connect;
 pub mod diag_console;
 pub mod guest_addr;
 pub mod host_net;
+pub mod net_bootstrap;
 pub mod session_client;
 mod transport;
 #[cfg(target_os = "macos")]
@@ -117,11 +118,11 @@ pub struct ExecSpec {
 }
 
 impl ExecSpec {
-    /// The plan travels on the kernel command line because the guest must be addressed before any channel to the host exists.
-    pub fn with_guest_net(mut self, net: Option<&lns_session::GuestNet>) -> Self {
-        if let Some(net) = net {
+    /// Only a marker travels on the kernel command line: no address is known before the guest that creates the shared bridge is running, so the plan itself arrives later over the control channel.
+    pub fn with_guest_net_bootstrap(mut self, bootstrap: bool) -> Self {
+        if bootstrap {
             self.kernel_env
-                .push((lns_session::GUEST_NET_ENV.into(), net.to_cmdline_value()));
+                .push((lns_session::GUEST_NET_BOOTSTRAP_ENV.into(), "1".into()));
         }
         self
     }
@@ -392,7 +393,6 @@ pub async fn boot_with_owner<T: Send + 'static>(
 ) -> Result<()> {
     let backend = backend.unwrap_or_else(detect_backend);
     log::debug!("starting microVM via {} backend", backend.name());
-    host_net::real::learn_shared_network();
     let handle = tokio::task::spawn_blocking(move || {
         let _owner = owner;
         backend.run(spec)
@@ -452,6 +452,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn what_the_run_acquires_after_the_vmm_started_is_still_released_with_it() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let (owner_tx, owner_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(boot_with_owner(
+            dummy_vmspec(),
+            Some(Box::new(BlockingBackend {
+                started: started_tx,
+                finish: finish_rx,
+            })),
+            owner_rx,
+        ));
+        tokio::task::yield_now().await;
+        started_rx.recv().expect("VMM started");
+        owner_tx
+            .send(DropSignal(dropped_tx))
+            .map_err(|_| ())
+            .expect("the running VMM still owns its slot");
+        tokio::task::yield_now().await;
+        assert!(
+            dropped_rx.try_recv().is_err(),
+            "an address is held for as long as the guest holding it runs"
+        );
+        finish_tx.send(Ok(())).expect("finish VMM");
+        task.await.expect("boot task").expect("VMM result");
+        dropped_rx
+            .recv()
+            .expect("what the run acquired after boot is released with the VMM, not before");
+    }
+
+    #[tokio::test]
     async fn vm_owner_is_released_after_a_failed_launch() {
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
@@ -486,33 +518,29 @@ mod tests {
     }
 
     #[test]
-    fn a_reserved_plan_reaches_the_guest_on_the_kernel_command_line() {
-        let net = lns_session::GuestNet {
-            candidates: vec![
-                "192.168.64.254".parse().unwrap(),
-                "192.168.64.253".parse().unwrap(),
-            ],
-            prefix_len: 24,
-            gateway: "192.168.64.1".parse().unwrap(),
-            dns: vec!["192.168.64.1".parse().unwrap()],
-        };
-        let spec =
-            ExecSpec::from_image_config(None, None, &["true".into()]).with_guest_net(Some(&net));
+    fn a_static_boot_carries_a_marker_and_never_an_address() {
+        let spec = ExecSpec::from_image_config(None, None, &["true".into()])
+            .with_guest_net_bootstrap(true);
         let value = spec
             .kernel_env
             .iter()
-            .find(|(k, _)| k == lns_session::GUEST_NET_ENV)
+            .find(|(k, _)| k == lns_session::GUEST_NET_BOOTSTRAP_ENV)
             .map(|(_, v)| v.clone())
-            .expect("the guest is told which addresses it may take");
-        assert!(!value.contains(char::is_whitespace), "{value}");
-        assert_eq!(lns_session::GuestNet::parse(&value).unwrap(), net);
+            .expect("the guest is told to wait for a plan rather than to configure itself");
+        assert_eq!(value, "1");
+        assert!(
+            !spec.kernel_env.iter().any(|(_, v)| v.contains('.')),
+            "no address is known this early: {:?}",
+            spec.kernel_env
+        );
 
-        let dhcp = ExecSpec::from_image_config(None, None, &["true".into()]).with_guest_net(None);
+        let dhcp = ExecSpec::from_image_config(None, None, &["true".into()])
+            .with_guest_net_bootstrap(false);
         assert!(
             !dhcp
                 .kernel_env
                 .iter()
-                .any(|(k, _)| k == lns_session::GUEST_NET_ENV),
+                .any(|(k, _)| k == lns_session::GUEST_NET_BOOTSTRAP_ENV),
             "a run with no reservation boots exactly as it did before"
         );
     }

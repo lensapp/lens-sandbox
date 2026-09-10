@@ -1060,41 +1060,42 @@ the guest got no address from the host DHCP server
 ```
 
 There is a second, **opt-in** path. With `LNS_STATIC_GUEST_NET=1` set in the
-environment `lns-service` starts in, the host picks the address itself and hands
-it to the guest on its kernel command line, so the guest is configured before it
-ever sends a packet:
+environment `lns-service` starts in, the host picks the address itself and tells
+the guest over the microVM's own control channel, before anything the run asked
+for is started:
 
 ```sh
 LNS_STATIC_GUEST_NET=1 lns service start
 ```
 
-What the host does, per booting guest:
+The guest boots with no address and no DHCP client — its kernel command line
+carries a marker and never an address — and waits. The host then, per booting
+guest:
 
-- reads the shared network's own parameters — the address and netmask of the
-  live `bridge100` interface when a guest is already running; otherwise the
-  `Shared_Net_Address` / `Shared_Net_Mask` that
-  `/Library/Preferences/SystemConfiguration/com.apple.vmnet.plist` declares the
-  network will be created with, when the user `lns-service` runs as may read it
-  (on a stock macOS host that file is `root:wheel` and mode `0640`, so usually
-  it may not); and otherwise the parameters this host was last seen running,
-  which lns records in `~/.lns/host-network` whenever a guest brings the shared
-  network up — including the ordinary DHCP runs, so one normal run is enough to
-  teach a host that has never run a static one. That last source is what
-  addresses the first guest after the shared network has been torn down. If the
-  network is not running, not readable and never observed, the run stops with
-  all three named; lns never assumes a subnet, and it never writes any of
-  Apple's files;
+- reads the shared network's own parameters from the live `bridge100` interface.
+  That interface exists because this guest booted and attached to it, which is
+  why the host asks now rather than before starting the VM: nothing readable
+  describes the network earlier, and lns never assumes a subnet. A guest still
+  bringing the bridge up is waited for; a bridge that never appears stops the
+  run with that named;
 - excludes the network and broadcast addresses, the gateway, every unexpired
   lease in `/var/db/dhcpd_leases`, every address answering ARP, and every
   address already reserved for another guest. The lease file and the neighbour
   table are read from the host first; the reservations of other guests are read
   and the new one written under one lock, so two guests booting together cannot
   pick the same address;
-- reserves three candidates from the top of the range and gives the guest a
-  stable hardware address derived from its run id.
+- reserves three candidates from the top of the range, having given the guest a
+  stable hardware address derived from its run id;
+- sends those candidates, the prefix, the gateway and the resolver to the guest
+  and waits for it to report the one it took. Only then does the run's workload
+  start.
 
-If the host cannot address the guest at all — no discoverable shared network, an
-unreadable lease or neighbour table, or a range with nothing free — the run
+This works on a cold host. Nothing is remembered between runs, no prior DHCP
+boot is needed, and no file of Apple's is read or written.
+
+If the host cannot address the guest at all — no shared network, an unreadable
+lease or neighbour table, a range with nothing free, a guest that never answers,
+or a guest that answers with an address the host does not hold for it — the run
 stops before the workload starts, prints the cause and a remedy, records one
 named failure in the audit log, and exits 125.
 
@@ -1103,8 +1104,9 @@ The address the guest ends up using is printed by `lns run` as
 
 In the guest, the broker takes the first candidate that is silent to an ARP
 probe, announces it, and checks the gateway answers. If every candidate is
-taken, or the gateway does not answer, the run stops with a named reason — it
-never falls back to DHCP, so a guest is never quietly addressed by someone else.
+taken, or the gateway does not answer, it reports that named reason back and the
+run stops — it never falls back to DHCP, so a guest is never quietly addressed
+by someone else.
 
 **The limitation you are opting into.** macOS 15 offers no way to tell Apple's
 DHCP server that an address is spoken for. lns picks from the top of the range

@@ -61,13 +61,7 @@ async fn run_session(
 
     let (stop_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
-    let reader_handle = super::spawn_server_frame_reader(
-        read_half,
-        frame_tx,
-        params.expected_guest_addresses,
-        params.address_selection,
-        stop_tx.clone(),
-    );
+    let reader_handle = super::spawn_server_frame_reader(read_half, frame_tx, stop_tx.clone());
 
     log::info!("SessionReady", "");
 
@@ -92,8 +86,6 @@ pub async fn capture_session_output(
         Vec::new(),
         CAPTURE_TIMEOUT,
         MAX_CAPTURE_BYTES,
-        None,
-        None,
     )
     .await?;
     anyhow::ensure!(code == 0, "capture command exited with code {code}");
@@ -107,8 +99,6 @@ pub async fn capture_session_exec(
     env: Vec<String>,
     timeout: std::time::Duration,
     max_bytes: usize,
-    expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
-    address_selection: Option<crate::vm::guest_addr::real::AddressSelection>,
 ) -> Result<(super::CapturedStreams, i32)> {
     let fd = connector
         .connect(lns_session::BROKER_PORT, std::time::Duration::from_secs(10))
@@ -124,8 +114,6 @@ pub async fn capture_session_exec(
         initial_winsize: None,
         confine: false,
         dies_with_client: false,
-        expected_guest_addresses,
-        address_selection,
     };
     let (frame_tx, mut frame_rx) = mpsc::channel::<WireFrame>(64);
     let (input_keepalive, input_rx) = mpsc::channel::<SessionInput>(1);
@@ -188,7 +176,7 @@ async fn send_client_frame(
     guard.write_all(&bytes).await.context("write client frame")
 }
 
-fn set_nonblocking(fd: &OwnedFd) -> std::io::Result<()> {
+pub(crate) fn set_nonblocking(fd: &OwnedFd) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     let raw = fd.as_raw_fd();
     // SAFETY: fd is borrowed for the duration of the fcntl calls.

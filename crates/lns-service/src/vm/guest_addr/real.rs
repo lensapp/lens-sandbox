@@ -8,7 +8,7 @@ use lns_session::GuestNet;
 
 use super::{Allocator, Conflict};
 use crate::log;
-use crate::vm::host_net::real::{RealHostFiles, RealHostNetwork, RealNeighbors, RealNetworkMemory};
+use crate::vm::host_net::real::{RealHostFiles, RealHostNetwork, RealNeighbors};
 
 fn allocator() -> &'static Arc<Allocator> {
     static ALLOCATOR: OnceLock<Arc<Allocator>> = OnceLock::new();
@@ -21,9 +21,10 @@ fn allocator() -> &'static Arc<Allocator> {
     })
 }
 
-/// How long the host waits for a bridge another guest is bringing up before it falls back to what vmnet declares.
-const BRIDGE_ATTEMPTS: usize = 20;
+/// How long the host waits for the shared bridge its own guest is bringing up, and for that guest to report the address it took.
+const BRIDGE_ATTEMPTS: usize = 40;
 const BRIDGE_RETRY: Duration = Duration::from_millis(250);
+const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Only the macOS backend attaches a NAT interface, so a Linux guest keeps its no-interface behaviour whatever the environment says.
 pub const SUPPORTED: bool = cfg!(target_os = "macos");
@@ -31,33 +32,13 @@ pub const SUPPORTED: bool = cfg!(target_os = "macos");
 /// A reservation lives exactly as long as the guest that holds it: a failed launch gives the address back at once.
 pub struct Lease {
     owner: String,
-    pub mac: String,
     pub net: GuestNet,
+    pub address: std::net::Ipv4Addr,
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
         release(&self.owner);
-    }
-}
-
-#[derive(Clone)]
-pub struct AddressSelection {
-    allocator: Arc<Allocator>,
-    owner: String,
-}
-
-impl AddressSelection {
-    pub fn new(allocator: Arc<Allocator>, owner: impl Into<String>) -> Self {
-        Self {
-            allocator,
-            owner: owner.into(),
-        }
-    }
-
-    pub fn confirm(&self, address: std::net::Ipv4Addr) -> Result<()> {
-        self.allocator.select(&self.owner, address)?;
-        Ok(())
     }
 }
 
@@ -74,10 +55,6 @@ impl Drop for ConflictMonitor {
 }
 
 impl Lease {
-    pub fn selection(&self) -> AddressSelection {
-        AddressSelection::new(allocator().clone(), self.owner.clone())
-    }
-
     pub fn monitor(&self) -> ConflictMonitor {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let report: Arc<dyn Fn(Conflict) + Send + Sync> = Arc::new(|conflict| {
@@ -102,40 +79,50 @@ impl Lease {
     }
 }
 
-/// The only entry point a boot path uses: `None` means this build boots on DHCP, exactly as it did before.
-pub async fn reserve(owner: &str, vm_id: &str) -> Result<Option<Lease>> {
-    if !SUPPORTED || !super::enabled(|k| std::env::var(k).ok()) {
-        return Ok(None);
-    }
-    let mac = super::mac_for(vm_id);
-    let net = super::reserve_on(
+/// The hardware address a run's guest will boot with, or `None` when this build boots on DHCP exactly as it did before. Known before the VMM starts; the addresses it will be offered are not.
+pub fn planned_mac(vm_id: &str) -> Option<String> {
+    (SUPPORTED && super::enabled(|k| std::env::var(k).ok())).then(|| super::mac_for(vm_id))
+}
+
+/// Address a guest that is already running: the bridge it is attached to only exists because it booted, so this is the first moment the host can see the network at all.
+pub async fn address_guest(
+    connector: &dyn crate::vm::GuestTransport,
+    owner: &str,
+    mac: &str,
+) -> Result<Lease> {
+    let addressed = super::address_guest(
         allocator(),
-        &crate::vm::host_net::HostView {
-            live: &RealHostNetwork,
-            files: &RealHostFiles,
-            memory: &RealNetworkMemory,
+        &RealHostNetwork,
+        || async {
+            let fd = connector
+                .connect(lns_session::BROKER_PORT, Duration::from_secs(10))
+                .await
+                .map_err(std::io::Error::other)?;
+            bootstrap_stream(fd)
         },
         owner,
-        &mac,
-        BRIDGE_ATTEMPTS,
-        BRIDGE_RETRY,
+        mac,
+        super::BootTiming {
+            attempts: BRIDGE_ATTEMPTS,
+            retry: BRIDGE_RETRY,
+            reply: REPLY_TIMEOUT,
+        },
     )
     .await?;
-    log::info!(
-        "Address",
-        "{} via {} for {owner}",
-        net.candidates
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(" or "),
-        net.gateway
-    );
-    Ok(Some(Lease {
+    Ok(Lease {
         owner: owner.to_string(),
-        mac,
-        net,
-    }))
+        net: addressed.net,
+        address: addressed.address,
+    })
+}
+
+fn bootstrap_stream(fd: std::os::fd::RawFd) -> std::io::Result<tokio::net::UnixStream> {
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: the transport hands ownership of fd over; OwnedFd closes it on drop.
+    let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    crate::vm::session_client::real::set_nonblocking(&owned)?;
+    tokio::net::UnixStream::from_std(std::os::unix::net::UnixStream::from(owned))
 }
 
 fn release(owner: &str) {

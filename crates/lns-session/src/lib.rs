@@ -8,8 +8,8 @@ pub const BROKER_PORT: u32 = 1029;
 /// Whether this run's policy allows egress, so the guest knows if a network failure is fatal or merely logged.
 pub const EGRESS_ALLOWED_ENV: &str = "LENS_SANDBOX_EGRESS_ALLOWED";
 
-/// The address plan the host reserved for this guest, absent when the host leaves the guest to DHCP.
-pub const GUEST_NET_ENV: &str = "LENS_SANDBOX_NET";
+/// Set when the host addresses this guest itself: the guest brings no network up of its own and serves nothing but the bootstrap control path until the host sends it a plan.
+pub const GUEST_NET_BOOTSTRAP_ENV: &str = "LENS_SANDBOX_NET_BOOTSTRAP";
 
 pub const FORWARD_PORT: u32 = 1030;
 
@@ -57,6 +57,8 @@ pub struct ForwardHeader {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientFrame {
+    /// The only frame the guest reads before it is addressed; the host sends it once the VMM has brought the shared network up.
+    ConfigureNetwork(GuestNet),
     OpenSession {
         argv: Vec<String>,
         env: Vec<String>,
@@ -224,6 +226,23 @@ pub fn decode_length_prefix(buf: &[u8; 4]) -> Result<usize, ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn the_plan_reaches_the_guest_over_the_session_channel_after_it_has_booted() {
+        let frame = ClientFrame::ConfigureNetwork(GuestNet {
+            candidates: vec![
+                Ipv4Addr::new(192, 168, 64, 254),
+                Ipv4Addr::new(192, 168, 64, 253),
+            ],
+            prefix_len: 24,
+            gateway: Ipv4Addr::new(192, 168, 64, 1),
+            dns: vec![Ipv4Addr::new(192, 168, 64, 1)],
+        });
+        let bytes = encode_frame(&frame).expect("encode ConfigureNetwork");
+        let back: ClientFrame = decode_frame(&bytes[4..]).expect("decode ConfigureNetwork");
+        assert_eq!(back, frame);
+    }
 
     #[test]
     fn open_session_round_trip() {

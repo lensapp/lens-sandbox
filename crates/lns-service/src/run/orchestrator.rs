@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use lns_ipc::{RunImageArgs, WireFrame};
 use tokio::sync::mpsc::Sender;
 use tracing::Instrument;
@@ -500,9 +500,7 @@ async fn orchestrate(
             .and_then(|c| c.config.as_ref())
             .and_then(|c| c.user.as_deref()),
     );
-    let address = vm::guest_addr::real::reserve(&run_id, &run_id)
-        .await
-        .context("reserving an address on the host network for this guest")?;
+    let planned_mac = vm::guest_addr::real::planned_mac(&run_id);
     let exec = vm::ExecSpec::for_run(
         &run_as,
         args.entrypoint.as_deref(),
@@ -510,7 +508,7 @@ async fn orchestrate(
         image.config.as_ref(),
         Some(&session),
     )
-    .with_guest_net(address.as_ref().map(|held| &held.net));
+    .with_guest_net_bootstrap(planned_mac.is_some());
 
     #[cfg(target_os = "macos")]
     let console_fd = {
@@ -551,7 +549,7 @@ async fn orchestrate(
         console_fd,
         debug: args.debug,
         exec,
-        mac: address.as_ref().map(|held| held.mac.clone()),
+        mac: planned_mac.clone(),
     };
 
     let initial_winsize = args
@@ -612,17 +610,15 @@ async fn orchestrate(
         initial_winsize,
         confine: !SUPERVISED,
         dies_with_client: false,
-        expected_guest_addresses: address.as_ref().map(|lease| lease.net.candidates.clone()),
-        address_selection: address.as_ref().map(vm::guest_addr::real::Lease::selection),
     };
 
     let frame_tx_for_session = frame_tx.clone();
     log::progress("Booting", "microVM", 0, 0);
     let boot_start = std::time::Instant::now();
-    let address_monitor = address.as_ref().map(vm::guest_addr::real::Lease::monitor);
+    let (address_tx, address_rx) = tokio::sync::oneshot::channel();
     let mut vm_task = tokio::spawn(async move {
         let _volume_leases = volume_leases;
-        vm::boot_with_owner(spec, None, (address, address_monitor)).await
+        vm::boot_with_owner(spec, None, address_rx).await
     });
 
     let connector = tokio::select! {
@@ -657,6 +653,12 @@ async fn orchestrate(
         exec_environment,
     );
     let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
+
+    if let Some(mac) = &planned_mac {
+        let lease = vm::guest_addr::real::address_guest(connector.as_ref(), &run_id, mac).await?;
+        let monitor = lease.monitor();
+        let _ = address_tx.send((lease, monitor));
+    }
 
     log::progress("Connecting", "session", 0, 0);
     let connect_started = std::time::Instant::now();

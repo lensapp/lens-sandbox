@@ -25,12 +25,22 @@ impl Refusal {
                 summary: refusal.reason.summary(),
             });
         }
-        error
-            .downcast_ref::<crate::vm::guest_addr::ReserveError>()
-            .map(|failure| Self {
+        if let Some(failure) = error.downcast_ref::<crate::vm::guest_addr::ReserveError>() {
+            return Some(Self {
                 reason: failure.as_str().to_string(),
                 summary: failure.to_string(),
-            })
+            });
+        }
+        match error.downcast_ref::<crate::vm::guest_addr::AddressError>()? {
+            crate::vm::guest_addr::AddressError::Reserve(failure) => Some(Self {
+                reason: failure.as_str().to_string(),
+                summary: failure.to_string(),
+            }),
+            crate::vm::guest_addr::AddressError::Refused(reason) => Some(Self {
+                reason: reason.as_str().to_string(),
+                summary: reason.summary(),
+            }),
+        }
     }
 }
 
@@ -144,7 +154,11 @@ fn failure_message(error: &anyhow::Error) -> String {
     if let Some(failure) = error.downcast_ref::<crate::vm::guest_addr::ReserveError>() {
         return failure.explain();
     }
-    format!("{error:#}")
+    match error.downcast_ref::<crate::vm::guest_addr::AddressError>() {
+        Some(crate::vm::guest_addr::AddressError::Reserve(failure)) => failure.explain(),
+        Some(crate::vm::guest_addr::AddressError::Refused(reason)) => reason.explain(),
+        None => format!("{error:#}"),
+    }
 }
 
 pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result<i32>) -> i32 {
@@ -665,6 +679,40 @@ mod tests {
         let undiscoverable = format!("{:?}", rx.recv().await);
         let said = undiscoverable.contains("neither active nor declared");
         assert!(said, "{undiscoverable}");
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_refuses_its_plan_ends_the_run_with_its_own_reason_not_a_workload_code() {
+        use crate::vm::guest_addr::AddressError;
+
+        let refused = Err(anyhow::Error::new(AddressError::Refused(
+            lns_session::BrokerExitReason::NoStaticAddress {
+                offered: vec!["192.168.64.254".into()],
+            },
+        )));
+        assert_eq!(
+            refusal_of(&refused).expect("no workload ran").reason,
+            "no_static_address",
+            "the guest named the failure, so the audit records the guest's name for it"
+        );
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        assert_eq!(emit_completion(&tx, refused).await, 125);
+        let rendered = format!("{:?}", rx.recv().await);
+        assert!(rendered.contains("level: Error"), "{rendered}");
+
+        let unanswered = Err(anyhow::Error::new(AddressError::Reserve(
+            crate::vm::guest_addr::ReserveError::Bootstrap(
+                crate::vm::net_bootstrap::BootstrapError::Disconnected,
+            ),
+        )));
+        assert_eq!(
+            refusal_of(&unanswered).expect("no workload ran").reason,
+            "guest_address_not_applied"
+        );
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        assert_eq!(emit_completion(&tx, unanswered).await, 125);
+        let rendered = format!("{:?}", rx.recv().await);
+        assert!(rendered.contains("remedy:"), "{rendered}");
     }
 
     #[tokio::test]

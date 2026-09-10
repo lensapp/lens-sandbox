@@ -2,7 +2,7 @@
 
 mod real;
 #[cfg(target_os = "linux")]
-pub use real::{configure_dns, set_up};
+pub use real::{apply, configure_dns, set_up};
 
 use lns_session::{BrokerExitReason, GuestNet};
 use std::net::Ipv4Addr;
@@ -62,11 +62,11 @@ pub const ETH0_SYSFS_PATH: &str = "/sys/class/net/eth0";
 
 const ETH0: &str = "eth0";
 
-/// What the host decided about this guest's address before it booted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How this guest gets its address: on its own over DHCP, or from a host that sends it a plan once the guest is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkPlan {
     Dhcp,
-    Static(GuestNet),
+    Bootstrap,
 }
 
 /// The address the guest committed to, for the console line an operator reads.
@@ -81,8 +81,8 @@ pub struct Applied {
 #[derive(Debug)]
 pub enum NetworkResult {
     NoInterface,
+    AwaitingBootstrap,
     Dhcp,
-    Applied(Applied),
     BestEffortFailed(BrokerExitReason),
     Refused(BrokerExitReason),
 }
@@ -99,18 +99,10 @@ impl Applied {
     }
 }
 
-pub fn plan_from_env(
-    get: impl Fn(&str) -> Option<String>,
-) -> Result<NetworkPlan, BrokerExitReason> {
-    match get(lns_session::GUEST_NET_ENV) {
-        None => Ok(NetworkPlan::Dhcp),
-        Some(value) => GuestNet::parse(&value)
-            .map(NetworkPlan::Static)
-            .map_err(|e| {
-                BrokerExitReason::NetworkSetupFailed(format!(
-                    "the host address plan is unreadable: {e}"
-                ))
-            }),
+pub fn plan_from_env(get: impl Fn(&str) -> Option<String>) -> NetworkPlan {
+    match get(lns_session::GUEST_NET_BOOTSTRAP_ENV).as_deref() {
+        Some("1") => NetworkPlan::Bootstrap,
+        _ => NetworkPlan::Dhcp,
     }
 }
 
@@ -125,40 +117,43 @@ pub struct Narration {
     pub line: String,
     pub refusal: Option<BrokerExitReason>,
     pub dhcp_dns: bool,
-    pub applied_address: Option<String>,
+    /// The guest brought nothing up: it serves the bootstrap control path and waits for the host's plan.
+    pub awaiting_bootstrap: bool,
 }
 
 pub fn narrate(result: NetworkResult) -> Narration {
-    let (line, refusal, dhcp_dns, applied_address) = match result {
+    let (line, refusal, dhcp_dns, awaiting_bootstrap) = match result {
         NetworkResult::NoInterface => (
             "no network device; the guest runs without egress".to_string(),
             None,
             false,
-            None,
+            false,
         ),
-        NetworkResult::Dhcp => ("leased an address over DHCP".to_string(), None, true, None),
-        NetworkResult::Applied(applied) => {
-            let address = applied.address.to_string();
-            (applied.report(), None, false, Some(address))
-        }
+        NetworkResult::AwaitingBootstrap => (
+            "waiting for the host to send this guest its address".to_string(),
+            None,
+            false,
+            true,
+        ),
+        NetworkResult::Dhcp => ("leased an address over DHCP".to_string(), None, true, false),
         NetworkResult::BestEffortFailed(reason) => (
             format!("best-effort network setup failed: {}", reason.summary()),
             None,
             false,
-            None,
+            false,
         ),
         NetworkResult::Refused(reason) => (
             format!("refusing to start the workload: {}", reason.summary()),
             Some(reason),
             false,
-            None,
+            false,
         ),
     };
     Narration {
         line,
         refusal,
         dhcp_dns,
-        applied_address,
+        awaiting_bootstrap,
     }
 }
 
@@ -168,11 +163,7 @@ pub fn set_up_with_env(
     get: impl Fn(&str) -> Option<String>,
 ) -> NetworkResult {
     let egress_allowed = policy_allows_egress_with(&get);
-    match plan_from_env(&get) {
-        Ok(plan) => set_up_network(runner, fs, plan, egress_allowed),
-        Err(reason) if egress_allowed => NetworkResult::Refused(reason),
-        Err(reason) => NetworkResult::BestEffortFailed(reason),
-    }
+    set_up_network(runner, fs, plan_from_env(&get), egress_allowed)
 }
 
 pub fn set_up_network(
@@ -184,16 +175,23 @@ pub fn set_up_network(
     if !fs.exists(ETH0_SYSFS_PATH) {
         return NetworkResult::NoInterface;
     }
-    let outcome = match plan {
-        NetworkPlan::Dhcp => bring_up_eth0_with(runner, fs).map(|()| None),
-        NetworkPlan::Static(net) => configure_static_with(runner, fs, &net).map(Some),
-    };
-    match outcome {
-        Ok(Some(applied)) => NetworkResult::Applied(applied),
-        Ok(None) => NetworkResult::Dhcp,
+    if plan == NetworkPlan::Bootstrap {
+        return NetworkResult::AwaitingBootstrap;
+    }
+    match bring_up_eth0_with(runner, fs) {
+        Ok(()) => NetworkResult::Dhcp,
         Err(reason) if egress_allowed => NetworkResult::Refused(reason),
         Err(reason) => NetworkResult::BestEffortFailed(reason),
     }
+}
+
+/// The plan the host sends once the guest is up. There is no DHCP fallback here: a guest the host chose to address either takes one of the offered addresses or refuses the run.
+pub fn apply_plan(
+    runner: &dyn CommandRunner,
+    fs: &dyn FsWriter,
+    net: &GuestNet,
+) -> Result<Applied, BrokerExitReason> {
+    configure_static_with(runner, fs, net)
 }
 
 /// No DHCP client runs here and no step falls back to one: a guest the host addressed either takes that address or refuses.
@@ -694,11 +692,12 @@ mod static_tests {
         }
     }
 
-    fn applied_of(result: &NetworkResult) -> Option<&Applied> {
-        match result {
-            NetworkResult::Applied(applied) => Some(applied),
-            _ => None,
-        }
+    fn applied_of(result: &Result<Applied, BrokerExitReason>) -> Option<&Applied> {
+        result.as_ref().ok()
+    }
+
+    fn plan_refusal(result: &Result<Applied, BrokerExitReason>) -> Option<&BrokerExitReason> {
+        result.as_ref().err()
     }
 
     fn refusal_of(result: &NetworkResult) -> Option<&BrokerExitReason> {
@@ -728,14 +727,14 @@ mod static_tests {
     fn a_guest_with_no_network_device_is_left_alone_and_never_refuses() {
         let runner = tests::FakeCommandRunner::with_outcomes(vec![]);
         let fs = tests::FakeFsWriter::missing();
-        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
-        assert!(matches!(result, NetworkResult::NoInterface), "{result:?}");
-        assert!(
-            refusal_of(&result).is_none()
-                && applied_of(&result).is_none()
-                && best_effort_of(&result).is_none(),
-            "a host that attaches no device neither configures a guest nor refuses one: {result:?}"
-        );
+        for plan in [NetworkPlan::Dhcp, NetworkPlan::Bootstrap] {
+            let result = set_up_network(&runner, &fs, plan, true);
+            assert!(matches!(result, NetworkResult::NoInterface), "{result:?}");
+            assert!(
+                refusal_of(&result).is_none() && best_effort_of(&result).is_none(),
+                "a host that attaches no device neither configures a guest nor refuses one: {result:?}"
+            );
+        }
         assert!(
             runner.calls().is_empty(),
             "the Linux backend attaches no device, so nothing is configured and nothing fails"
@@ -754,7 +753,7 @@ mod static_tests {
             tests::ok(0), // ip link set lo up
         ]);
         let fs = tests::FakeFsWriter::ok();
-        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
+        let result = apply_plan(&runner, &fs, &plan());
         let applied = applied_of(&result).expect("expected a configured guest");
         assert_eq!(applied.address, Ipv4Addr::new(192, 168, 64, 254));
         assert_eq!(applied.gateway, Ipv4Addr::new(192, 168, 64, 1));
@@ -826,7 +825,7 @@ mod static_tests {
             tests::ok(0),
         ]);
         let fs = tests::FakeFsWriter::ok();
-        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
+        let result = apply_plan(&runner, &fs, &plan());
         let applied = applied_of(&result).expect("the second candidate is usable");
         assert_eq!(applied.address, Ipv4Addr::new(192, 168, 64, 253));
         assert!(
@@ -847,8 +846,8 @@ mod static_tests {
             tests::ok(0),
         ]);
         let fs = tests::FakeFsWriter::ok();
-        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
-        let reason = refusal_of(&result).expect("expected a typed exhaustion refusal");
+        let result = apply_plan(&runner, &fs, &plan());
+        let reason = plan_refusal(&result).expect("expected a typed exhaustion refusal");
         assert!(
             applied_of(&result).is_none(),
             "a refused guest is not a configured one"
@@ -873,9 +872,9 @@ mod static_tests {
             tests::ok(0),
         ]);
         let fs = tests::FakeFsWriter::ok();
-        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
+        let result = apply_plan(&runner, &fs, &plan());
         assert_eq!(
-            refusal_of(&result).expect("expected a gateway refusal"),
+            plan_refusal(&result).expect("expected a gateway refusal"),
             &BrokerExitReason::GatewayUnreachable {
                 gateway: "192.168.64.1".into(),
                 address: "192.168.64.254".into(),
@@ -892,8 +891,8 @@ mod static_tests {
             tests::ok(0),
         ]);
         let fs = tests::FakeFsWriter::ok();
-        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
-        let error = refusal_of(&result)
+        let result = apply_plan(&runner, &fs, &plan());
+        let error = plan_refusal(&result)
             .expect("expected the step's own failure")
             .summary();
         assert!(error.contains("ip addr add"), "{error}");
@@ -902,14 +901,10 @@ mod static_tests {
 
     #[test]
     fn a_run_that_allows_no_egress_logs_the_failure_and_still_starts() {
-        let runner = tests::FakeCommandRunner::with_outcomes(vec![
-            tests::ok(1),
-            tests::ok(1),
-            tests::ok(0),
-            tests::ok(0),
-        ]);
+        let runner =
+            tests::FakeCommandRunner::with_outcomes(vec![tests::ok(1), tests::ok(0), tests::ok(0)]);
         let fs = tests::FakeFsWriter::ok();
-        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), false);
+        let result = set_up_network(&runner, &fs, NetworkPlan::Dhcp, false);
         assert!(
             refusal_of(&result).is_none(),
             "a workload with no egress must not be refused a boot: {result:?}"
@@ -918,7 +913,7 @@ mod static_tests {
             best_effort_of(&result)
                 .expect("the failure is still reported")
                 .as_str(),
-            "no_static_address"
+            "no_dhcp_lease"
         );
     }
 
@@ -933,9 +928,9 @@ mod static_tests {
         let probe =
             tests::FakeCommandRunner::with_outcomes(vec![missing(), tests::ok(0), tests::ok(0)]);
         let fs = tests::FakeFsWriter::ok();
-        let probe_failed = set_up_network(&probe, &fs, NetworkPlan::Static(plan()), true);
+        let probe_failed = apply_plan(&probe, &fs, &plan());
         assert!(
-            refusal_of(&probe_failed)
+            plan_refusal(&probe_failed)
                 .expect("a guest that cannot probe must not take the address")
                 .summary()
                 .contains("spawn `arping -D 192.168.64.254`"),
@@ -951,9 +946,9 @@ mod static_tests {
             tests::ok(0),
             tests::ok(0),
         ]);
-        let gateway_failed = set_up_network(&gateway, &fs, NetworkPlan::Static(plan()), true);
+        let gateway_failed = apply_plan(&gateway, &fs, &plan());
         assert!(
-            refusal_of(&gateway_failed)
+            plan_refusal(&gateway_failed)
                 .expect("a guest that cannot reach arping cannot confirm its gateway")
                 .summary()
                 .contains("spawn `arping 192.168.64.1`"),
@@ -966,8 +961,8 @@ mod static_tests {
         let runner =
             tests::FakeCommandRunner::with_outcomes(vec![tests::ok(2), tests::ok(0), tests::ok(0)]);
         let fs = tests::FakeFsWriter::ok();
-        let result = set_up_network(&runner, &fs, NetworkPlan::Static(plan()), true);
-        let error = refusal_of(&result)
+        let result = apply_plan(&runner, &fs, &plan());
+        let error = plan_refusal(&result)
             .expect("an unknown arping outcome is not permission to take the address")
             .summary();
         assert!(
@@ -1002,34 +997,21 @@ mod static_tests {
     }
 
     #[test]
-    fn the_host_plan_decides_which_path_the_guest_takes() {
-        let stash: std::collections::HashMap<&str, &str> = [(
-            lns_session::GUEST_NET_ENV,
-            "192.168.64.254/24|192.168.64.1|192.168.64.1",
-        )]
-        .into_iter()
-        .collect();
-        let planned = plan_from_env(|key| stash.get(key).map(|v| v.to_string()));
+    fn the_host_marker_decides_which_path_the_guest_takes() {
         assert_eq!(
-            planned,
-            Ok(NetworkPlan::Static(GuestNet {
-                candidates: vec![Ipv4Addr::new(192, 168, 64, 254)],
-                prefix_len: 24,
-                gateway: Ipv4Addr::new(192, 168, 64, 1),
-                dns: vec![Ipv4Addr::new(192, 168, 64, 1)],
-            }))
+            plan_from_env(
+                |key| (key == lns_session::GUEST_NET_BOOTSTRAP_ENV).then(|| "1".to_string())
+            ),
+            NetworkPlan::Bootstrap
         );
-        assert_eq!(plan_from_env(|_| None), Ok(NetworkPlan::Dhcp));
-    }
-
-    #[test]
-    fn a_malformed_plan_is_a_refusal_and_never_a_quiet_fall_back_to_dhcp() {
-        let reason = plan_from_env(|key| {
-            (key == lns_session::GUEST_NET_ENV).then(|| "192.168.64.254".to_string())
-        })
-        .expect_err("a plan the guest cannot read is fatal");
-        assert_eq!(reason.as_str(), "network_setup_failed");
-        assert!(reason.summary().contains("192.168.64.254"), "{reason:?}");
+        assert_eq!(plan_from_env(|_| None), NetworkPlan::Dhcp);
+        assert_eq!(
+            plan_from_env(
+                |key| (key == lns_session::GUEST_NET_BOOTSTRAP_ENV).then(|| "0".to_string())
+            ),
+            NetworkPlan::Dhcp,
+            "an unmarked or unset boot leases as it always did"
+        );
     }
 
     #[test]
@@ -1047,67 +1029,38 @@ mod static_tests {
     }
 
     #[test]
-    fn the_environment_carries_both_the_plan_and_whether_a_failure_is_fatal() {
-        let runner = tests::FakeCommandRunner::with_outcomes(vec![
-            tests::ok(0),
-            tests::ok(0),
-            tests::ok(0),
-            tests::ok(0),
-            tests::ok(0),
-            tests::ok(0),
-            tests::ok(0),
-        ]);
+    fn a_marked_guest_brings_nothing_up_and_waits_for_the_host_to_address_it() {
+        let runner = tests::FakeCommandRunner::with_outcomes(vec![]);
         let fs = tests::FakeFsWriter::ok();
         let result = set_up_with_env(
             &runner,
             &fs,
             env_of(vec![
-                (
-                    lns_session::GUEST_NET_ENV,
-                    "192.168.64.254/24|192.168.64.1|192.168.64.1",
-                ),
+                (lns_session::GUEST_NET_BOOTSTRAP_ENV, "1"),
                 (lns_session::EGRESS_ALLOWED_ENV, "1"),
             ]),
         );
-        assert!(matches!(result, NetworkResult::Applied(_)), "{result:?}");
-    }
-
-    #[test]
-    fn an_unreadable_plan_is_only_fatal_for_a_run_that_wants_egress() {
-        let runner = tests::FakeCommandRunner::with_outcomes(vec![]);
-        let fs = tests::FakeFsWriter::ok();
-        let broken = |egress: &'static str| {
-            env_of(vec![
-                (lns_session::GUEST_NET_ENV, "nonsense"),
-                (lns_session::EGRESS_ALLOWED_ENV, egress),
-            ])
-        };
-        assert!(matches!(
-            set_up_with_env(&runner, &fs, broken("1")),
-            NetworkResult::Refused(_)
-        ));
-        assert!(matches!(
-            set_up_with_env(&runner, &fs, broken("0")),
-            NetworkResult::BestEffortFailed(_)
-        ));
+        assert!(
+            matches!(result, NetworkResult::AwaitingBootstrap),
+            "{result:?}"
+        );
+        assert!(
+            runner.calls().is_empty(),
+            "a guest the host addresses touches no interface before the host sends it a plan: {:?}",
+            runner.calls()
+        );
     }
 
     #[test]
     fn each_outcome_gets_one_console_line_and_only_a_refusal_stops_the_workload() {
-        let applied = narrate(NetworkResult::Applied(Applied {
-            address: Ipv4Addr::new(192, 168, 64, 254),
-            prefix_len: 24,
-            gateway: Ipv4Addr::new(192, 168, 64, 1),
-            dns: vec!["192.168.64.1".into()],
-        }));
-        assert!(applied.line.contains("192.168.64.254/24"), "{applied:?}");
-        assert!(applied.refusal.is_none());
-        assert!(
-            !applied.dhcp_dns,
-            "the static path already wrote resolv.conf from the host's servers"
-        );
+        let waiting = narrate(NetworkResult::AwaitingBootstrap);
+        assert!(waiting.awaiting_bootstrap, "{waiting:?}");
+        assert!(waiting.refusal.is_none());
+        assert!(!waiting.dhcp_dns);
+        assert!(waiting.line.contains("waiting for the host"), "{waiting:?}");
 
         let leased = narrate(NetworkResult::Dhcp);
+        assert!(!leased.awaiting_bootstrap);
         assert!(leased.dhcp_dns, "only a lease stashes servers to read back");
         assert!(leased.refusal.is_none());
 

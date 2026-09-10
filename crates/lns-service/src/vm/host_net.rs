@@ -37,9 +37,6 @@ pub fn observe_neighbors(commands: &dyn CommandOutput) -> std::io::Result<Vec<Ip
 /// Read, never written: lns assigns addresses beside Apple's DHCP server, it does not configure it.
 pub const LEASES_PATH: &str = "/var/db/dhcpd_leases";
 
-/// What vmnet builds the shared network from, so it answers before the first guest exists and bridge100 with it.
-pub const VMNET_PLIST_PATH: &str = "/Library/Preferences/SystemConfiguration/com.apple.vmnet.plist";
-
 const DEFAULT_NETWORK: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 0);
 const DEFAULT_PREFIX_LEN: u8 = 24;
 
@@ -192,95 +189,17 @@ pub fn parse_host_network(text: &str) -> Option<HostNetwork> {
     })
 }
 
+fn prefix_len_of(mask: Ipv4Addr) -> Option<u8> {
+    let bits = u32::from(mask);
+    let ones = bits.leading_ones();
+    (bits.count_ones() == ones && (1..=30).contains(&ones)).then_some(ones as u8)
+}
+
 fn parse_observed_mask(value: &str) -> Option<Ipv4Addr> {
     if let Some(hex) = value.strip_prefix("0x") {
         return u32::from_str_radix(hex, 16).ok().map(Ipv4Addr::from);
     }
     value.parse().ok()
-}
-
-/// Apple's plist is XML and lns carries no plist parser, so the two keys that define the shared network are read directly and anything ambiguous is no answer at all.
-pub fn parse_declared_network(text: &str) -> Option<HostNetwork> {
-    if text.matches("<key>Shared_Net_Address</key>").count() != 1
-        || text.matches("<key>Shared_Net_Mask</key>").count() != 1
-    {
-        return None;
-    }
-    let gateway: Ipv4Addr = plist_string(text, "Shared_Net_Address")?.parse().ok()?;
-    let prefix_len = plist_string(text, "Shared_Net_Mask")
-        .and_then(|mask| mask.parse::<Ipv4Addr>().ok())
-        .and_then(prefix_len_of)?;
-    Some(HostNetwork {
-        network: Ipv4Addr::from(u32::from(gateway) & mask_bits(prefix_len)),
-        prefix_len,
-        gateway,
-    })
-}
-
-/// A guest with a shared-network interface is what creates `bridge100`, so every boot — including the ordinary DHCP ones — is a chance to learn what this host's shared network is before a later static guest has to ask.
-pub async fn learn_host_network(
-    source: &dyn HostNetworkSource,
-    memory: &dyn NetworkMemory,
-    attempts: usize,
-    retry: std::time::Duration,
-) {
-    if let Ok(live) = observe_host_network(source, attempts, retry).await {
-        memory.remember(&live);
-    }
-}
-
-/// `Ok(None)` is a host that declares no shared network; `Err` is one whose declaration this user may not read, and the two are not the same answer.
-pub fn declared_host_network(files: &dyn HostFiles) -> std::io::Result<Option<HostNetwork>> {
-    files
-        .read(VMNET_PLIST_PATH)
-        .map(|text| parse_declared_network(&text))
-}
-
-/// The three ways a boot can ask this host what its shared network is, in the order it asks them.
-pub struct HostView<'a> {
-    pub live: &'a dyn HostNetworkSource,
-    pub files: &'a dyn HostFiles,
-    pub memory: &'a dyn NetworkMemory,
-}
-
-/// What this host's shared network was last observed to be, kept because the declaration vmnet builds it from is not readable by the user the service runs as.
-pub trait NetworkMemory: Send + Sync {
-    fn recall(&self) -> Option<HostNetwork>;
-    fn remember(&self, network: &HostNetwork);
-}
-
-pub fn render_remembered(network: &HostNetwork) -> String {
-    format!(
-        "{}/{} {}\n",
-        network.network, network.prefix_len, network.gateway
-    )
-}
-
-/// A record that does not describe one whole subnet with its gateway inside it is not an observation lns can boot a guest onto.
-pub fn parse_remembered(text: &str) -> Option<HostNetwork> {
-    let (cidr, gateway) = text.lines().next()?.split_once(char::is_whitespace)?;
-    let (network, prefix_len) = cidr.split_once('/')?;
-    let network = HostNetwork {
-        network: network.trim().parse().ok()?,
-        prefix_len: prefix_len.trim().parse().ok()?,
-        gateway: gateway.trim().parse().ok()?,
-    };
-    let aligned = u32::from(network.network) & !mask_bits(network.prefix_len) == 0;
-    ((1..=30).contains(&network.prefix_len) && aligned && network.contains(network.gateway))
-        .then_some(network)
-}
-
-fn plist_string(text: &str, key: &str) -> Option<String> {
-    let after_key = text.split_once(&format!("<key>{key}</key>"))?.1;
-    let open = after_key.find("<string>")? + "<string>".len();
-    let close = after_key[open..].find("</string>")? + open;
-    Some(after_key[open..close].trim().to_string())
-}
-
-fn prefix_len_of(mask: Ipv4Addr) -> Option<u8> {
-    let bits = u32::from(mask);
-    let ones = bits.leading_ones();
-    (bits.count_ones() == ones && (1..=30).contains(&ones)).then_some(ones as u8)
 }
 
 /// `arp -an` prints `? (192.168.64.7) at 52:54:0:ab:cd:ef on bridge100 ...`; only the address matters here.
@@ -301,6 +220,7 @@ pub fn parse_arp_neighbors(text: &str) -> std::io::Result<Vec<Ipv4Addr>> {
     Ok(seen.into_iter().collect())
 }
 
+/// The one thing a booting guest asks this host: what shared network did the VMM just bring up? `bridge100` exists only once a guest is attached to it, so this is asked after the VMM has started and not before.
 pub async fn observe_host_network(
     source: &dyn HostNetworkSource,
     attempts: usize,
@@ -327,51 +247,9 @@ pub async fn observe_host_network(
     Err(last_error.unwrap_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "the active VZ shared network did not appear",
+            "the active VZ shared network did not appear after the guest started",
         )
     }))
-}
-
-/// The network a guest boots onto: the live bridge when one exists, then the declaration vmnet will create it from, then what this host was last seen running — the first static guest is the one that creates the bridge, so waiting for it can only time out, and the declaration is root-only on a stock macOS host.
-pub async fn host_network_for_boot(
-    host: &HostView<'_>,
-    attempts: usize,
-    retry: std::time::Duration,
-) -> std::io::Result<HostNetwork> {
-    if let Ok(live) = observe_host_network(host.live, 1, retry).await {
-        host.memory.remember(&live);
-        return Ok(live);
-    }
-    let declaration = declared_host_network(host.files);
-    if let Ok(Some(declared)) = declaration {
-        return Ok(declared);
-    }
-    if let Some(remembered) = host.memory.recall() {
-        return Ok(remembered);
-    }
-    match observe_host_network(host.live, attempts, retry).await {
-        Ok(live) => {
-            host.memory.remember(&live);
-            Ok(live)
-        }
-        Err(error) => Err(std::io::Error::new(
-            error.kind(),
-            format!(
-                "the shared network is not active ({error}), {}, and this host was never observed running one",
-                declaration_note(&declaration)
-            ),
-        )),
-    }
-}
-
-fn declaration_note(declaration: &std::io::Result<Option<HostNetwork>>) -> String {
-    match declaration {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            format!("{VMNET_PLIST_PATH} does not exist")
-        }
-        Err(error) => format!("{VMNET_PLIST_PATH} is not readable by this user ({error})"),
-        Ok(_) => format!("{VMNET_PLIST_PATH} declares no shared network"),
-    }
 }
 
 /// An unreadable lease file is not an empty one: with no record to read, every candidate has to come from ARP and the reservation table.
@@ -414,26 +292,6 @@ pub(crate) mod tests {
                 Some(Err(e)) => Err(std::io::Error::new(e.kind(), e.to_string())),
                 None => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
             }
-        }
-    }
-
-    pub(crate) struct FakeNetworkMemory(Mutex<Option<HostNetwork>>);
-
-    impl FakeNetworkMemory {
-        pub(crate) fn empty() -> Self {
-            Self(Mutex::new(None))
-        }
-        pub(crate) fn holding(network: HostNetwork) -> Self {
-            Self(Mutex::new(Some(network)))
-        }
-    }
-
-    impl NetworkMemory for FakeNetworkMemory {
-        fn recall(&self) -> Option<HostNetwork> {
-            self.0.lock().expect("memory poisoned").clone()
-        }
-        fn remember(&self, network: &HostNetwork) {
-            *self.0.lock().expect("memory poisoned") = Some(network.clone());
         }
     }
 
@@ -564,331 +422,6 @@ pub(crate) mod tests {
             )
             .await
             .is_err()
-        );
-    }
-
-    struct AbsentBridge;
-    impl HostNetworkSource for AbsentBridge {
-        fn observe(&self) -> std::io::Result<String> {
-            Err(std::io::Error::other("ifconfig bridge100 exited with 1"))
-        }
-    }
-
-    const DECLARED: &str = "<plist><dict>
-            <key>Shared_Net_Address</key><string>192.168.66.1</string>
-            <key>Shared_Net_Mask</key><string>255.255.255.0</string>
-            </dict></plist>";
-
-    #[tokio::test]
-    async fn the_first_static_boot_reads_the_declared_network_the_bridge_has_not_been_created_from_yet()
-     {
-        let files = FakeHostFiles::new().with(VMNET_PLIST_PATH, DECLARED);
-        let started = std::time::Instant::now();
-        let network = host_network_for_boot(
-            &HostView {
-                live: &AbsentBridge,
-                files: &files,
-                memory: &FakeNetworkMemory::empty(),
-            },
-            20,
-            std::time::Duration::from_secs(10),
-        )
-        .await
-        .expect("the shared network is declared even before vmnet creates bridge100");
-        assert_eq!(
-            network,
-            HostNetwork {
-                network: Ipv4Addr::new(192, 168, 66, 0),
-                prefix_len: 24,
-                gateway: Ipv4Addr::new(192, 168, 66, 1),
-            },
-            "the declared host address is the gateway, and it is read, not inferred"
-        );
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "the first guest is the one that creates bridge100, so waiting for it can only time out"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_live_bridge_outranks_the_declaration_it_was_created_from() {
-        struct Live;
-        impl HostNetworkSource for Live {
-            fn observe(&self) -> std::io::Result<String> {
-                Ok("bridge100: flags=8863\n\tinet 10.37.129.7 netmask 0xffffff00\n".into())
-            }
-        }
-        let files = FakeHostFiles::new().with(VMNET_PLIST_PATH, DECLARED);
-        assert_eq!(
-            host_network_for_boot(
-                &HostView {
-                    live: &Live,
-                    files: &files,
-                    memory: &FakeNetworkMemory::empty(),
-                },
-                1,
-                std::time::Duration::ZERO
-            )
-            .await
-            .expect("an active network is observable")
-            .gateway,
-            Ipv4Addr::new(10, 37, 129, 7),
-            "a declaration edited after the network came up is not what the guest would reach"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_host_that_neither_runs_nor_declares_a_shared_network_says_so() {
-        let error = host_network_for_boot(
-            &HostView {
-                live: &AbsentBridge,
-                files: &FakeHostFiles::new(),
-                memory: &FakeNetworkMemory::empty(),
-            },
-            2,
-            std::time::Duration::from_millis(250),
-        )
-        .await
-        .expect_err("no network is not the default network");
-        let rendered = error.to_string();
-        assert!(rendered.contains(VMNET_PLIST_PATH), "{rendered}");
-        assert!(rendered.contains("ifconfig bridge100"), "{rendered}");
-    }
-
-    #[tokio::test]
-    async fn a_declaration_this_user_may_not_read_falls_back_to_the_network_this_host_was_seen_running()
-     {
-        let files = FakeHostFiles::new().failing(
-            VMNET_PLIST_PATH,
-            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-        );
-        let remembered = HostNetwork {
-            network: Ipv4Addr::new(192, 168, 66, 0),
-            prefix_len: 24,
-            gateway: Ipv4Addr::new(192, 168, 66, 1),
-        };
-        let memory = FakeNetworkMemory::holding(remembered.clone());
-        let started = std::time::Instant::now();
-        let network = host_network_for_boot(
-            &HostView {
-                live: &AbsentBridge,
-                files: &files,
-                memory: &memory,
-            },
-            3,
-            std::time::Duration::from_secs(2),
-        )
-        .await
-        .expect("the plist is root-only, so the last observation of this host is what is left");
-        assert_eq!(network, remembered);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "a bridge no guest is bringing up is not worth waiting for"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_declaration_this_user_may_not_read_is_named_as_that_and_not_as_an_absent_one() {
-        let files = FakeHostFiles::new().failing(
-            VMNET_PLIST_PATH,
-            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-        );
-        let rendered = host_network_for_boot(
-            &HostView {
-                live: &AbsentBridge,
-                files: &files,
-                memory: &FakeNetworkMemory::empty(),
-            },
-            2,
-            std::time::Duration::from_millis(250),
-        )
-        .await
-        .expect_err("nothing readable is left to discover")
-        .to_string();
-        assert!(rendered.contains(VMNET_PLIST_PATH), "{rendered}");
-        assert!(rendered.contains("permission denied"), "{rendered}");
-        assert!(
-            !rendered.contains("declares no shared network"),
-            "an unreadable declaration must not be reported as an absent one: {rendered}"
-        );
-        assert!(rendered.contains("ifconfig bridge100"), "{rendered}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_host_that_declares_nothing_is_told_apart_from_one_whose_declaration_is_unreadable() {
-        let files = FakeHostFiles::new().with(VMNET_PLIST_PATH, "<plist><dict></dict></plist>");
-        let rendered = host_network_for_boot(
-            &HostView {
-                live: &AbsentBridge,
-                files: &files,
-                memory: &FakeNetworkMemory::empty(),
-            },
-            2,
-            std::time::Duration::from_millis(250),
-        )
-        .await
-        .expect_err("a readable declaration naming no network is still no network")
-        .to_string();
-        assert!(
-            rendered.contains("declares no shared network"),
-            "{rendered}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn any_boot_teaches_the_host_what_its_shared_network_is() {
-        struct Late(Mutex<usize>);
-        impl HostNetworkSource for Late {
-            fn observe(&self) -> std::io::Result<String> {
-                let mut seen = self.0.lock().expect("source poisoned");
-                *seen += 1;
-                if *seen < 2 {
-                    return Err(std::io::Error::other("ifconfig bridge100 exited with 1"));
-                }
-                Ok("bridge100: flags=8863\n\tinet 10.37.129.7 netmask 0xffffff00\n".into())
-            }
-        }
-        let memory = FakeNetworkMemory::empty();
-        learn_host_network(
-            &Late(Mutex::new(0)),
-            &memory,
-            3,
-            std::time::Duration::from_millis(250),
-        )
-        .await;
-        assert_eq!(
-            memory.recall().map(|network| network.gateway),
-            Some(Ipv4Addr::new(10, 37, 129, 7)),
-            "a guest booting on DHCP is what creates the bridge a later static guest needs to know about"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_boot_that_brings_no_shared_network_up_teaches_nothing() {
-        let memory = FakeNetworkMemory::holding(HostNetwork::default());
-        learn_host_network(
-            &AbsentBridge,
-            &memory,
-            2,
-            std::time::Duration::from_millis(250),
-        )
-        .await;
-        assert_eq!(
-            memory.recall(),
-            Some(HostNetwork::default()),
-            "a boot with no shared network is no observation, not an erasure of the last one"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_live_observation_is_remembered_so_the_next_cold_start_is_not_a_guess() {
-        struct Live;
-        impl HostNetworkSource for Live {
-            fn observe(&self) -> std::io::Result<String> {
-                Ok("bridge100: flags=8863\n\tinet 10.37.129.7 netmask 0xffffff00\n".into())
-            }
-        }
-        let memory = FakeNetworkMemory::empty();
-        let network = host_network_for_boot(
-            &HostView {
-                live: &Live,
-                files: &FakeHostFiles::new(),
-                memory: &memory,
-            },
-            1,
-            std::time::Duration::ZERO,
-        )
-        .await
-        .expect("an active network is observable");
-        assert_eq!(memory.recall(), Some(network));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_bridge_that_appears_while_the_host_waits_is_remembered_too() {
-        struct Late(Mutex<usize>);
-        impl HostNetworkSource for Late {
-            fn observe(&self) -> std::io::Result<String> {
-                let mut seen = self.0.lock().expect("source poisoned");
-                *seen += 1;
-                if *seen < 3 {
-                    return Err(std::io::Error::other("ifconfig bridge100 exited with 1"));
-                }
-                Ok("bridge100: flags=8863\n\tinet 10.37.129.7 netmask 0xffffff00\n".into())
-            }
-        }
-        let memory = FakeNetworkMemory::empty();
-        let network = host_network_for_boot(
-            &HostView {
-                live: &Late(Mutex::new(0)),
-                files: &FakeHostFiles::new(),
-                memory: &memory,
-            },
-            3,
-            std::time::Duration::from_millis(250),
-        )
-        .await
-        .expect("another guest brought the bridge up while this one waited");
-        assert_eq!(memory.recall(), Some(network));
-    }
-
-    #[test]
-    fn a_remembered_network_survives_a_round_trip_and_a_damaged_record_is_no_answer() {
-        let network = HostNetwork {
-            network: Ipv4Addr::new(10, 37, 129, 0),
-            prefix_len: 24,
-            gateway: Ipv4Addr::new(10, 37, 129, 7),
-        };
-        assert_eq!(
-            parse_remembered(&render_remembered(&network)),
-            Some(network)
-        );
-        for text in [
-            "",
-            "10.37.129.0/24",
-            "nonsense/24 10.37.129.7",
-            "10.37.129.0/nonsense 10.37.129.7",
-            "10.37.129.0/24 nonsense",
-            "10.37.129.0/31 10.37.129.7",
-            "10.37.129.5/24 10.37.129.7",
-            "10.37.129.0/24 192.168.64.1",
-        ] {
-            assert_eq!(
-                parse_remembered(text),
-                None,
-                "a record lns cannot trust is not a network: {text:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_declaration_that_cannot_be_read_whole_names_no_network() {
-        for text in [
-            "<plist><dict></dict></plist>",
-            "<plist><key>Shared_Net_Address</key><string>nonsense</string><key>Shared_Net_Mask</key><string>255.255.255.0</string></plist>",
-            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string></plist>",
-            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key><string>255.0.255.0</string></plist>",
-            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key><string>255.255.255.254</string></plist>",
-            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key>",
-            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key><string>255.255.255.0",
-            "<key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key><string>255.255.255.0</string><key>Shared_Net_Address</key><string>172.16.0.1</string><key>Shared_Net_Mask</key><string>255.255.0.0</string>",
-        ] {
-            assert_eq!(parse_declared_network(text), None, "{text}");
-        }
-    }
-
-    #[test]
-    fn the_declared_network_moves_when_the_host_moves_its_shared_subnet() {
-        let plist = "<plist><dict>
-            <key>Shared_Net_Address</key><string>10.37.129.1</string>
-            <key>Shared_Net_Mask</key><string>255.255.255.0</string>
-            </dict></plist>";
-        assert_eq!(
-            parse_declared_network(plist).expect("valid declaration"),
-            HostNetwork {
-                network: Ipv4Addr::new(10, 37, 129, 0),
-                prefix_len: 24,
-                gateway: Ipv4Addr::new(10, 37, 129, 1),
-            }
         );
     }
 
