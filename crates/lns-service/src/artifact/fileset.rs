@@ -1487,6 +1487,7 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(registry.pull_index(&pinned_reference()).await.is_err());
         let descriptor = oci_client::manifest::OciDescriptor {
             digest: registry.packed().digest,
             ..Default::default()
