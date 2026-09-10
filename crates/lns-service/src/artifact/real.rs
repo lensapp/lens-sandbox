@@ -424,8 +424,8 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
     )
     .await
     .with_context(|| format!("resolving {image_ref}"))?;
-    let build_source = fetch_build_source(&registry, &reference, &manifest).await?;
-    let image_architectures = match &build_source {
+    let source = fetch_build_source(&registry, &reference, &manifest).await?;
+    let architectures = match &source {
         Some(_) => built_architectures_of(&registry, &resolution).await,
         None => Vec::new(),
     };
@@ -436,8 +436,10 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
         &manifest.config.media_type,
         &resolution,
         lns_artifact::resources::host::probe(),
-        build_source,
-        image_architectures,
+        crate::artifact::inspect::BuiltImageDisclosure {
+            source,
+            architectures,
+        },
     )
 }
 

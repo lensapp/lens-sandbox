@@ -468,6 +468,93 @@ pub(crate) fn verify_digest_pin(
 }
 
 #[allow(clippy::cognitive_complexity)] // manifest fetch → digest verify → per-layer parallel pull → diff_id check
+/// What this pull costs, said before it starts: an image whose every layer is already held is reported as cached, and one that is not is reported as resolved. Answers with the bytes still to fetch.
+fn announce_the_pull(
+    image: &str,
+    manifest_digest: &str,
+    manifest: &OciImageManifest,
+    was_cached: &[bool],
+    total_bytes: u64,
+) -> u64 {
+    let n = manifest.layers.len();
+    let plural = if n == 1 { "" } else { "s" };
+    let total_bytes_fmt = format_bytes(total_bytes);
+    if was_cached.iter().any(|cached| !cached) {
+        log::info!("Resolved", "{image} @ {manifest_digest}");
+    } else {
+        log::info!(
+            "ImageCached",
+            "{image} ({n} layer{plural}, {total_bytes_fmt})"
+        );
+    }
+    manifest
+        .layers
+        .iter()
+        .zip(was_cached)
+        .filter(|(_, cached)| !**cached)
+        .map(|(d, _)| d.size.max(0) as u64)
+        .fold(0u64, u64::saturating_add)
+}
+
+/// Everything a manifest has to answer for before a byte of it is fetched: a config that accounts for every layer, a layer type this service unpacks, a size a registry cannot then over-stream, and a total under the disk ceiling. Answers with the bytes the pull is about to cost.
+fn refuse_a_manifest_no_pull_may_fetch(
+    image: &str,
+    manifest: &OciImageManifest,
+    config: &oci_client::config::ConfigFile,
+) -> Result<u64> {
+    if config.rootfs.diff_ids.len() != manifest.layers.len() {
+        anyhow::bail!(
+            "image config declares {} diff_ids but manifest has {} layers",
+            config.rootfs.diff_ids.len(),
+            manifest.layers.len()
+        );
+    }
+    let accepted: &[&str] = &[
+        manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE,
+        manifest::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
+        manifest::IMAGE_LAYER_MEDIA_TYPE,
+    ];
+    for (i, descriptor) in manifest.layers.iter().enumerate() {
+        if !accepted.contains(&descriptor.media_type.as_str()) {
+            anyhow::bail!(
+                "layer {i} has unsupported media type {} (digest {})",
+                descriptor.media_type,
+                descriptor.digest
+            );
+        }
+        if descriptor.size <= 0 {
+            anyhow::bail!(
+                "layer {i} declares a non-positive size {} (digest {}); a registry that under-declares a layer then over-streams could evade the buffered-blob cap",
+                descriptor.size,
+                descriptor.digest
+            );
+        }
+    }
+    let total_bytes: u64 = manifest
+        .layers
+        .iter()
+        .map(|d| d.size as u64)
+        .fold(0u64, u64::saturating_add);
+    if total_bytes > MAX_TOTAL_DECLARED_LAYER_BYTES {
+        anyhow::bail!(
+            "image {image} declares {total_bytes} bytes of layers, over the \
+             {MAX_TOTAL_DECLARED_LAYER_BYTES}-byte ceiling"
+        );
+    }
+    Ok(total_bytes)
+}
+
+/// The manifest and config a pull stands on, with the one failure an index can cause explained rather than passed on as the registry spelled it.
+async fn manifest_and_config<R: Registry>(
+    client: &R,
+    reference: &Reference,
+) -> Result<(OciImageManifest, String, String)> {
+    match client.pull_manifest_and_config(reference).await {
+        Ok(answer) => Ok(answer),
+        Err(error) => Err(explain_architecture(client, reference, error).await),
+    }
+}
+
 /// A pull an index answered with nothing for this host is told what the index holds and what would add its own architecture, rather than the registry's own "no entry found" (§6).
 async fn explain_architecture<R: Registry>(
     client: &R,
@@ -501,11 +588,7 @@ pub(crate) async fn pull_inner<R: Registry>(
         .parse()
         .with_context(|| format!("invalid image reference: {image}"))?;
 
-    let (manifest, manifest_digest, config_str) =
-        match client.pull_manifest_and_config(&reference).await {
-            Ok(answer) => answer,
-            Err(error) => return Err(explain_architecture(client, &reference, error).await),
-        };
+    let (manifest, manifest_digest, config_str) = manifest_and_config(client, &reference).await?;
 
     let config: oci_client::config::ConfigFile =
         serde_json::from_str(&config_str).context("parsing image config")?;
@@ -513,71 +596,15 @@ pub(crate) async fn pull_inner<R: Registry>(
     // Compare against the registry-reported content digest, not a re-serialization of the parsed manifest — serde's byte layout differs from the registry's, so re-hashing would false-mismatch every real digest-pinned pull.
     verify_digest_pin(&reference, &manifest_digest, image)?;
 
-    if config.rootfs.diff_ids.len() != manifest.layers.len() {
-        anyhow::bail!(
-            "image config declares {} diff_ids but manifest has {} layers",
-            config.rootfs.diff_ids.len(),
-            manifest.layers.len()
-        );
-    }
-
-    let accepted: &[&str] = &[
-        manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE,
-        manifest::IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE,
-        manifest::IMAGE_LAYER_MEDIA_TYPE,
-    ];
-
-    for (i, descriptor) in manifest.layers.iter().enumerate() {
-        if !accepted.contains(&descriptor.media_type.as_str()) {
-            anyhow::bail!(
-                "layer {i} has unsupported media type {} (digest {})",
-                descriptor.media_type,
-                descriptor.digest
-            );
-        }
-        if descriptor.size <= 0 {
-            anyhow::bail!(
-                "layer {i} declares a non-positive size {} (digest {}); a registry that under-declares a layer then over-streams could evade the buffered-blob cap",
-                descriptor.size,
-                descriptor.digest
-            );
-        }
-    }
-
-    let total_bytes: u64 = manifest
-        .layers
-        .iter()
-        .map(|d| d.size as u64)
-        .fold(0u64, u64::saturating_add);
-    if total_bytes > MAX_TOTAL_DECLARED_LAYER_BYTES {
-        anyhow::bail!(
-            "image {image} declares {total_bytes} bytes of layers, over the \
-             {MAX_TOTAL_DECLARED_LAYER_BYTES}-byte ceiling"
-        );
-    }
+    let total_bytes = refuse_a_manifest_no_pull_may_fetch(image, &manifest, &config)?;
     let mut was_cached = Vec::with_capacity(manifest.layers.len());
     for d in &manifest.layers {
         was_cached.push(layer_cache.contains(&d.digest)?);
     }
     let any_missing = was_cached.iter().any(|cached| !cached);
     let n = manifest.layers.len();
-    let plural = if n == 1 { "" } else { "s" };
-    let total_bytes_fmt = format_bytes(total_bytes);
-    if any_missing {
-        log::info!("Resolved", "{image} @ {manifest_digest}");
-    } else {
-        log::info!(
-            "ImageCached",
-            "{image} ({n} layer{plural}, {total_bytes_fmt})"
-        );
-    }
-    let missing_total: u64 = manifest
-        .layers
-        .iter()
-        .zip(&was_cached)
-        .filter(|(_, cached)| !**cached)
-        .map(|(d, _)| d.size.max(0) as u64)
-        .fold(0u64, u64::saturating_add);
+    let missing_total =
+        announce_the_pull(image, &manifest_digest, &manifest, &was_cached, total_bytes);
     let progress = any_missing.then(|| PullProgress::start(missing_total));
     let progress = progress.as_ref();
     let pull_start = std::time::Instant::now();
@@ -642,6 +669,8 @@ pub(crate) async fn pull_inner<R: Registry>(
 
     if any_missing {
         let elapsed_s = pull_start.elapsed().as_secs_f64();
+        let plural = if n == 1 { "" } else { "s" };
+        let total_bytes_fmt = format_bytes(total_bytes);
         log::info!(
             "Pulled",
             "{n} layer{plural}   ({elapsed_s:.2}s · {total_bytes_fmt})"

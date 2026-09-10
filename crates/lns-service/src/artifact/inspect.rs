@@ -159,6 +159,13 @@ pub(crate) fn built_architectures(
         .collect()
 }
 
+/// What a published artifact discloses about an image lns built: the Containerfile it shipped, and one digest per architecture the index holds (§6.2, §7.3).
+#[derive(Default)]
+pub(crate) struct BuiltImageDisclosure {
+    pub source: Option<lns_ipc::BuildSourceView>,
+    pub architectures: Vec<lns_ipc::BuiltArchitecture>,
+}
+
 /// Project an already-peeked manifest into the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared connectors, and any over-broad-policy flags.
 pub(crate) fn project_inspection(
     image_ref: &str,
@@ -167,8 +174,7 @@ pub(crate) fn project_inspection(
     config_media_type: &str,
     resolution: &crate::artifact::mixin::Resolution,
     host: Option<lns_artifact::resources::HostCapacity>,
-    build_source: Option<lns_ipc::BuildSourceView>,
-    image_architectures: Vec<lns_ipc::BuiltArchitecture>,
+    built: BuiltImageDisclosure,
 ) -> Result<ArtifactInspection> {
     match dispatch(artifact_type, Some(config_media_type))? {
         None => Ok(ArtifactInspection::Image(ImageView {
@@ -210,8 +216,8 @@ pub(crate) fn project_inspection(
             );
             Ok(ArtifactInspection::Sandbox(Box::new(
                 lns_ipc::SandboxView {
-                    image_source: build_source,
-                    image_architectures,
+                    image_source: built.source,
+                    image_architectures: built.architectures,
                     mixins: resolution.mixins.clone(),
                     pinned_mixins: resolution.pinned_extra.clone(),
                     contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
@@ -340,8 +346,7 @@ mod tests {
             &config_media_type,
             &resolution(config, mixins),
             host,
-            None,
-            Vec::new(),
+            BuiltImageDisclosure::default(),
         )
     }
 
@@ -567,8 +572,13 @@ mod tests {
                 &[],
             ),
             None,
-            Some(read_build_source("./image", &packed_source().data).unwrap()),
-            built_architectures(&[index_entry("arm64", "sha256:aa"), index_entry("amd64", "sha256:bb")]),
+            BuiltImageDisclosure {
+                source: Some(read_build_source("./image", &packed_source().data).unwrap()),
+                architectures: built_architectures(&[
+                    index_entry("arm64", "sha256:aa"),
+                    index_entry("amd64", "sha256:bb"),
+                ]),
+            },
         )
         .unwrap();
 
@@ -599,8 +609,7 @@ mod tests {
             "application/vnd.oci.image.config.v1+json",
             &resolution("{}", &[]),
             None,
-            None,
-            Vec::new(),
+            BuiltImageDisclosure::default(),
         )
         .unwrap();
         assert!(
@@ -618,8 +627,7 @@ mod tests {
             "application/vnd.oci.image.config.v1+json",
             &resolution("{}", &[]),
             None,
-            None,
-            Vec::new(),
+            BuiltImageDisclosure::default(),
         )
         .unwrap();
 
@@ -641,8 +649,7 @@ mod tests {
             "application/vnd.oci.image.config.v1+json",
             &resolution("{}", &[]),
             None,
-            None,
-            Vec::new(),
+            BuiltImageDisclosure::default(),
         )
         .unwrap_err();
 
@@ -809,8 +816,7 @@ mod tests {
                     &[],
                 ),
                 None,
-                None,
-                Vec::new(),
+                BuiltImageDisclosure::default(),
             )
             .unwrap(),
             sandbox_view_with_credentials(vec![lns_spec::Credential {
@@ -839,8 +845,7 @@ mod tests {
             &lns_artifact::spec::Kind::Mixin.config_media_type(),
             &resolution(&document, &[]),
             None,
-            None,
-            Vec::new(),
+            BuiltImageDisclosure::default(),
         )
         .unwrap();
         assert_eq!(
@@ -884,8 +889,7 @@ mod tests {
                 &[],
             ),
             None,
-            None,
-            Vec::new(),
+            BuiltImageDisclosure::default(),
         )
         .unwrap_err();
         assert!(
@@ -906,8 +910,7 @@ mod tests {
                 &[],
             ),
             None,
-            None,
-            Vec::new(),
+            BuiltImageDisclosure::default(),
         )
         .unwrap_err();
         assert!(
@@ -934,8 +937,7 @@ mod tests {
                     )
                 },
                 None,
-                None,
-                Vec::new(),
+                BuiltImageDisclosure::default(),
             )
             .unwrap(),
             sandbox_view_with_mixins(vec![declared, pinned.clone()], vec![pinned]),
