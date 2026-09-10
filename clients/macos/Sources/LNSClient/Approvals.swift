@@ -123,6 +123,30 @@ public struct ServiceRequest: Encodable {
         Self(type: "DismissApprovalNotices", notices: notices)
     }
 
+    public static func noticeDismissalBatches(_ notices: [String]) throws -> [Self] {
+        let encoder = JSONEncoder()
+        let envelopeSize = try encoder.encode(Self.dismissNotices([])).count
+        var requests: [Self] = []
+        var batch: [String] = []
+        var size = envelopeSize
+        for notice in notices {
+            let noticeSize = try encoder.encode(notice).count
+            guard envelopeSize + noticeSize < FrameDecoder.maximumLength else {
+                throw ServiceError(message: "A single notice is too large to dismiss over IPC.")
+            }
+            let separator = batch.isEmpty ? 0 : 1
+            if size + separator + noticeSize >= FrameDecoder.maximumLength {
+                requests.append(.dismissNotices(batch))
+                batch = []
+                size = envelopeSize
+            }
+            size += (batch.isEmpty ? 0 : 1) + noticeSize
+            batch.append(notice)
+        }
+        if !batch.isEmpty { requests.append(.dismissNotices(batch)) }
+        return requests
+    }
+
     public static func answerHistory(id: String, answer: HistoryAnswer) -> Self {
         Self(type: "AnswerApproval", id: id, answer: answer)
     }

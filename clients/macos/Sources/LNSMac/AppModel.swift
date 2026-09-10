@@ -117,8 +117,10 @@ final class AppModel: ObservableObject {
         guard connected, !observed.isEmpty else { return }
         Task {
             do {
-                guard case .acknowledged = try await service.send(.dismissNotices(observed)) else {
-                    throw ServiceError(message: "The service did not confirm notice dismissal.")
+                for request in try ServiceRequest.noticeDismissalBatches(observed) {
+                    guard case .acknowledged = try await service.send(request) else {
+                        throw ServiceError(message: "The service did not confirm notice dismissal.")
+                    }
                 }
             } catch { notice = error.localizedDescription }
         }

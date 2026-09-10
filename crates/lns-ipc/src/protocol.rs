@@ -222,6 +222,11 @@ pub enum Response {
     Status(StatusInfo),
     ShuttingDown,
     LiveApprovals(crate::LiveApprovalSnapshot),
+    LiveApprovalsChunk {
+        offset: usize,
+        data: String,
+        complete: bool,
+    },
     /// The answer was queued; snapshots report subsequent state and persistence failures.
     LiveApprovalSubmitted,
     LiveApprovalStale,

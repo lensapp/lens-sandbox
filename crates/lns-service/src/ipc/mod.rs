@@ -65,19 +65,39 @@ mod approval_stream_tests {
         let (mut service, mut client) = tokio::io::duplex(16);
         let task =
             tokio::spawn(async move { stream_approvals(&mut service, rx, &Shutdown::new()).await });
-        let frame = lns_ipc::read_frame_bytes_async(&mut client).await.unwrap();
-        let first: Response = lns_ipc::decode_frame(&mut &frame[..]).unwrap();
+        let first = read_snapshot(&mut client).await;
         assert_eq!(first, Response::LiveApprovals(Default::default()));
         let update = lns_ipc::LiveApprovalSnapshot {
             approvals: vec![],
             notices: vec!["could not save".into()],
         };
         tx.send_replace(update.clone());
-        let frame = lns_ipc::read_frame_bytes_async(&mut client).await.unwrap();
-        let second: Response = lns_ipc::decode_frame(&mut &frame[..]).unwrap();
+        let second = read_snapshot(&mut client).await;
         assert_eq!(second, Response::LiveApprovals(update));
         drop(client);
         task.await.unwrap().unwrap();
+    }
+
+    async fn read_snapshot(client: &mut tokio::io::DuplexStream) -> Response {
+        #[derive(serde::Deserialize)]
+        struct Chunk {
+            #[serde(rename = "type")]
+            kind: String,
+            offset: usize,
+            data: String,
+            complete: bool,
+        }
+        let mut json = String::new();
+        loop {
+            let frame = lns_ipc::read_frame_bytes_async(client).await.unwrap();
+            let chunk: Chunk = lns_ipc::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(chunk.kind, "LiveApprovalsChunk");
+            assert_eq!(chunk.offset, json.len());
+            json.push_str(&chunk.data);
+            if chunk.complete {
+                return serde_json::from_str(&json).unwrap();
+            }
+        }
     }
 
     #[tokio::test]
@@ -110,14 +130,17 @@ pub async fn stream_approvals<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    stream_responses(stream, updates, shutdown, Response::LiveApprovals).await
+    stream_responses(stream, updates, shutdown, |snapshot| {
+        Ok(lns_ipc::live_approval_frames(snapshot)?)
+    })
+    .await
 }
 
 pub(super) async fn stream_responses<S, T: Clone>(
     stream: &mut S,
     mut updates: tokio::sync::watch::Receiver<T>,
     shutdown: &crate::shutdown::Shutdown,
-    response: impl Fn(T) -> Response,
+    responses: impl Fn(T) -> anyhow::Result<Vec<Response>>,
 ) -> anyhow::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -125,10 +148,12 @@ where
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let snapshot = updates.borrow_and_update().clone();
-        let frame = lns_ipc::encode_frame(&response(snapshot))?;
-        tokio::select! {
-            result = stream.write_all(&frame) => result?,
-            _ = shutdown.wait_async() => return Ok(()),
+        for response in responses(snapshot)? {
+            let frame = lns_ipc::encode_frame(&response)?;
+            tokio::select! {
+                result = stream.write_all(&frame) => result?,
+                _ = shutdown.wait_async() => return Ok(()),
+            }
         }
         let mut incoming = [0u8; 1];
         tokio::select! {

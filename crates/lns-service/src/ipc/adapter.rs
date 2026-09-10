@@ -174,7 +174,7 @@ async fn handle_connection(
                 &mut stream,
                 crate::dashboard::live::subscribe(),
                 &shutdown,
-                |()| Response::DashboardChanged,
+                |()| Ok(vec![Response::DashboardChanged]),
             )
             .await
         }

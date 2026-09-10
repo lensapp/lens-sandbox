@@ -2,8 +2,63 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ConnectorView, SecretValues};
 
+pub fn live_approval_frames(
+    snapshot: LiveApprovalSnapshot,
+) -> Result<Vec<crate::Response>, serde_json::Error> {
+    let json = serde_json::to_string(&crate::Response::LiveApprovals(snapshot))?;
+    let chunk_bytes = crate::MAX_FRAME_SIZE as usize / 6 - 128;
+    let mut offset = 0;
+    let mut frames = Vec::new();
+    while offset < json.len() {
+        let end = json.floor_char_boundary((offset + chunk_bytes).min(json.len()));
+        frames.push(crate::Response::LiveApprovalsChunk {
+            offset,
+            data: json[offset..end].to_string(),
+            complete: end == json.len(),
+        });
+        offset = end;
+    }
+    Ok(frames)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn large_live_snapshots_cross_bounded_frames_without_losing_notices() {
+        #[derive(serde::Deserialize)]
+        struct Chunk {
+            #[serde(rename = "type")]
+            kind: String,
+            offset: usize,
+            data: String,
+            complete: bool,
+        }
+        let snapshot = super::LiveApprovalSnapshot {
+            approvals: vec![],
+            notices: (0..1024)
+                .map(|i| format!("{i}: {}", "é🦀\n\"\\".repeat(256)))
+                .collect(),
+        };
+        let expected = crate::Response::LiveApprovals(snapshot.clone());
+        let frames = super::live_approval_frames(snapshot).unwrap();
+        let mut joined = String::new();
+        let mut completed = false;
+        for frame in frames {
+            let wire = crate::encode_frame(&frame)
+                .expect("each live approval frame must fit the IPC limit");
+            let decoded: Chunk = crate::decode_frame(&mut &wire[..]).unwrap();
+            assert_eq!(decoded.kind, "LiveApprovalsChunk");
+            assert!(!completed);
+            assert_eq!(decoded.offset, joined.len());
+            joined.push_str(&decoded.data);
+            completed = decoded.complete;
+        }
+        assert!(completed);
+        assert_eq!(
+            serde_json::from_str::<crate::Response>(&joined).unwrap(),
+            expected
+        );
+    }
     #[test]
     fn native_dashboard_requests_are_language_neutral() {
         for value in [

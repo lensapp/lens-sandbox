@@ -20,6 +20,7 @@ pub use dashboard::{DashboardApproval, DashboardEvent, DashboardSandbox};
 pub use ledger::{AnswerSource, ApprovalKind, ConnectorVerb, Decision, LedgerEvent, LedgerRecord};
 pub use live_approvals::{
     ApprovalConnection, LiveApproval, LiveApprovalAction, LiveApprovalSnapshot,
+    live_approval_frames,
 };
 pub use paths::{
     LnsHomeError, audit_anchor_for_run, audit_log_for_run, audit_runs_root, build_cache_root,
