@@ -506,7 +506,6 @@ pub(crate) async fn verify_the_pin<R: Registry>(
     }
 }
 
-#[allow(clippy::cognitive_complexity)] // manifest fetch → digest verify → per-layer parallel pull → diff_id check
 /// What this pull costs, said before it starts: an image whose every layer is already held is reported as cached, and one that is not is reported as resolved. Answers with the bytes still to fetch.
 fn announce_the_pull(
     image: &str,
