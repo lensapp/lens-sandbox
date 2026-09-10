@@ -1,0 +1,43 @@
+apiVersion: lns.run/v1
+kind: connector
+name: github
+spec:
+  serves:
+    - api.github.com
+    - github.com
+  methods:
+    - name: sign-in
+      label: Sign in with GitHub
+      auth:
+        kind: code
+        label: GitHub device flow
+        help: >-
+          The component shows a code, you confirm it at github.com, and GitHub
+          hands back a token. lns cannot read what the component does; it holds
+          the component to github.com, to no host execution, and to the time
+          below.
+        component: ./sign-in.wasm
+        outputs:
+          - access_token
+          - refresh_token
+          - client_id
+        hosts:
+          - github.com
+        limits:
+          callSeconds: 15
+          sessionSeconds: 900
+      egress:
+        http:
+          - match: api.github.com
+            verdict: allow
+          - match: github.com
+            verdict: allow
+      credentials:
+        - envVar: GITHUB_TOKEN
+          placeholder: ghu_lnsPLACEHOLDER0000000000000000000
+          field: access_token
+          injections:
+            - kind: bearer_header
+              domain: api.github.com
+            - kind: basic_x_access_token
+              domain: github.com

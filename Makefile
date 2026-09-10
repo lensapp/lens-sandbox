@@ -1,4 +1,4 @@
-.PHONY: dev build build-lns build-lns-service test test-crates lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report parity shell-tests fixture-components \
+.PHONY: dev build build-lns build-lns-service test test-crates lint fmt complexity complexity-all clean coverage coverage-data coverage-affected coverage-lcov e2e e2e-microvm preflight-microvm audit install-hooks gate-report parity shell-tests components \
 	lint-impl test-impl test-crates-impl complexity-impl coverage-impl coverage-data-impl parity-impl coverage-affected-impl
 
 CARGO ?= cargo
@@ -113,7 +113,7 @@ complexity-impl coverage-data-impl: export CARGO_INCREMENTAL := 0
 lint:
 	@$(TIMED) lint -- $(MAKE) --no-print-directory lint-impl
 
-lint-impl: shell-tests fixture-components
+lint-impl: shell-tests components
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --workspace --all-targets $(CARGO_LOCKED) -- -D warnings -D clippy::undocumented_unsafe_blocks
 
@@ -193,19 +193,15 @@ shell-tests:
 		fi; \
 		exit $$status
 
-# The mechanism components the wasm tests run are committed beside their source,
-# so nothing in the test run would notice that source changing under them. This
-# rebuilds and compares. It needs the wasm32-wasip2 target, which a Rust-only
-# checkout need not have, so it prints what it skipped rather than blocking a
-# commit — and in CI, where the lint job installs the target, a skip fails the
-# step, because silence must not read as agreement.
-fixture-components:
-	@if ! rustup target list --installed 2>/dev/null | grep -qx wasm32-wasip2; then \
-		echo "fixture-components note: skipped (rustup target add wasm32-wasip2 to run it)"; \
-		[ -z "$${CI:-}" ] || { echo "fixture-components: CI installs the target, so a skip here is a dead step"; exit 1; }; \
-	else \
-		crates/lns-service/tests/fixtures/mechanism/build.sh --check; \
-	fi
+# Every mechanism component — the ones the wasm tests run and the one the github
+# connector ships — is committed beside its source, so nothing else would notice
+# that source changing under it. The script rebuilds each and compares; it owns
+# the toolchain preflight and the rule that one script's failure never hides
+# another's, and `scripts/components.test.sh` covers both.
+components:
+	@scripts/components.sh \
+		crates/lns-service/tests/fixtures/mechanism/build.sh \
+		connectors/github/mechanism/build.sh
 
 # ── Coverage ──────────────────────────────────────────────────────────
 # Two phases:

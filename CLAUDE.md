@@ -36,7 +36,7 @@ Never edit the specification to match the code. A divergence is work to be done,
 
 ## Project Overview
 
-Monorepo. A Cargo workspace (production crates, two operator tools, two test/coverage infra crates) and one shell-script package; `Cargo.toml` `members` is the authoritative list.
+Monorepo. A Cargo workspace (production crates, two operator tools, two test/coverage infra crates) and one shell-script package; `Cargo.toml` `members` is the authoritative list. Two crates sit deliberately outside it, because they build for `wasm32-wasip2` and ship as committed `.wasm` bytes: the mechanism fixtures (`crates/lns-service/tests/fixtures/mechanism/`) and the shipped GitHub connector's component (`connectors/github/mechanism/`). `make lint` rebuilds both and fails if the committed bytes are stale.
 
 | Package | Purpose |
 |---------|---------|
