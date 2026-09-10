@@ -1269,12 +1269,11 @@ mod tests {
             4,
             "a ping, a build, an export and the removal of the tag, and nothing else",
         );
+        let removal = daemon.sent.borrow()[3].clone();
         assert!(
-            daemon.sent.borrow()[3].starts_with("DELETE /v1.43/images/lns-build.local%2Fdocker%3A")
-                || daemon.sent.borrow()[3]
-                    .starts_with("DELETE /v1.43/images/lns-build.local/docker:"),
-            "the daemon's own copy is not left behind: {}",
-            daemon.sent.borrow()[3],
+            removal.starts_with("DELETE /v1.43/images/lns-build.local%2Fdocker%3A")
+                || removal.starts_with("DELETE /v1.43/images/lns-build.local/docker:"),
+            "the daemon's own copy is not left behind: {removal}",
         );
         assert!(
             daemon.sent.borrow()[1].contains("platform=linux%2Farm64"),

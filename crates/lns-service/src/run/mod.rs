@@ -182,16 +182,20 @@ pub(super) fn report_the_booted_image(
     built_outside_the_gate: bool,
 ) {
     if let (Some(image), Some(config)) = (image, config) {
+        let gate = the_gate_it_was_built_outside(built_outside_the_gate);
         crate::log::info!(
             "Image",
-            "{image}, {}/{}{}",
+            "{image}, {}/{}{gate}",
             config.os,
             config.architecture,
-            match built_outside_the_gate {
-                true => format!(" — {}", lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
-                false => String::new(),
-            },
         );
+    }
+}
+
+fn the_gate_it_was_built_outside(built_outside_the_gate: bool) -> String {
+    match built_outside_the_gate {
+        true => format!(" — {}", lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
+        false => String::new(),
     }
 }
 
