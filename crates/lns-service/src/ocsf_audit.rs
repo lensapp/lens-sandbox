@@ -90,15 +90,15 @@ pub fn workload_exit_event(cx: &OcsfCtx, exit_code: i32, killed: bool) -> Map<St
     into_object(lns_ocsf::workload_exit(&cx.ctx(), exit_code, killed))
 }
 
-pub fn broker_exit_event(
+pub fn refusal_event(
     cx: &OcsfCtx,
     exit_code: i32,
-    reason: &lns_session::BrokerExitReason,
+    refusal: &crate::run::Refusal,
 ) -> Map<String, Value> {
     into_object(lns_ocsf::broker_refusal(
         &cx.ctx(),
-        reason.as_str(),
-        &reason.summary(),
+        &refusal.reason,
+        &refusal.summary,
         exit_code,
     ))
 }
@@ -302,16 +302,26 @@ mod tests {
     }
 
     #[test]
-    fn each_broker_refusal_selects_its_own_audit_kind() {
+    fn each_refusal_selects_its_own_audit_kind() {
+        use crate::run::Refusal;
+
         let cx = OcsfCtx::at_unix("9e8d7c6b0000".into(), "calm-finch".into(), 1_780_000_000);
-        let lease = broker_exit_event(&cx, 1, &lns_session::BrokerExitReason::NoDhcpLease);
-        assert_eq!(lease["unmapped"]["lns_kind"], "no_dhcp_lease");
-        let taken = broker_exit_event(
+        let refusal_of = |reason: &lns_session::BrokerExitReason| Refusal {
+            reason: reason.as_str().to_string(),
+            summary: reason.summary(),
+        };
+        let lease = refusal_event(
             &cx,
             1,
-            &lns_session::BrokerExitReason::NoStaticAddress {
+            &refusal_of(&lns_session::BrokerExitReason::NoDhcpLease),
+        );
+        assert_eq!(lease["unmapped"]["lns_kind"], "no_dhcp_lease");
+        let taken = refusal_event(
+            &cx,
+            1,
+            &refusal_of(&lns_session::BrokerExitReason::NoStaticAddress {
                 offered: vec!["192.168.64.254".into()],
-            },
+            }),
         );
         assert_eq!(taken["unmapped"]["lns_kind"], "no_static_address");
         assert!(
@@ -320,10 +330,12 @@ mod tests {
                 .is_some_and(|m| m.contains("192.168.64.254")),
             "the audit says which addresses were refused: {taken:?}"
         );
-        let setup = broker_exit_event(
+        let setup = refusal_event(
             &cx,
             1,
-            &lns_session::BrokerExitReason::NetworkSetupFailed("busybox is missing".into()),
+            &refusal_of(&lns_session::BrokerExitReason::NetworkSetupFailed(
+                "busybox is missing".into(),
+            )),
         );
         assert_eq!(setup["unmapped"]["lns_kind"], "network_setup_failed");
         assert!(
@@ -331,6 +343,21 @@ mod tests {
                 .as_str()
                 .is_some_and(|m| m.contains("busybox is missing")),
             "the real error must reach the audit: {setup:?}"
+        );
+        let host = refusal_event(
+            &cx,
+            125,
+            &Refusal {
+                reason: "host_addresses_exhausted".into(),
+                summary: "no free address left on 192.168.64.0/24".into(),
+            },
+        );
+        assert_eq!(host["unmapped"]["lns_kind"], "host_addresses_exhausted");
+        assert!(
+            host["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("192.168.64.0/24")),
+            "a host-side refusal is as legible in the audit as a broker one: {host:?}"
         );
     }
 

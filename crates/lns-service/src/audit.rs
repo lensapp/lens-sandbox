@@ -255,12 +255,12 @@ pub fn record_run_exited_with_reason_at(
     cx: &crate::ocsf_audit::OcsfCtx,
     exit_code: i32,
     killed: bool,
-    reason: Option<lns_session::BrokerExitReason>,
+    reason: Option<crate::run::Refusal>,
 ) -> Result<()> {
     append_ocsf_at(
         path,
         match reason {
-            Some(reason) => crate::ocsf_audit::broker_exit_event(cx, exit_code, &reason),
+            Some(reason) => crate::ocsf_audit::refusal_event(cx, exit_code, &reason),
             None => crate::ocsf_audit::workload_exit_event(cx, exit_code, killed),
         },
     )
@@ -270,7 +270,7 @@ pub fn record_run_exited_with_reason(
     run_id: &str,
     microvm: &str,
     exit_code: i32,
-    reason: Option<lns_session::BrokerExitReason>,
+    reason: Option<crate::run::Refusal>,
     clock: &dyn Clock,
 ) -> Result<()> {
     record_run_exited_with_reason_at(
@@ -649,7 +649,10 @@ mod tests {
             &cx(),
             1,
             false,
-            Some(lns_session::BrokerExitReason::NoDhcpLease),
+            Some(crate::run::Refusal {
+                reason: lns_session::BrokerExitReason::NoDhcpLease.as_str().into(),
+                summary: lns_session::BrokerExitReason::NoDhcpLease.summary(),
+            }),
         )
         .unwrap();
         let content = std::fs::read_to_string(path).unwrap();

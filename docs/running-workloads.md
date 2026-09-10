@@ -1085,6 +1085,11 @@ What the host does, per booting guest:
 - reserves three candidates from the top of the range and gives the guest a
   stable hardware address derived from its run id.
 
+If the host cannot address the guest at all — no discoverable shared network, an
+unreadable lease or neighbour table, or a range with nothing free — the run
+stops before the workload starts, prints the cause and a remedy, records one
+named failure in the audit log, and exits 125.
+
 In the guest, the broker takes the first candidate that is silent to an ARP
 probe, announces it, and checks the gateway answers. If every candidate is
 taken, or the gateway does not answer, the run stops with a named reason — it

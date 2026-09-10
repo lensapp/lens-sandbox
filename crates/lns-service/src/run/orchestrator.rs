@@ -84,7 +84,7 @@ pub async fn handle(
     )
     .instrument(tracing::Span::current())
     .await;
-    let refusal = super::broker_exit_reason(&result);
+    let refusal = super::refusal_of(&result);
     let code = emit_completion(&frame_tx, result).await;
     if let Err(e) = crate::audit::record_run_exited_with_reason(
         &finished_run_id,

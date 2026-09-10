@@ -11,12 +11,31 @@ mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};
 pub use scratch::{RealRemoveDir, RemoveDir, reclaim_run_dir};
 
-pub fn broker_exit_reason(result: &Result<i32>) -> Option<lns_session::BrokerExitReason> {
-    result.as_ref().err().and_then(|error| {
+/// A run that never reached its workload, named: the broker refused the guest's network, or the host could not address the guest in the first place.
+pub struct Refusal {
+    pub reason: String,
+    pub summary: String,
+}
+
+impl Refusal {
+    fn of(error: &anyhow::Error) -> Option<Self> {
+        if let Some(refusal) = error.downcast_ref::<crate::vm::session_client::BrokerRefusal>() {
+            return Some(Self {
+                reason: refusal.reason.as_str().to_string(),
+                summary: refusal.reason.summary(),
+            });
+        }
         error
-            .downcast_ref::<crate::vm::session_client::BrokerRefusal>()
-            .map(|refusal| refusal.reason.clone())
-    })
+            .downcast_ref::<crate::vm::guest_addr::ReserveError>()
+            .map(|failure| Self {
+                reason: failure.as_str().to_string(),
+                summary: failure.to_string(),
+            })
+    }
+}
+
+pub fn refusal_of(result: &Result<i32>) -> Option<Refusal> {
+    result.as_ref().err().and_then(Refusal::of)
 }
 
 /// How a run ended: the code its workload left, whether --rm takes its state, and when.
@@ -117,12 +136,15 @@ fn assembling_progress(span: tracing::Span) -> impl Fn(u64, u64) {
     }
 }
 
-/// A broker refusal is rendered from its typed reason, not from the guest's own bytes: this render is CRLF-corrected and reaches a detached run's log.
+/// A refusal is rendered from its typed reason, not from the guest's own bytes or the host's call stack: this render is CRLF-corrected and reaches a detached run's log.
 fn failure_message(error: &anyhow::Error) -> String {
-    match error.downcast_ref::<crate::vm::session_client::BrokerRefusal>() {
-        Some(refusal) => refusal.reason.explain(),
-        None => format!("{error:#}"),
+    if let Some(refusal) = error.downcast_ref::<crate::vm::session_client::BrokerRefusal>() {
+        return refusal.reason.explain();
     }
+    if let Some(failure) = error.downcast_ref::<crate::vm::guest_addr::ReserveError>() {
+        return failure.explain();
+    }
+    format!("{error:#}")
 }
 
 pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result<i32>) -> i32 {
@@ -140,14 +162,7 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
             code
         }
         Err(e) => {
-            let code = if e
-                .downcast_ref::<crate::vm::session_client::BrokerRefusal>()
-                .is_some()
-            {
-                125
-            } else {
-                1
-            };
+            let code = if Refusal::of(&e).is_some() { 125 } else { 1 };
             let _ = frame_tx
                 .send(WireFrame::Json(Response::RunLog {
                     level: lns_ipc::LogLevel::Error,
@@ -610,6 +625,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_host_that_cannot_address_the_guest_fails_before_the_workload_not_as_one() {
+        use crate::vm::guest_addr::{AllocError, ReserveError};
+
+        let exhausted = Err(
+            anyhow::Error::new(ReserveError::Alloc(AllocError::Exhausted {
+                network: crate::vm::host_net::HostNetwork::default(),
+            }))
+            .context("reserving an address on the host network for this guest"),
+        );
+        assert_eq!(
+            refusal_of(&exhausted)
+                .expect("the run never reached a workload")
+                .reason,
+            "host_addresses_exhausted",
+            "the audit gets a named host failure, not a workload exit"
+        );
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        let code = emit_completion(&tx, exhausted).await;
+        assert_eq!(code, 125, "lns failed before the workload started");
+        match rx.recv().await {
+            Some(WireFrame::Json(Response::RunLog { level, message, .. })) => {
+                assert!(matches!(level, lns_ipc::LogLevel::Error));
+                assert!(message.contains("192.168.64.0/24"), "{message}");
+                assert!(message.contains("remedy:"), "{message}");
+                assert!(
+                    !message.contains("reserving an address on the host network"),
+                    "the user reads the cause and the remedy, not the host's call stack: {message}"
+                );
+            }
+            other => panic!("expected the host-rendered refusal, got {other:?}"),
+        }
+
+        let undiscoverable = Err(
+            anyhow::Error::new(ReserveError::Network(std::io::Error::other(
+                "the shared network is neither active nor declared",
+            )))
+            .context("reserving an address on the host network for the tool provisioner"),
+        );
+        assert_eq!(
+            refusal_of(&undiscoverable).expect("no guest booted").reason,
+            "host_network_undiscoverable"
+        );
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        assert_eq!(emit_completion(&tx, undiscoverable).await, 125);
+        match rx.recv().await {
+            Some(WireFrame::Json(Response::RunLog { message, .. })) => {
+                assert!(message.contains("neither active nor declared"), "{message}");
+            }
+            other => panic!("expected the host-rendered refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn a_dhcp_refusal_is_rendered_by_the_host_and_not_as_a_workload_exit() {
         let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
         let result = Err(
@@ -619,8 +687,10 @@ mod tests {
             .context("reading broker session frames"),
         );
         assert_eq!(
-            broker_exit_reason(&result),
-            Some(lns_session::BrokerExitReason::NoDhcpLease),
+            refusal_of(&result)
+                .expect("a refusal is not a workload exit")
+                .reason,
+            lns_session::BrokerExitReason::NoDhcpLease.as_str(),
             "the service owns the stable reason shown in the audit"
         );
         let code = emit_completion(&tx, result).await;
