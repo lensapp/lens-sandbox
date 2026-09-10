@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::{Mutex, mpsc};
 
-use super::{SessionInput, SessionParams, input_to_frame, read_server_frames};
+use super::{SessionInput, SessionParams, input_to_frame};
 
 pub async fn run_session_on_fd(
     fd: RawFd,
@@ -61,19 +61,13 @@ async fn run_session(
 
     let (stop_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
-    let stop_for_reader = stop_tx.clone();
-    let reader_handle = tokio::spawn(async move {
-        let outcome = read_server_frames(
-            read_half,
-            frame_tx,
-            params.expected_guest_addresses,
-            params.address_selection,
-        )
-        .await;
-        // Without an explicit wake-up, detached-run input loops hang because nobody else closes input_rx.
-        let _ = stop_for_reader.send(());
-        outcome
-    });
+    let reader_handle = super::spawn_server_frame_reader(
+        read_half,
+        frame_tx,
+        params.expected_guest_addresses,
+        params.address_selection,
+        stop_tx.clone(),
+    );
 
     log::info!("SessionReady", "");
 

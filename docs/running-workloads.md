@@ -1080,8 +1080,10 @@ What the host does, per booting guest:
   either source;
 - excludes the network and broadcast addresses, the gateway, every unexpired
   lease in `/var/db/dhcpd_leases`, every address answering ARP, and every
-  address already reserved for another guest, under one lock so two guests
-  booting together cannot pick the same address;
+  address already reserved for another guest. The lease file and the neighbour
+  table are read from the host first; the reservations of other guests are read
+  and the new one written under one lock, so two guests booting together cannot
+  pick the same address;
 - reserves three candidates from the top of the range and gives the guest a
   stable hardware address derived from its run id.
 
@@ -1089,6 +1091,9 @@ If the host cannot address the guest at all — no discoverable shared network, 
 unreadable lease or neighbour table, or a range with nothing free — the run
 stops before the workload starts, prints the cause and a remedy, records one
 named failure in the audit log, and exits 125.
+
+The address the guest ends up using is printed by `lns run` as
+`Address guest assigned 192.168.64.254`, and the host then holds only that one.
 
 In the guest, the broker takes the first candidate that is silent to an ARP
 probe, announces it, and checks the gateway answers. If every candidate is

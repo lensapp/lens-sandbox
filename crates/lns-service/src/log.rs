@@ -330,6 +330,34 @@ where
 pub(crate) mod testing {
     use super::*;
 
+    /// The same capture for work that runs as its own task: the task is spawned inside the run span and polled outside it, exactly as a service worker thread polls it, so only a future that carries the span is credited with one.
+    pub(crate) fn capture_run_frames_spawned<T>(
+        spawn: impl FnOnce() -> tokio::task::JoinHandle<T>,
+    ) -> (T, Vec<WireFrame>) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WireFrame>(16);
+        let subscriber = tracing_subscriber::registry().with(FrameForwardLayer);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let out = tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("lns.run");
+            let handle = {
+                let _in_runtime = runtime.enter();
+                span.in_scope(|| {
+                    attach_to_run_span(tx);
+                    spawn()
+                })
+            };
+            runtime.block_on(handle).expect("the spawned task ran")
+        });
+        let mut frames = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            frames.push(frame);
+        }
+        (out, frames)
+    }
+
     /// The frames `f`'s `crate::log` events reach the CLI as, captured by running it inside a run span wired exactly as the run orchestrator wires one.
     pub(crate) fn capture_run_frames<T>(f: impl FnOnce() -> T) -> Vec<WireFrame> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<WireFrame>(16);

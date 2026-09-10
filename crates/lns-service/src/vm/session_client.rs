@@ -11,6 +11,7 @@ use lns_session::{
 };
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 mod real;
 pub use real::capture_session_exec;
@@ -137,6 +138,31 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
     }
     let frame = protocol_decode_frame(&body).context("decode server frame body")?;
     Ok(Some(frame))
+}
+
+/// The reader runs as its own task, so it is given the run's span explicitly: an address the guest reports has to reach the run that owns it, not the service's own log.
+pub(super) fn spawn_server_frame_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    reader: R,
+    frame_tx: mpsc::Sender<WireFrame>,
+    expected_guest_addresses: Option<Vec<std::net::Ipv4Addr>>,
+    address_selection: Option<crate::vm::guest_addr::real::AddressSelection>,
+    stop: tokio::sync::broadcast::Sender<()>,
+) -> tokio::task::JoinHandle<Result<Option<i32>>> {
+    tokio::spawn(
+        async move {
+            let outcome = read_server_frames(
+                reader,
+                frame_tx,
+                expected_guest_addresses,
+                address_selection,
+            )
+            .await;
+            // Without an explicit wake-up, detached-run input loops hang because nobody else closes input_rx.
+            let _ = stop.send(());
+            outcome
+        }
+        .instrument(tracing::Span::current()),
+    )
 }
 
 pub(super) async fn read_server_frames<R: tokio::io::AsyncRead + Unpin>(
@@ -445,6 +471,34 @@ mod tests {
         assert!(
             error.to_string().contains("no address reservation"),
             "{error:#}"
+        );
+    }
+
+    #[test]
+    fn the_spawned_reader_reports_the_assigned_address_into_its_own_runs_log() {
+        let mut bytes = framed(&ServerFrame::NetworkApplied {
+            address: "192.168.64.254".into(),
+        });
+        bytes.extend(framed(&ServerFrame::ExitStatus(0)));
+        let (outcome, frames) = crate::log::testing::capture_run_frames_spawned(|| {
+            let (tx, _rx) = mpsc::channel(2);
+            let (stop, _stopped) = tokio::sync::broadcast::channel::<()>(1);
+            spawn_server_frame_reader(
+                io::Cursor::new(bytes),
+                tx,
+                Some(vec!["192.168.64.254".parse().expect("address")]),
+                None,
+                stop,
+            )
+        });
+        assert_eq!(outcome.expect("an offered address"), Some(0));
+        assert!(
+            frames.iter().any(|frame| matches!(
+                frame,
+                WireFrame::Json(lns_ipc::Response::RunLog { message, .. })
+                    if message.contains("guest assigned 192.168.64.254")
+            )),
+            "the address the guest took is the user's, so it must reach the run that owns it: {frames:?}"
         );
     }
 
