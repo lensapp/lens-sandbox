@@ -527,11 +527,14 @@ pub(crate) mod tests {
     #[test]
     fn an_image_the_host_daemon_built_is_handed_to_the_uploader_saying_so() {
         let built = built();
-        let image = pushable("built".into(), &cached_from(&built), true, |_| {
-            Ok(String::new())
-        })
-        .expect("projecting");
+        let image =
+            pushable("built".into(), &cached_from(&built), true, nowhere).expect("projecting");
         assert!(image.built_outside_the_gate);
+    }
+
+    /// Where a layer sits is another test's question; these ask what the projection decides.
+    fn nowhere(_digest: &str) -> Result<String> {
+        Ok(String::new())
     }
 
     #[test]
@@ -564,10 +567,8 @@ pub(crate) mod tests {
             "sha256:{}",
             hex::encode(Sha256::digest(serde_json::to_vec(&built.manifest).unwrap()))
         );
-        let image = pushable("built".into(), &cached_from(&built), false, |_| {
-            Ok(String::new())
-        })
-        .expect("a manifest with no media type still publishes");
+        let image = pushable("built".into(), &cached_from(&built), false, nowhere)
+            .expect("a manifest with no media type still publishes");
         assert_eq!(
             image.manifest_media_type,
             oci_client::manifest::OCI_IMAGE_MEDIA_TYPE
@@ -583,20 +584,16 @@ pub(crate) mod tests {
             "sha256:{}",
             hex::encode(Sha256::digest(serde_json::to_vec(&built.manifest).unwrap()))
         );
-        let image = pushable("built".into(), &cached_from(&built), false, |_| {
-            Ok(String::new())
-        })
-        .expect("projecting");
+        let image =
+            pushable("built".into(), &cached_from(&built), false, nowhere).expect("projecting");
         assert_eq!(image.layers[0].size, 0);
     }
 
     #[test]
     fn a_pushable_image_carries_the_platform_the_index_will_publish_it_under() {
         let built = built();
-        let image = pushable("built".into(), &cached_from(&built), false, |_| {
-            Ok(String::new())
-        })
-        .expect("projecting");
+        let image =
+            pushable("built".into(), &cached_from(&built), false, nowhere).expect("projecting");
         assert_eq!(
             (image.os.as_str(), image.architecture.as_str()),
             ("linux", "arm64"),
@@ -608,10 +605,7 @@ pub(crate) mod tests {
     fn an_image_whose_config_declares_no_platform_is_not_one_an_index_can_hold() {
         let mut built = built();
         built.config = r#"{"rootfs":{"type":"layers","diff_ids":[]}}"#.to_string();
-        let err = pushable("built".into(), &cached_from(&built), false, |_| {
-            Ok(String::new())
-        })
-        .unwrap_err();
+        let err = pushable("built".into(), &cached_from(&built), false, nowhere).unwrap_err();
         assert!(
             format!("{err:#}").contains("declares no"),
             "an entry a pull selects by platform cannot be assembled without one: {err:#}"
