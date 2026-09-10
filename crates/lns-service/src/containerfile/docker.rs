@@ -730,10 +730,11 @@ mod tests {
         assert!(daemon.sent.borrow()[0].contains("nocache=1"));
     }
 
+    /// The stream is not all JSON on every daemon, and a line lns cannot read is not a build failure.
     #[tokio::test]
     async fn a_build_the_daemon_failed_mid_stream_is_the_error_that_stream_named() {
         let daemon = FakeDaemon::answering(&[&ok(
-            "{\"stream\":\"Step 1/2\"}\n{\"errorDetail\":{\"code\":1},\"error\":\"The command '/bin/sh -c npm i' returned a non-zero code: 1\"}\n",
+            "not json at all\n{\"stream\":\"Step 1/2\"}\n{\"errorDetail\":{\"code\":1},\"error\":\"The command '/bin/sh -c npm i' returned a non-zero code: 1\"}\n",
         )]);
         let err = build(&daemon, &a_build()).await.unwrap_err();
         assert!(

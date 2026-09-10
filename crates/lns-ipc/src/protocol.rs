@@ -1373,6 +1373,20 @@ mod tests {
         }
     }
 
+    /// Only a daemon build happens where the document's own rules decide nothing, and one string decides every line that says so.
+    #[test]
+    fn only_a_daemon_build_is_one_the_gate_did_not_apply_to() {
+        assert!(!BuildEngine::default().is_outside_the_gate());
+        assert!(!BuildEngine::Lns.is_outside_the_gate());
+        assert!(BuildEngine::Docker { socket: None }.is_outside_the_gate());
+        assert!(
+            BuildEngine::Docker {
+                socket: Some("/var/run/docker.sock".into())
+            }
+            .is_outside_the_gate()
+        );
+    }
+
     #[test]
     fn the_variables_a_method_sets_are_its_env_and_the_one_each_credential_fills() {
         // §3.2.4: both the card and `lns connector grant` disclose this, and two spellings of it would let one of them omit a variable the other names.

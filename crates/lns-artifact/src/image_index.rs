@@ -227,10 +227,10 @@ mod tests {
         let assembled = assemble(&[entry("arm64", "sha256:aa")]).expect("assembling the index");
         let value: serde_json::Value =
             serde_json::from_slice(&assembled.bytes).expect("the index is json");
-        assert!(
-            value["manifests"][0]["annotations"].is_null(),
-            "a gated build says nothing rather than saying false: {}",
-            String::from_utf8_lossy(&assembled.bytes),
+        assert_eq!(
+            value["manifests"][0]["annotations"],
+            serde_json::Value::Null,
+            "a gated build says nothing rather than saying false"
         );
     }
 
