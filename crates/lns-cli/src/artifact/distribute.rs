@@ -506,6 +506,14 @@ fn was_built_outside_the_gate(
     })
 }
 
+/// The push publishes the record, so the line that says what it published says it in words too (§3.1.1).
+fn the_gate_it_was_built_outside(image: &lns_ipc::PushableImage) -> String {
+    match image.built_outside_the_gate {
+        true => format!(" — {}", lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
+        false => String::new(),
+    }
+}
+
 /// How every line that lists an index names what it holds.
 fn holdings(entries: &[lns_artifact::image_index::IndexEntry]) -> String {
     entries
@@ -560,12 +568,13 @@ where
         publish_one_architecture(producer, &image, repository, artifact_tag, &mine).await?;
         writeln!(
             out,
-            "{} {} as {repository}@{} ({} layer{})",
+            "{} {} as {repository}@{} ({} layer{}){}",
             if built.reused { "reused" } else { "built" },
             built.label,
             image.digest,
             image.layers.len(),
             if image.layers.len() == 1 { "" } else { "s" },
+            the_gate_it_was_built_outside(&image),
         )?;
     }
     // The entries are the record and the index is derived from them, so an index that is not the one they assemble to is republished even where this push added no entry.
