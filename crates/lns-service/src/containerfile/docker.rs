@@ -1368,7 +1368,34 @@ mod tests {
             &ok("OK"),
             &ok(r#"{"stream":"Successfully built"}"#),
             &ok_bytes(&a_saved_image()),
-            &b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n".as_ref(),
+        ]);
+        let mut built = None;
+        let messages = crate::test_env::captured_messages(|| {
+            built = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("a runtime for one build")
+                    .block_on(built_through(&a_host(), &daemon, false)),
+            );
+        });
+
+        assert!(built.expect("the build was run").is_ok());
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("still holds its own copy")),
+            "{messages:?}",
+        );
+    }
+
+    /// A daemon that stops answering once the export is in hand has already given lns the image, so the build stands and the leftover is named.
+    #[test]
+    fn a_daemon_that_stops_answering_after_the_export_still_finishes_the_build() {
+        let daemon = FakeDaemon::answering(&[
+            &ok("OK"),
+            &ok(r#"{"stream":"Successfully built"}"#),
+            &ok_bytes(&a_saved_image()),
         ]);
         let mut built = None;
         let messages = crate::test_env::captured_messages(|| {
