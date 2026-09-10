@@ -26,7 +26,7 @@ summary, then push it under every tag given.
 | Input | Default | Description |
 | --- | --- | --- |
 | `file` | — | Document to publish. Its directory roots the document's relative filesets and supplies the `README.md` layer. Required. |
-| `tags` | — | References to publish, one per line (commas also separate). Required. |
+| `tags` | — | References to publish, one per line (commas also separate). Every tag must name the same repository, differing only in the tag. Required. |
 | `push` | `true` | `false` stops after the dry run — what a pull request wants. `true` or `false`; any other value fails the step. |
 | `kind` | _(empty)_ | `sandbox` or `mixin`, the kind the document must be. Empty accepts either. |
 | `require-exact-tool-versions` | `true` | Fail when the dry run reports tool versions that resolve at push time. `true` or `false`; any other value fails the step. |
@@ -37,7 +37,7 @@ summary, then push it under every tag given.
 | --- | --- |
 | `digest` | The manifest digest published, `sha256:…`. Empty when `push` is `false`. |
 | `refs` | Every reference pushed, one per line. Empty when `push` is `false`. |
-| `first-push` | `true` when the first tag's repository did not exist before this push. Empty when `push` is `false`. |
+| `first-push` | `true` when the repository did not exist before this push. Empty when `push` is `false`. |
 
 ## Tags name a namespace
 
@@ -50,6 +50,24 @@ published, whatever registry the runner has configured.
 
 Whitespace around a tag is the workflow's line wrapping and is dropped.
 Whitespace inside one is a malformed reference and `lns` refuses it.
+
+## Every tag names one repository
+
+`tags` may carry as many tags as you like, but they all name the same
+`<namespace>/<name>` on the same host and differ only after the `:`. A mix
+fails the step before anything is validated, naming the offending pair:
+
+> `::error::tags name two repositories, 'hub.lns.run/acme/gh:v1' and 'ghcr.io/acme/gh:v1'.`
+
+One repository is what makes the rest of the action honest: the dry run of the
+first tag stands for all of them, `first-push` probes one repository, and
+`digest` is one value — a document's own references are derived from the
+repository it is published to, so two repositories can publish two different
+manifests, and pairing an earlier ref with the final digest would be wrong.
+Publishing the same document to a second repository is a second step.
+
+The host may be left implicit on some tags and written out on others:
+`acme/gh:v1` and `hub.lns.run/acme/gh:latest` are the same repository.
 
 ## What the job summary carries
 
