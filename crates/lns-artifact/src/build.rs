@@ -63,10 +63,34 @@ impl BuiltArtifact {
             .iter()
             .find(|blob| blob.media_type == README_LAYER_MEDIA_TYPE)
     }
+
+    /// The packed Containerfile-and-context layer, when `spec.image` named one (§7.3).
+    pub fn build_source_layer(&self) -> Option<&Blob> {
+        self.blobs
+            .iter()
+            .find(|blob| blob.media_type == crate::build_source::BUILD_SOURCE_LAYER_MEDIA_TYPE)
+    }
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+/// The digest a packed layer is addressed by, so every packer in this crate spells it one way.
+pub(crate) fn digest_of(bytes: &[u8]) -> String {
+    sha256_digest(bytes)
+}
+
+/// Pack entries into the deterministic gzipped tar every layer of an artifact is, held to the limits its caller sets.
+pub(crate) fn pack_entries(
+    entries: &[FileEntry],
+    max_bytes: u64,
+    max_entries: usize,
+) -> Result<Vec<u8>> {
+    validate_fileset_entries(entries, max_bytes, max_entries)?;
+    let tar = tar_layer(entries)?;
+    validate_fileset_layer_size(tar.len() as u64, max_bytes)?;
+    gzip(&tar).context("compressing layer")
 }
 
 /// Assemble one OCI artifact from a validated document, the directories its `path` filesets pack in declaration order — one layer per entry (`docs/sandbox-spec.md` §6), so the files and the declaration that mounts them share one digest — and the `README.md` beside the document, if any (§7.2).
@@ -74,6 +98,16 @@ pub fn build_artifact(
     doc: &[u8],
     filesets: &[Vec<FileEntry>],
     readme: Option<&[u8]>,
+) -> Result<BuiltArtifact> {
+    build_artifact_with(doc, filesets, readme, None)
+}
+
+/// The same assembly for a document whose `spec.image` named a Containerfile: the file and its context ride as one more layer (§7.3).
+pub fn build_artifact_with(
+    doc: &[u8],
+    filesets: &[Vec<FileEntry>],
+    readme: Option<&[u8]>,
+    image_source: Option<&crate::build_source::ImageSourceLayer>,
 ) -> Result<BuiltArtifact> {
     if let Err(problems) = crate::validate::validate(doc) {
         bail!(
@@ -111,6 +145,16 @@ pub fn build_artifact(
             "mediaType": FILESET_LAYER_MEDIA_TYPE,
             "digest": blob.digest,
             "size": blob.data.len(),
+        }));
+        blobs.push(blob);
+    }
+    if let Some(source) = image_source {
+        let blob = crate::build_source::pack(source)?;
+        layers.push(json!({
+            "mediaType": blob.media_type,
+            "digest": blob.digest,
+            "size": blob.data.len(),
+            "annotations": { "org.opencontainers.image.title": source.image_source },
         }));
         blobs.push(blob);
     }
@@ -191,10 +235,8 @@ pub fn bytes_by_name(entries: &[FileEntry]) -> BTreeMap<String, Vec<u8>> {
 
 /// Pack one fileset directory into a gzipped tar layer. Deterministic — entries sorted, uid/gid/mtime zeroed, each file's mode preserved, no gzip timestamp — so identical directories dedupe at the blob level however many artifacts carry them.
 fn fileset_layer(entries: &[FileEntry]) -> Result<Blob> {
-    validate_fileset_entries(entries, MAX_FILESET_BYTES, MAX_FILESET_ENTRIES)?;
-    let tar = tar_layer(entries).context("packing fileset layer")?;
-    validate_fileset_layer_size(tar.len() as u64, MAX_FILESET_BYTES)?;
-    let data = gzip(&tar).context("compressing fileset layer")?;
+    let data = pack_entries(entries, MAX_FILESET_BYTES, MAX_FILESET_ENTRIES)
+        .context("packing fileset layer")?;
     Ok(Blob {
         digest: sha256_digest(&data),
         media_type: FILESET_LAYER_MEDIA_TYPE.to_string(),
@@ -270,6 +312,46 @@ mod tests {
     /// Every artifact in this module is built from a document plus the directories its `path` filesets pack; most fixtures declare none.
     fn build(doc: &[u8]) -> Result<BuiltArtifact> {
         build_artifact(doc, &[], None)
+    }
+
+    #[test]
+    fn a_built_image_s_containerfile_and_context_become_a_layer_of_the_same_artifact() {
+        let source = crate::build_source::ImageSourceLayer {
+            image_source: "./image".into(),
+            files: vec![FileEntry {
+                path: "Containerfile".into(),
+                data: b"FROM alpine\n".to_vec(),
+                mode: 0o644,
+            }],
+        };
+        let built = build_artifact_with(&sandbox(), &[], None, Some(&source)).unwrap();
+        let layer = built
+            .build_source_layer()
+            .expect("§7.3: what the guest starts from is disclosed with the rest of the document");
+
+        let manifest: Value = serde_json::from_slice(&built.manifest).unwrap();
+        let descriptor = manifest["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["mediaType"] == crate::build_source::BUILD_SOURCE_LAYER_MEDIA_TYPE)
+            .expect("the manifest addresses the build source layer");
+        assert_eq!(descriptor["digest"], layer.digest);
+        assert_eq!(
+            descriptor["annotations"]["org.opencontainers.image.title"], "./image",
+            "§7.3: the title is exactly the path spec.imageSource records"
+        );
+        assert_eq!(
+            crate::build_source::read("./image", &layer.data)
+                .unwrap()
+                .text,
+            "FROM alpine\n"
+        );
+    }
+
+    #[test]
+    fn a_document_whose_image_is_a_reference_carries_no_build_source_layer() {
+        assert!(build(&sandbox()).unwrap().build_source_layer().is_none());
     }
 
     #[test]

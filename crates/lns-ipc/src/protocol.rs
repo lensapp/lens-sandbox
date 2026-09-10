@@ -74,6 +74,44 @@ pub enum Request {
         name: String,
     },
     PruneRuns,
+    /// Build what a local document's `spec.image` names, fill the build cache and publish nothing.
+    BuildSandbox {
+        /// The document as canonical JSON, the same shape a local run sends.
+        definition: String,
+        /// Which engine builds it, as this machine's `build.engine` says.
+        #[serde(default)]
+        build_engine: BuildEngine,
+        /// The document's absolute directory, which roots the Containerfile path `spec.image` names.
+        definition_dir: String,
+        /// Ignore every key this build would otherwise answer from, and write the ones it produces.
+        rebuild: bool,
+        /// The egress the document's other sources authored, as `ResolveDefinition` answered it, so a build step is held to what a run of the same document would be.
+        #[serde(default)]
+        authored_egress: Option<String>,
+        /// Which artifact carries each packed fileset the resolution reached, so a build step seeds the same files a run would.
+        #[serde(default)]
+        packed_filesets: Vec<PackedFilesetSource>,
+    },
+    /// The build a push needs: the image and every blob of it, so the caller — which holds the registry login — uploads it beside the artifact.
+    BuildImageForPush {
+        /// The document as canonical JSON, the same shape a local run sends.
+        definition: String,
+        /// Which engine builds it, as this machine's `build.engine` says.
+        #[serde(default)]
+        build_engine: BuildEngine,
+        /// The document's absolute directory, which roots the Containerfile path `spec.image` names.
+        definition_dir: String,
+        /// Ignore every key this build would otherwise answer from, and write the ones it produces.
+        rebuild: bool,
+        /// Answer with the key alone and build nothing, which is what `lns push --dry-run` asks for.
+        plan_only: bool,
+        /// The egress the document's other sources authored, as `ResolveDefinition` answered it, so a build step is held to what a run of the same document would be.
+        #[serde(default)]
+        authored_egress: Option<String>,
+        /// Which artifact carries each packed fileset the resolution reached, so a build step seeds the same files a run would.
+        #[serde(default)]
+        packed_filesets: Vec<PackedFilesetSource>,
+    },
     ListVolumes,
     CreateVolume {
         name: String,
@@ -111,6 +149,8 @@ pub enum Request {
     PruneImages,
     /// The references `PruneImages` would remove right now, so a prune can list them and ask first.
     ListPrunableImages,
+    /// The built images `PruneRuns` would sweep right now, so a prune can list them beside the stopped sandboxes and ask first.
+    ListPrunableBuiltImages,
     /// Resolve a local definition's mixins, since only the service can pull a reference and read a directory the same way a run will.
     ResolveDefinition {
         definition: String,
@@ -244,6 +284,31 @@ pub enum Response {
     },
     RunsPruned {
         removed: Vec<String>,
+        /// The built images the sweep dropped: the ones no document on this machine and no run named any more.
+        #[serde(default)]
+        built_images: Vec<String>,
+    },
+    /// What one `lns sandbox build` decided: the key, the image, and whether it had to build it.
+    SandboxBuilt {
+        /// The build cache key: the `FROM` digest, the Containerfile text, the context's content hash and the architecture.
+        key: String,
+        reference: String,
+        /// What `spec.image` named, as the summary prints it.
+        label: String,
+        layers: usize,
+        /// True when the key answered outright, so the build ran nothing.
+        reused: bool,
+    },
+    /// What a push needs to publish an image beside its artifact: the key that names the build, and the image itself when this machine has one.
+    ImageBuiltForPush {
+        /// The build cache key: the `FROM` digest, the Containerfile text, the context's content hash and the architecture.
+        key: String,
+        /// What `spec.image` named, as every line about this build spells it.
+        label: String,
+        /// True when the key answered outright, so nothing was built.
+        reused: bool,
+        /// Absent only from a plan whose key this machine cannot answer, where the digest can be known only by building.
+        image: Option<Box<PushableImage>>,
     },
     RegistryLoginStored,
     RegistryLoggedOut,
@@ -302,6 +367,9 @@ pub enum Response {
     },
     ImageList {
         images: Vec<ImageInfo>,
+    },
+    PrunableBuiltImages {
+        references: Vec<String>,
     },
     ImageRemoved {
         reference: String,
@@ -612,6 +680,61 @@ pub enum ContributionBlock {
     Credential,
 }
 
+/// An image lns built, with every blob the caller must upload before the manifest that references them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushableImage {
+    /// The digest-pinned reference the local store holds it under.
+    pub reference: String,
+    pub digest: String,
+    pub manifest: String,
+    pub manifest_media_type: String,
+    pub config: String,
+    pub config_digest: String,
+    pub config_media_type: String,
+    /// The platform the image config declares, which is the entry the index publishes it under (`docs/sandbox-spec.md` §6).
+    pub os: String,
+    pub architecture: String,
+    /// True when a host Docker daemon built it, which the index entry records and every line about the image says (`docs/sandbox-spec.md` §6.2).
+    #[serde(default)]
+    pub built_outside_the_gate: bool,
+    pub layers: Vec<PushableLayer>,
+}
+
+/// One layer of a built image, and the file this machine holds it in — the bytes stay on disk, because an image is gigabytes and a socket is not the place for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushableLayer {
+    pub digest: String,
+    pub media_type: String,
+    pub size: u64,
+    pub path: String,
+}
+
+/// What a pulled artifact discloses about the image it was built from: the Containerfile, and the context it was built in (`docs/sandbox-spec.md` §7.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildSourceView {
+    /// The Containerfile as `spec.imageSource` and the summary spell it, such as `./image/Containerfile`.
+    pub containerfile: String,
+    pub text: String,
+    pub context: Vec<BuildContextFile>,
+}
+
+/// One architecture an image index holds, as `lns inspect` prints it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuiltArchitecture {
+    pub architecture: String,
+    pub digest: String,
+    /// True when the index entry says a host Docker daemon built this architecture (`docs/sandbox-spec.md` §6.2).
+    #[serde(default)]
+    pub built_outside_the_gate: bool,
+}
+
+/// One file of the packed build context, as an approver reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildContextFile {
+    pub path: String,
+    pub bytes: u64,
+}
+
 /// One `pre-start` script of a resolved sandbox, carried whole because a consumer approving a script has to be able to read it (`docs/sandbox-spec.md` §1.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxScript {
@@ -647,6 +770,12 @@ pub struct SandboxView {
     #[serde(default)]
     pub digest: String,
     pub image: String,
+    /// What the image was built from, when the artifact carries a build source layer (§7.3).
+    #[serde(default)]
+    pub image_source: Option<BuildSourceView>,
+    /// One digest per architecture the published image index holds, so an approver sees which hosts this document was built for (§6).
+    #[serde(default)]
+    pub image_architectures: Vec<BuiltArchitecture>,
     /// The mixins this sandbox resolved into, since the merged document declares none of its own.
     #[serde(default)]
     pub mixins: Vec<String>,
@@ -840,9 +969,39 @@ pub struct PortPublish {
     pub protocol: Protocol,
 }
 
+/// Which engine builds a Containerfile a `spec.image` names: lns's own build guest, where the document's egress and credentials decide what a `RUN` reaches, or the host's Docker daemon, where they decide nothing (`docs/sandbox-spec.md` §3.1.1). It is a property of the machine, read off `build.engine`, never of the document.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BuildEngine {
+    #[default]
+    Lns,
+    Docker {
+        /// The Unix socket the daemon answers on, resolved where the switch is read, because the side that starts the service is not the side that sets `DOCKER_HOST`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        socket: Option<String>,
+    },
+}
+
+/// The socket a daemon answers on when neither `build.dockerSocket` nor `DOCKER_HOST` names one.
+pub const DEFAULT_DOCKER_SOCKET: &str = "/var/run/docker.sock";
+
+/// What this machine names, then what its environment does, then the one a daemon listens on by default.
+pub fn docker_socket(configured: Option<&str>, docker_host: Option<&str>) -> String {
+    if let Some(configured) = configured {
+        return configured.to_string();
+    }
+    match docker_host.and_then(|host| host.strip_prefix("unix://")) {
+        Some(path) if !path.is_empty() => path.to_string(),
+        _ => DEFAULT_DOCKER_SOCKET.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunImageArgs {
     pub image: Option<String>,
+    /// Which engine builds a path-form `image`, as this machine's `build.engine` says.
+    #[serde(default)]
+    pub build_engine: BuildEngine,
     #[serde(default)]
     pub resolved_image: Option<String>,
     /// The mixins the preflight pinned, in the order the user named them; the run merges these, never a reference it has not resolved itself.
@@ -1221,6 +1380,25 @@ mod tests {
         }
     }
 
+    /// The socket travels on the request, so the side that resolves it is the side with the user's environment (§3.1.1).
+    #[test]
+    fn the_socket_is_what_this_machine_names_then_what_its_environment_does_then_the_default() {
+        assert_eq!(
+            docker_socket(Some("/run/mine.sock"), Some("unix:///other")),
+            "/run/mine.sock"
+        );
+        assert_eq!(
+            docker_socket(None, Some("unix:///run/user/1000/docker.sock")),
+            "/run/user/1000/docker.sock"
+        );
+        assert_eq!(
+            docker_socket(None, Some("tcp://docker:2375")),
+            DEFAULT_DOCKER_SOCKET
+        );
+        assert_eq!(docker_socket(None, Some("unix://")), DEFAULT_DOCKER_SOCKET);
+        assert_eq!(docker_socket(None, None), DEFAULT_DOCKER_SOCKET);
+    }
+
     #[test]
     fn the_variables_a_method_sets_are_its_env_and_the_one_each_credential_fills() {
         // §3.2.4: both the card and `lns connector grant` disclose this, and two spellings of it would let one of them omit a variable the other names.
@@ -1459,6 +1637,7 @@ mod tests {
             protocol: Protocol::Tcp,
         };
         let req = Request::RunImage(Box::new(RunImageArgs {
+            build_engine: BuildEngine::default(),
             image: Some("prism".into()),
             resolved_image: None,
             mixins: Vec::new(),
@@ -1501,6 +1680,7 @@ mod tests {
     #[test]
     fn run_image_args_declarative_launch_settings_survive_postcard_round_trip() {
         let args = RunImageArgs {
+            build_engine: BuildEngine::default(),
             image: Some("ubuntu".into()),
             resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
             mixins: Vec::new(),
@@ -1647,6 +1827,7 @@ mod tests {
 
     fn sample_run_args() -> RunImageArgs {
         RunImageArgs {
+            build_engine: BuildEngine::default(),
             image: Some("some-image:1".into()),
             resolved_image: None,
             mixins: Vec::new(),
@@ -1900,6 +2081,102 @@ mod tests {
                 "1a2b3c4d0000000000000000000000aa".into(),
                 "5e6f7a8b0000000000000000000000bb".into(),
             ],
+            built_images: vec![format!("lns-build.local/built@sha256:{}", "a".repeat(64))],
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    /// The verb and its answer are one exchange: the key, the image, and whether anything was built.
+    #[test]
+    fn a_sandbox_build_survives_a_request_and_response_round_trip() {
+        let req = Request::BuildSandbox {
+            build_engine: BuildEngine::default(),
+            definition: r#"{"spec":{"image":"./image"}}"#.into(),
+            definition_dir: "/work".into(),
+            rebuild: true,
+            authored_egress: Some(r#"{"http":[]}"#.into()),
+            packed_filesets: vec![PackedFilesetSource {
+                guest_path: "/opt/skills".into(),
+                reference: format!("hub.lns.run/team/kit@sha256:{}", "d".repeat(64)),
+                digest: format!("sha256:{}", "e".repeat(64)),
+                size: 4096,
+            }],
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = Response::SandboxBuilt {
+            key: format!("sha256:{}", "b".repeat(64)),
+            reference: format!("lns-build.local/built@sha256:{}", "c".repeat(64)),
+            label: "./image/Containerfile".into(),
+            layers: 3,
+            reused: false,
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    /// A push asks for the image and gets every blob's whereabouts back; a dry run asks for the key alone.
+    #[test]
+    fn a_build_for_a_push_survives_a_request_and_response_round_trip() {
+        let req = Request::BuildImageForPush {
+            build_engine: BuildEngine::default(),
+            definition: r#"{"spec":{"image":"./image"}}"#.into(),
+            definition_dir: "/work".into(),
+            rebuild: false,
+            plan_only: false,
+            authored_egress: Some(r#"{"http":[]}"#.into()),
+            packed_filesets: vec![PackedFilesetSource {
+                guest_path: "/opt/skills".into(),
+                reference: format!("hub.lns.run/team/kit@sha256:{}", "d".repeat(64)),
+                digest: format!("sha256:{}", "e".repeat(64)),
+                size: 4096,
+            }],
+        };
+        let frame = crate::encode_frame(&req).unwrap();
+        let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = Response::ImageBuiltForPush {
+            key: format!("sha256:{}", "b".repeat(64)),
+            label: "./image/Containerfile".into(),
+            reused: true,
+            image: Some(Box::new(PushableImage {
+                built_outside_the_gate: false,
+                reference: format!("lns-build.local/built@sha256:{}", "c".repeat(64)),
+                digest: format!("sha256:{}", "c".repeat(64)),
+                manifest: "{}".into(),
+                manifest_media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+                config: "{}".into(),
+                config_digest: format!("sha256:{}", "d".repeat(64)),
+                config_media_type: "application/vnd.oci.image.config.v1+json".into(),
+                os: "linux".into(),
+                architecture: "arm64".into(),
+                layers: vec![PushableLayer {
+                    digest: format!("sha256:{}", "e".repeat(64)),
+                    media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
+                    size: 4096,
+                    path: "/home/dev/.lns/layers/sha256/ee".into(),
+                }],
+            })),
+        };
+        let frame = crate::encode_frame(&resp).unwrap();
+        let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    /// A dry run whose key this machine cannot answer has no digest to name, and says so by carrying none.
+    #[test]
+    fn a_plan_with_no_image_behind_it_survives_a_round_trip() {
+        let resp = Response::ImageBuiltForPush {
+            key: format!("sha256:{}", "b".repeat(64)),
+            label: "./image/Containerfile".into(),
+            reused: false,
+            image: None,
         };
         let frame = crate::encode_frame(&resp).unwrap();
         let decoded: Response = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -1939,6 +2216,7 @@ mod tests {
             },
             Request::PruneImages,
             Request::ListPrunableImages,
+            Request::ListPrunableBuiltImages,
         ] {
             let frame = crate::encode_frame(&req).unwrap();
             let decoded: Request = crate::decode_frame(&mut &frame[..]).unwrap();
@@ -1964,6 +2242,9 @@ mod tests {
             },
             Response::ImageList {
                 images: vec![info.clone()],
+            },
+            Response::PrunableBuiltImages {
+                references: vec!["lns-build.local/built:latest".into()],
             },
             Response::ImageRemoved {
                 reference: info.reference.clone(),
@@ -2088,6 +2369,12 @@ mod tests {
     #[test]
     fn sandbox_view_round_trips_declarative_launch_settings() {
         let view = SandboxView {
+            image_architectures: vec![BuiltArchitecture {
+                built_outside_the_gate: false,
+                architecture: "arm64".into(),
+                digest: format!("sha256:{}", "f".repeat(64)),
+            }],
+            image_source: None,
             mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582".into()],
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),

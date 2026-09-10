@@ -58,6 +58,7 @@ pub trait Fs: lns_artifact::walk::SnapshotFs {
     fn exists(&self, path: &Path) -> bool;
     fn is_symlink(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
+    fn size(&self, path: &Path) -> io::Result<u64>;
 }
 
 /// The author verbs run offline, against the working directory rather than the service; inspect joins them when its target is a local definition (or omitted).
@@ -184,6 +185,13 @@ pub fn validate<F: Fs, W: Write>(
             project_dir,
             def.mixins(),
         ));
+        if let lns_artifact::sandbox::Document::Sandbox(sandbox) = &def {
+            problems.extend(super::image_build::image_problems(
+                fs,
+                project_dir,
+                &sandbox.spec.image,
+            ));
+        }
     }
     if problems.is_empty() {
         writeln!(out, "{name} is valid.")?;
@@ -245,7 +253,12 @@ pub fn inspect_local<F: Fs, W: Write>(
         | lns_artifact::sandbox::Document::Mixin(def) => def,
     };
     let composed = compose(fs, path.parent().unwrap_or(cwd), cwd, &def, mixins)?;
-    render_effective(as_mixin, &def.name, &composed, out)?;
+    let built_from =
+        super::image_build::built_from(fs, path.parent().unwrap_or(cwd), &def.spec.image)?;
+    render_effective(as_mixin, &def.name, &composed, built_from.as_ref(), out)?;
+    if let Some(built) = &built_from {
+        render_containerfile(built, out)?;
+    }
     Ok(0)
 }
 
@@ -331,6 +344,7 @@ fn render_effective<W: Write>(
     as_mixin: bool,
     name: &str,
     composed: &Composition,
+    built_from: Option<&super::image_build::BuiltImage>,
     out: &mut W,
 ) -> Result<()> {
     let spec = &composed.spec;
@@ -338,7 +352,15 @@ fn render_effective<W: Write>(
         writeln!(out, "Mixin: {name}")?;
     } else {
         writeln!(out, "Sandbox: {name}")?;
-        writeln!(out, "  image:        {}", spec.image)?;
+        match built_from {
+            Some(built) => {
+                writeln!(out, "  image:        {}", built.summary())?;
+                for file in &built.context {
+                    writeln!(out, "  context:      {} ({})", file.path, file.disclosure())?;
+                }
+            }
+            None => writeln!(out, "  image:        {}", spec.image)?,
+        }
     }
     for mixin in &composed.mixins {
         writeln!(out, "  mixin: {mixin}")?;
@@ -404,6 +426,19 @@ fn render_effective<W: Write>(
                 lns_artifact::merge::tool_name(tool)
             )
         )?;
+    }
+    Ok(())
+}
+
+/// The Containerfile itself, because an approver decides on what a build would run rather than on its name (§3.1.1).
+fn render_containerfile<W: Write>(
+    built: &super::image_build::BuiltImage,
+    out: &mut W,
+) -> Result<()> {
+    writeln!(out)?;
+    writeln!(out, "{}:", built.containerfile)?;
+    for line in built.text.lines() {
+        writeln!(out, "  {line}")?;
     }
     Ok(())
 }

@@ -46,6 +46,9 @@ impl Fs for StepFs {
     fn is_symlink(&self, _path: &Path) -> bool {
         false
     }
+    fn size(&self, path: &Path) -> std::io::Result<u64> {
+        Fs::read_to_string(self, path).map(|held| held.len() as u64)
+    }
 }
 
 impl lns_artifact::walk::SnapshotFs for StepFs {
@@ -76,6 +79,8 @@ fn registry_serves_sandbox(w: &mut BehaviourWorld, reference: String) {
     });
     w.sandbox.inspect_image_response = Some(Response::ImageInspected {
         inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+            image_architectures: Vec::new(),
+            image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),

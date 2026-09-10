@@ -149,6 +149,21 @@ fn token_refusal(err: &OciDistributionError) -> Option<Refusal> {
     }
 }
 
+/// Whether a read found nothing rather than failing: a tag no push has written answers 404, or the envelope that spells one — a repository the registry does not know yet holds no image either. Every other failure is a failure, because a read this push could not make is not an architecture that published nothing (§6.2).
+pub(crate) fn names_nothing_yet(err: &OciDistributionError) -> bool {
+    match err {
+        OciDistributionError::ImageManifestNotFoundError(_) => true,
+        OciDistributionError::ServerError { code: 404, .. } => true,
+        OciDistributionError::RegistryError { envelope, .. } => envelope.errors.iter().any(|e| {
+            matches!(
+                e.code,
+                OciErrorCode::ManifestUnknown | OciErrorCode::NameUnknown
+            )
+        }),
+        _ => false,
+    }
+}
+
 /// Map an upload-phase (`push_blob` / `push_manifest_raw`) failure: a refusal speaks in the registry's words, anything else surfaces verbatim under `context`.
 pub(crate) fn push_error(
     reference: &Reference,
@@ -720,6 +735,53 @@ mod tests {
             text.contains("code: 500"),
             "the real server error must surface: {text}"
         );
+    }
+
+    #[test]
+    fn a_tag_no_push_has_written_yet_reads_as_holding_nothing() {
+        assert!(names_nothing_yet(
+            &OciDistributionError::ImageManifestNotFoundError("no manifest".into())
+        ));
+        assert!(names_nothing_yet(&OciDistributionError::ServerError {
+            code: 404,
+            url: "https://ghcr.io/v2/acme/app/manifests/1-image-linux-amd64".into(),
+            message: "no manifest".into(),
+        }));
+        assert!(names_nothing_yet(&OciDistributionError::RegistryError {
+            envelope: envelope(OciErrorCode::ManifestUnknown, "manifest unknown"),
+            url: "https://ghcr.io/v2/acme/app/manifests/1-image".into(),
+        }));
+        assert!(
+            names_nothing_yet(&OciDistributionError::RegistryError {
+                envelope: envelope(OciErrorCode::NameUnknown, "repository name not known"),
+                url: "https://ghcr.io/v2/acme/app/manifests/1-image".into(),
+            }),
+            "a repository nobody has pushed to holds no image either"
+        );
+    }
+
+    #[test]
+    fn a_read_that_failed_is_never_read_as_an_architecture_that_published_nothing() {
+        assert!(
+            !names_nothing_yet(&OciDistributionError::ServerError {
+                code: 429,
+                url: "https://ghcr.io/v2/acme/app/manifests/1-image-linux-amd64".into(),
+                message: "too many requests".into(),
+            }),
+            "§6.2: a throttled read must stop the push, not erase the other architecture's entry"
+        );
+        assert!(!names_nothing_yet(
+            &OciDistributionError::UnauthorizedError {
+                url: "https://ghcr.io/v2/acme/app/manifests/1-image".into(),
+            }
+        ));
+        assert!(!names_nothing_yet(&OciDistributionError::RegistryError {
+            envelope: envelope(OciErrorCode::Denied, "denied"),
+            url: "https://ghcr.io/v2/acme/app/manifests/1-image".into(),
+        }));
+        assert!(!names_nothing_yet(&OciDistributionError::GenericError(
+            None
+        )));
     }
 
     #[test]

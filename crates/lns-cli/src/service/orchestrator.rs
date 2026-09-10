@@ -512,6 +512,7 @@ pub async fn run_image(
     let run_mixins = mixins_for_the_run(&target, &args.mixins);
 
     let request = Request::RunImage(Box::new(RunImageArgs {
+        build_engine: args.build_engine.clone(),
         cpus: args.effective_cpus(),
         mem: args.effective_mem(),
         cpus_explicit: args.cpus.is_some(),
@@ -1574,6 +1575,8 @@ mod tests {
         let target = published_target(
             "registry.example.test/team/sandbox:1",
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                image_architectures: Vec::new(),
+                image_source: None,
                 mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d".into()],
                 pinned_mixins: vec!["ghcr.io/acme/obs@sha256:5b9e1f0a".into()],
                 contributions: Vec::new(),
@@ -1658,6 +1661,8 @@ mod tests {
         let err = published_target(
             "registry.example.test/team/sandbox:1",
             lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                image_architectures: Vec::new(),
+                image_source: None,
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
                 contributions: Vec::new(),

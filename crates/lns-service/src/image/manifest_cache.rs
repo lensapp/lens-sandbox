@@ -61,6 +61,13 @@ impl<R: Registry> CachingRegistry<R> {
 }
 
 impl<R: Registry> Registry for CachingRegistry<R> {
+    async fn pull_index(
+        &self,
+        reference: &Reference,
+    ) -> Result<Option<lns_artifact::image_index::HeldIndex>> {
+        self.inner.pull_index(reference).await
+    }
+
     async fn pull_manifest_and_config(
         &self,
         reference: &Reference,
@@ -217,9 +224,18 @@ mod tests {
 
     struct CountingRegistry {
         manifest_calls: Mutex<usize>,
+        index_calls: Mutex<usize>,
     }
 
     impl Registry for CountingRegistry {
+        async fn pull_index(
+            &self,
+            _reference: &Reference,
+        ) -> Result<Option<lns_artifact::image_index::HeldIndex>> {
+            *self.index_calls.lock().unwrap() += 1;
+            Ok(None)
+        }
+
         async fn pull_manifest_and_config(
             &self,
             _reference: &Reference,
@@ -258,11 +274,29 @@ mod tests {
     const PINNED: &str =
         "ghcr.io/x/y@sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
+    /// An index is what a reference resolves through, not something the manifest cache holds: two pulls of one index are two reads, because what a tag names may have changed.
+    #[tokio::test]
+    async fn an_index_is_read_from_the_registry_every_time_it_is_asked_for() {
+        let d = tempfile::tempdir().unwrap();
+        let caching = CachingRegistry::new(
+            CountingRegistry {
+                manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
+            },
+            ManifestCache::new(d.path()),
+        );
+        let reference: Reference = PINNED.parse().unwrap();
+        assert!(caching.pull_index(&reference).await.unwrap().is_none());
+        assert!(caching.pull_index(&reference).await.unwrap().is_none());
+        assert_eq!(*caching.inner.index_calls.lock().unwrap(), 2);
+    }
+
     #[tokio::test]
     async fn first_pull_of_a_digest_ref_hits_the_registry_then_warm_pull_skips_it() {
         let d = tempfile::tempdir().unwrap();
         let inner = CountingRegistry {
             manifest_calls: Mutex::new(0),
+            index_calls: Mutex::new(0),
         };
         let caching = CachingRegistry::new(inner, ManifestCache::new(d.path()));
         let reference: Reference = PINNED.parse().unwrap();
@@ -286,6 +320,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(d.path()),
         );
@@ -315,6 +350,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(&blocked),
         );
@@ -333,6 +369,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(d.path().join("manifests")),
         );
@@ -359,6 +396,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(&blocked),
         );
@@ -376,6 +414,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(d.path()),
         );

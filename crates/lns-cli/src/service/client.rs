@@ -27,6 +27,10 @@ pub trait SandboxService: Send + Sync {
     fn load_policy(&self, path: &str) -> Option<serde_json::Value>;
     /// Where a rendered document lands, created rather than opened, so a path that is already there answers `AlreadyExists` instead of being replaced.
     fn write_document(&self, path: &std::path::Path, contents: &str) -> std::io::Result<()>;
+    /// The document `-f` selects, resolved against this machine's working directory and read from it.
+    fn document(&self, file: Option<&std::path::Path>) -> Result<(PathBuf, String)>;
+    /// Which engine this machine builds a Containerfile with, off its own `build.engine` (`docs/sandbox-spec.md` §3.1.1); a machine that has said nothing builds in a guest.
+    fn build_engine(&self) -> Result<lns_ipc::BuildEngine>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]

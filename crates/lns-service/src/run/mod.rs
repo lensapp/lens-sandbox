@@ -8,8 +8,81 @@ mod save;
 pub(crate) use save::render as render_saved;
 mod scratch;
 mod shutdown;
+pub(crate) use orchestrator::run_build_step;
 pub use orchestrator::{PreparedRun, handle, prepare};
 pub use scratch::{RealRemoveDir, RemoveDir, reclaim_run_dir};
+
+/// What one build step's guest left behind: the code its instruction exited with, and what its upper holds.
+pub(crate) struct BuildStepOutcome {
+    pub code: i32,
+    pub changes: crate::containerfile::upper::ChangeSet,
+    pub fileset_paths: Vec<String>,
+}
+
+/// Where a build step's guest writes are left for the executor that asked for them. A build step is
+/// an ordinary run with the document's policy in force, so the capture rides the ordinary boot path.
+#[derive(Default)]
+pub struct BuildStep {
+    captured: std::sync::Mutex<Option<(crate::containerfile::upper::ChangeSet, Vec<String>)>>,
+}
+
+impl BuildStep {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn record(
+        &self,
+        changes: crate::containerfile::upper::ChangeSet,
+        fileset_paths: Vec<String>,
+    ) {
+        *self.captured.lock().expect("BuildStep poisoned") = Some((changes, fileset_paths));
+    }
+
+    pub(super) fn take(&self) -> (crate::containerfile::upper::ChangeSet, Vec<String>) {
+        self.captured
+            .lock()
+            .expect("BuildStep poisoned")
+            .take()
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod build_step_tests {
+    use super::*;
+    use crate::containerfile::upper::{Change, ChangeSet};
+
+    fn wrote(path: &str) -> ChangeSet {
+        ChangeSet {
+            changes: vec![Change::Removed { path: path.into() }],
+        }
+    }
+
+    /// The capture happens inside the boot and the executor reads it after, so what one build step
+    /// recorded has to survive the handover once and only once.
+    #[test]
+    fn what_the_capture_recorded_is_handed_over_once() {
+        let step = BuildStep::new();
+        step.record(wrote("etc/motd"), vec!["/opt/agent-skills".into()]);
+
+        let (changes, filesets) = step.take();
+        assert_eq!(changes, wrote("etc/motd"));
+        assert_eq!(filesets, vec!["/opt/agent-skills".to_string()]);
+        assert_eq!(
+            step.take(),
+            (ChangeSet::default(), Vec::new()),
+            "a step whose guest wrote nothing must read as an empty change set, not as the last one",
+        );
+    }
+}
+
+/// Whether the guest was done with its filesystem when the run's shutdown returned, or the grace period ended first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestStop {
+    Stopped,
+    GraceExpired,
+}
 
 /// How a run ended: the code its workload left, whether --rm takes its state, and when.
 pub struct RunEnd {
@@ -99,6 +172,30 @@ pub fn verify_pinned_descriptor(mode: &LaunchMode, built_sha256: &str) -> Result
         } => anyhow::bail!(
             "the sandbox stack changed under this run: its layers now build descriptor {built_sha256}, but its writable layer was written on {pinned_descriptor_sha256}; remove the run with `lns rm` and start a fresh one"
         ),
+    }
+}
+
+/// A run says which entry of the image index it booted, because an index holds one image per architecture and only the run picked one (§6.2). A pull or a build step ingests the same way and reports nothing: neither is a run.
+pub(super) fn report_the_booted_image(
+    image: Option<&str>,
+    config: Option<&oci_client::config::ConfigFile>,
+    built_outside_the_gate: bool,
+) {
+    if let (Some(image), Some(config)) = (image, config) {
+        let gate = the_gate_it_was_built_outside(built_outside_the_gate);
+        crate::log::info!(
+            "Image",
+            "{image}, {}/{}{gate}",
+            config.os,
+            config.architecture,
+        );
+    }
+}
+
+fn the_gate_it_was_built_outside(built_outside_the_gate: bool) -> String {
+    match built_outside_the_gate {
+        true => format!(" — {}", lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
+        false => String::new(),
     }
 }
 
@@ -333,6 +430,53 @@ mod assembling_progress_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// §6.2: an index holds one image per architecture, so the run says which entry it booted; a pull and a build step ingest the same way and say nothing.
+    #[test]
+    fn the_run_reports_the_image_it_booted_and_the_architecture_it_booted_it_on() {
+        let config: oci_client::config::ConfigFile = serde_json::from_str(
+            r#"{"architecture":"arm64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#,
+        )
+        .expect("a config the registry could serve");
+        let frames = crate::log::testing::capture_run_frames(|| {
+            report_the_booted_image(Some("alpine:3.20"), Some(&config), false);
+        });
+        let reported = format!("{frames:?}");
+        assert!(
+            reported.contains("Image")
+                && reported.contains("linux/arm64")
+                && reported.contains("alpine:3.20"),
+            "the summary says which entry of the index booted: {reported}"
+        );
+    }
+
+    /// §3.1.1: the gate did not apply to a daemon build, and a consumer booting one is told in words.
+    #[test]
+    fn a_run_of_an_image_built_outside_the_gate_says_so_in_the_line_it_prints() {
+        let config: oci_client::config::ConfigFile = serde_json::from_str(
+            r#"{"architecture":"arm64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#,
+        )
+        .expect("a config the registry could serve");
+        let frames = crate::log::testing::capture_run_frames(|| {
+            report_the_booted_image(Some("ghcr.io/team/agent:1.4.0"), Some(&config), true);
+        });
+        assert!(
+            format!("{frames:?}").contains(lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
+            "{frames:?}"
+        );
+    }
+
+    #[test]
+    fn an_imageless_run_reports_no_image_it_booted() {
+        let frames = crate::log::testing::capture_run_frames(|| {
+            report_the_booted_image(None, None, false);
+        });
+        assert!(
+            format!("{frames:?}").is_empty() || !format!("{frames:?}").contains("Image"),
+            "there is no image to name"
+        );
+    }
+
     const TEST_HOST: lns_artifact::resources::HostCapacity =
         lns_artifact::resources::HostCapacity {
             cpus: 10,

@@ -35,10 +35,18 @@ pub struct E2eWorld {
     /// `pre-start` script bodies the project definition declares, in run order.
     pub project_scripts: Vec<String>,
     pub project_image: Option<String>,
+    /// The Containerfile a scenario's `spec.image` names, with `{base}` standing for the pinned base image.
+    pub project_containerfile: Option<String>,
+    /// What the build context holds beside the Containerfile, as (path inside the context, content).
+    pub project_context_files: Vec<(String, String)>,
     /// Raises the per-run budget for a tool whose upstream payload is far larger than the usual one.
     pub run_budget: Option<std::time::Duration>,
     /// Destinations the definition's own policy allows, so a scenario whose workload really fetches something is not left at an approval prompt.
     pub project_egress: Vec<String>,
+    /// The build cache key each `lns sandbox build` printed, in the order the scenario asked for them.
+    pub build_keys: Vec<String>,
+    /// How many instructions the service had booted a guest for when the last build started.
+    pub instructions_before_build: usize,
 }
 
 impl E2eWorld {

@@ -211,6 +211,7 @@ async fn run_provisioner(
         #[cfg(target_os = "macos")]
         console_fd,
         debug: false,
+        capture_upper: false,
         exec,
     };
 

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use lns_ipc::{RunImageArgs, WireFrame};
 use tokio::sync::mpsc::Sender;
 use tracing::Instrument;
@@ -16,10 +16,54 @@ use super::{
     vm_ended_before_connector,
 };
 
+/// Run one instruction of a Containerfile in a guest, and take the run's state with it: a build step
+/// is not a run the user asked for, so it leaves no record, no name and no writable layer behind.
+/// Boxed, and declared `Send` here rather than inferred: a build step boots through the orchestrator
+/// that asked for the build, and inference cannot close that circle on its own.
+pub(crate) fn run_build_step(
+    run_id: String,
+    args: lns_ipc::RunImageArgs,
+    frame_tx: Sender<WireFrame>,
+) -> std::pin::Pin<Box<dyn Future<Output = Result<super::BuildStepOutcome>> + Send>> {
+    Box::pin(build_step(run_id, args, frame_tx))
+}
+
+async fn build_step(
+    run_id: String,
+    args: lns_ipc::RunImageArgs,
+    frame_tx: Sender<WireFrame>,
+) -> Result<super::BuildStepOutcome> {
+    let step = Arc::new(super::BuildStep::new());
+    let prepared = prepare_build(&run_id, &args, step.clone()).await?;
+    let (_input_tx, input_rx) = tokio::sync::mpsc::channel(1);
+    let label = format!("build-{}", &run_id[..run_id.len().min(8)]);
+    let code = orchestrate(
+        run_id.clone(),
+        label,
+        args,
+        prepared,
+        super::LaunchMode::Fresh,
+        frame_tx,
+        input_rx,
+    )
+    .await;
+    if let Ok(cache_root) = crate::cache::root() {
+        crate::run::reclaim_run_dir(&crate::run::RealRemoveDir, &cache_root, &run_id);
+    }
+    let (changes, fileset_paths) = step.take();
+    Ok(super::BuildStepOutcome {
+        code: code?,
+        changes,
+        fileset_paths,
+    })
+}
+
 /// What a run is turned away for before it exists: its host ports, what its reference resolves to, and whether it can be identified at all. Everything here is decided without a registry entry, so a refusal costs no run id and no run name.
 pub struct PreparedRun {
     forwards: crate::forward::ForwardGuard,
     document: PreparedDocument,
+    /// Set for one instruction of a Containerfile: the guest keeps every copy-up whole and its upper is read when it stops.
+    build: Option<Arc<super::BuildStep>>,
 }
 
 /// What a run will boot from: the definition its request carried, what its published reference resolved to, or neither.
@@ -31,6 +75,23 @@ enum PreparedDocument {
 
 /// Decide everything a run can be refused for before it starts. What is left in [`orchestrate`] either needs the planned document — which discloses and materializes — or streams to a client that is already attached.
 pub async fn prepare(run_id: &str, args: &RunImageArgs) -> Result<PreparedRun> {
+    prepare_with(run_id, args, None).await
+}
+
+/// The same preparation for one build step, which differs only in what happens to the guest's upper.
+pub(super) async fn prepare_build(
+    run_id: &str,
+    args: &RunImageArgs,
+    step: Arc<super::BuildStep>,
+) -> Result<PreparedRun> {
+    prepare_with(run_id, args, Some(step)).await
+}
+
+async fn prepare_with(
+    run_id: &str,
+    args: &RunImageArgs,
+    build: Option<Arc<super::BuildStep>>,
+) -> Result<PreparedRun> {
     let forwards = crate::forward::establish(
         std::sync::Arc::new(crate::forward::real::VsockForwarder::new(
             run_id.to_string(),
@@ -58,7 +119,11 @@ pub async fn prepare(run_id: &str, args: &RunImageArgs) -> Result<PreparedRun> {
         }
         (None, None) => PreparedDocument::Imageless,
     };
-    Ok(PreparedRun { forwards, document })
+    Ok(PreparedRun {
+        forwards,
+        document,
+        build,
+    })
 }
 
 pub async fn handle(
@@ -135,7 +200,7 @@ const SUPERVISED: bool = true;
     ),
     err,
 )]
-async fn orchestrate(
+pub(super) async fn orchestrate(
     run_id: String,
     microvm: String,
     args: RunImageArgs,
@@ -146,7 +211,11 @@ async fn orchestrate(
 ) -> Result<i32> {
     log::attach_to_run_span(frame_tx.clone());
 
-    let PreparedRun { forwards, document } = prepared;
+    let PreparedRun {
+        forwards,
+        document,
+        build,
+    } = prepared;
 
     let started = std::time::Instant::now();
     let prepare_started = std::time::Instant::now();
@@ -209,6 +278,31 @@ async fn orchestrate(
     let image_ref: Option<String> = match &launch {
         Some(l) => Some(l.image.clone()),
         None => resolved_image.map(str::to_string),
+    };
+    // A path-form spec.image is built before anything boots, and the run boots the digest it became.
+    let built_image = match image_ref.as_deref() {
+        Some(image) if crate::containerfile::real::names_a_containerfile(image) => {
+            let definition = resolved_document.as_deref().with_context(|| {
+                format!(
+                    "spec.image {image:?} names a Containerfile beside the document, and this run boots no local document"
+                )
+            })?;
+            Some(
+                crate::containerfile::real::build_for_run(
+                    &run_id,
+                    &args,
+                    definition,
+                    image,
+                    frame_tx.clone(),
+                )
+                .await?,
+            )
+        }
+        _ => None,
+    };
+    let image_ref: Option<String> = match &built_image {
+        Some(built) => Some(built.reference.clone()),
+        None => image_ref,
     };
     let cmd: Vec<String> = launch
         .as_ref()
@@ -275,6 +369,11 @@ async fn orchestrate(
             image::pull,
         )
         .await?;
+        super::report_the_booted_image(
+            image_ref.as_deref(),
+            image.config.as_ref(),
+            image.built_outside_the_gate,
+        );
         log::debug!("image layers ready at +{:.2?}", prepare_started.elapsed());
         Ok::<_, anyhow::Error>(image)
     };
@@ -430,6 +529,11 @@ async fn orchestrate(
     for (attachment, bind) in bind_attachments.iter_mut().zip(&args.binds) {
         attachment.seeded_paths = crate::artifact::fileset::seeded_paths(bind, &fileset_specs);
     }
+    // Every path a fileset lands on, before staging rewrites some of them under `/.lens`: a captured layer must carry none of them.
+    let fileset_paths: Vec<String> = fileset_specs
+        .iter()
+        .map(|spec| spec.guest_path.clone())
+        .collect();
     crate::artifact::fileset::stage_what_a_mount_would_hide(
         &mut fileset_specs,
         &args.volumes,
@@ -518,6 +622,8 @@ async fn orchestrate(
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
+    // A build step's upper becomes a layer, so its overlay keeps every copy-up whole: the host's reader sees no xattr.
+    let capture_upper = build.is_some();
     let (cpus, memory_mib) = (vm_size.cpus, vm_size.mem_mib);
     crate::run_registry::set_resolved_size(&run_id, cpus, memory_mib);
 
@@ -540,6 +646,7 @@ async fn orchestrate(
             port: crate::relay::VSOCK_PORT,
             fd_tx: session.relay.fd_tx.clone(),
         }),
+        capture_upper,
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
@@ -686,10 +793,11 @@ async fn orchestrate(
     let session_started = std::time::Instant::now();
     let session_code =
         vm::session_client::run_session_on_fd(fd, params, frame_tx_for_session, input_rx).await?;
+    let command_exited = std::time::Instant::now();
     log::debug!("workload ran for {:.2?}", session_started.elapsed());
     log::debug!(code = session_code, "broker session ended");
 
-    super::shutdown::publish_exit_after_quiesce(
+    let (_, guest_stop) = super::shutdown::publish_exit_after_quiesce(
         &run_id,
         session_code,
         super::shutdown::shutdown_after_session(
@@ -699,6 +807,22 @@ async fn orchestrate(
         ),
     )
     .await?;
+
+    // One flag decides both the guest's mount options and this capture, so a captured upper never holds a metacopy stub.
+    if let Some(step) = &build {
+        let capture_id = run_id.clone();
+        let captured = tokio::task::spawn_blocking(move || {
+            crate::containerfile::real::capture_change_set(&capture_id, guest_stop)
+        })
+        .await
+        .context("the upper-volume reader stopped before it finished")??;
+        log::debug!(
+            entries = captured.changes.len(),
+            "the instruction's writes were read {:.2?} after it exited",
+            command_exited.elapsed(),
+        );
+        step.record(captured, fileset_paths);
+    }
 
     log::info!("Finished", "in {:.2?}", started.elapsed());
     Ok(session_code)

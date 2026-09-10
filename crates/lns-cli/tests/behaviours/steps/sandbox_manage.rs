@@ -50,6 +50,8 @@ fn reference_resolves_to_cached(w: &mut BehaviourWorld, reference: String) {
     });
     w.sandbox.inspect_image_response = Some(Response::ImageInspected {
         inspection: ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_architectures: Vec::new(),
+            image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),
@@ -149,6 +151,21 @@ fn running_sandbox_kept(w: &mut BehaviourWorld) -> Result<(), String> {
         Err(format!(
             "prune must remove only the two cached sandboxes, got: {out:?}"
         ))
+    }
+}
+
+#[given(regex = r#"^the sweep would drop the built image "([^"]+)"$"#)]
+fn the_sweep_would_drop(w: &mut BehaviourWorld, reference: String) {
+    w.sandbox.prunable_built_images.push(reference);
+}
+
+#[then("the service received a PruneRuns request")]
+fn service_received_prune_runs(w: &mut BehaviourWorld) -> Result<(), String> {
+    let requests = w.sandbox.requests.lock().unwrap();
+    if requests.contains(&Request::PruneRuns) {
+        Ok(())
+    } else {
+        Err(format!("expected PruneRuns among {requests:?}"))
     }
 }
 
@@ -364,7 +381,17 @@ fn service_will_sweep(w: &mut BehaviourWorld, first: String, second: String) {
     });
     w.sandbox.response = Some(Response::RunsPruned {
         removed: vec![first, second],
+        built_images: Vec::new(),
     });
+}
+
+/// A build's images are swept with the runs, so the one command that takes a machine back to clean reports both.
+#[given("the sweep also drops a built image no document and no run names")]
+fn the_sweep_also_drops_a_built_image(w: &mut BehaviourWorld) {
+    let Some(Response::RunsPruned { built_images, .. }) = w.sandbox.response.as_mut() else {
+        panic!("this scenario stages a run prune first");
+    };
+    built_images.push(format!("lns-build.local/built@sha256:{}", "a".repeat(64)));
 }
 
 #[given("the service reports one running sandbox and none stopped")]
@@ -398,5 +425,6 @@ fn stopped_run(n: u32, name: &str) -> RunSummary {
 fn service_sweeps_nothing(w: &mut BehaviourWorld) {
     w.sandbox.response = Some(Response::RunsPruned {
         removed: Vec::new(),
+        built_images: Vec::new(),
     });
 }

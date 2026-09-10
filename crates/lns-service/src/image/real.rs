@@ -72,7 +72,33 @@ pub async fn verify_login(registry: &str, username: &str, secret: &str) -> Resul
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// A reference a document pins may name an index or one architecture's manifest, so the read that decides which accepts both rather than letting the registry choose for it.
+const MANIFEST_TYPES_AN_INDEX_MAY_ARRIVE_WITH: &[&str] = &[
+    oci_client::manifest::OCI_IMAGE_INDEX_MEDIA_TYPE,
+    oci_client::manifest::IMAGE_MANIFEST_LIST_MEDIA_TYPE,
+    oci_client::manifest::OCI_IMAGE_MEDIA_TYPE,
+    oci_client::manifest::IMAGE_MANIFEST_MEDIA_TYPE,
+];
+
 impl Registry for RealRegistry {
+    async fn pull_index(
+        &self,
+        reference: &Reference,
+    ) -> Result<Option<lns_artifact::image_index::HeldIndex>> {
+        let (bytes, _) = self
+            .client
+            .pull_manifest_raw(
+                reference,
+                &self.auth,
+                MANIFEST_TYPES_AN_INDEX_MAY_ARRIVE_WITH,
+            )
+            .await
+            .with_context(|| format!("reading the manifest of {reference}"))?;
+        enforce_manifest_doc_size(&reference.to_string(), bytes.len(), 0)?;
+        lns_artifact::image_index::held(&bytes)
+            .with_context(|| format!("reading the index at {reference}"))
+    }
+
     async fn pull_manifest_and_config(
         &self,
         reference: &Reference,

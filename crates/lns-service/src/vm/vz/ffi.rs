@@ -192,6 +192,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
         &spec.content_tag,
         spec.descriptor_sha256.as_deref(),
         spec.debug,
+        spec.capture_upper,
         &spec.volumes,
         &spec.binds,
     );

@@ -713,6 +713,7 @@ mod tests {
 
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
+            build_engine: lns_ipc::BuildEngine::default(),
             scripts: Vec::new(),
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),
@@ -821,6 +822,8 @@ mod tests {
     #[test]
     fn pulled_fileset_summaries_disclose_inline_source_and_root_owner() {
         let view = lns_ipc::SandboxView {
+            image_architectures: Vec::new(),
+            image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),

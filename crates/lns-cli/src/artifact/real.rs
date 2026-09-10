@@ -19,10 +19,13 @@ pub fn run<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture<'a> 
             let cwd = ctx.cwd()?;
             return push_local(
                 &push.reference.clone(),
-                push.dry_run,
-                push.assume_yes,
-                push.output.format,
-                push.file.clone().as_deref(),
+                PushOptions {
+                    dry_run: push.dry_run,
+                    rebuild: push.rebuild,
+                    assume_yes: push.assume_yes,
+                    format: push.output.format,
+                    file: push.file.clone().as_deref(),
+                },
                 cwd,
             )
             .await;
@@ -61,10 +64,13 @@ pub fn run_push<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFuture
         let args = super::PushArgs::from_arg_matches(matches)?;
         push_local(
             &qualified_reference(&args.reference)?,
-            args.dry_run,
-            args.assume_yes,
-            args.output.format,
-            args.file.as_deref(),
+            PushOptions {
+                dry_run: args.dry_run,
+                rebuild: args.rebuild,
+                assume_yes: args.assume_yes,
+                format: args.output.format,
+                file: args.file.as_deref(),
+            },
             ctx.cwd()?,
         )
         .await
@@ -108,27 +114,41 @@ async fn run_after_gate(command: ArtifactCommand) -> Result<i32> {
     dispatch(command).await
 }
 
-async fn push_local(
-    reference: &str,
-    dry_run: bool,
-    assume_yes: bool,
-    format: crate::output::Format,
-    file: Option<&std::path::Path>,
-    cwd: PathBuf,
-) -> Result<i32> {
-    let path = super::author::selected_definition_path(file, &cwd);
+/// What `lns push` was asked for beyond the reference, so the composition root passes one value rather than five.
+pub(crate) struct PushOptions<'a> {
+    pub dry_run: bool,
+    pub rebuild: bool,
+    pub assume_yes: bool,
+    pub format: crate::output::Format,
+    pub file: Option<&'a std::path::Path>,
+}
+
+async fn push_local(reference: &str, options: PushOptions<'_>, cwd: PathBuf) -> Result<i32> {
+    let path = super::author::selected_definition_path(options.file, &cwd);
     let project_dir = path.parent().unwrap_or(&cwd).to_path_buf();
     let doc = super::author::load_definition_json_at(&RealFs, &path)?;
     let mut out = std::io::stdout();
-    if dry_run {
+    if options.dry_run {
         return super::distribute::push_dry_run_formatted(
-            &RealFs,
-            &project_dir,
+            super::distribute::DryRunPorts {
+                fs: &RealFs,
+                cwd: &project_dir,
+                producer: &RealProducer,
+                builder: &ServiceImageBuilder,
+                image_limit: crate::config::load_image_limit(
+                    &crate::config::default_config_path()?
+                )?,
+                rebuild: options.rebuild,
+                build_engine: crate::config::load_build_engine(
+                    &crate::config::default_config_path()?,
+                )?,
+            },
             &doc,
             reference,
-            format,
+            options.format,
             &mut out,
-        );
+        )
+        .await;
     }
     super::distribute::push_formatted(
         super::distribute::PushPorts {
@@ -136,17 +156,90 @@ async fn push_local(
             cwd: &project_dir,
             producer: &RealProducer,
             resolver: &RealToolResolver,
+            builder: &ServiceImageBuilder,
+            image_limit: crate::config::load_image_limit(&crate::config::default_config_path()?)?,
+            rebuild: options.rebuild,
+            build_engine: crate::config::load_build_engine(&crate::config::default_config_path()?)?,
         },
         &doc,
         reference,
         super::distribute::Confirm {
-            assume_yes,
+            assume_yes: options.assume_yes,
             terminal: &mut crate::terminal::RealTerminal::open(),
         },
-        format,
+        options.format,
         &mut out,
     )
     .await
+}
+
+/// The service builds what `spec.image` names: it owns the executor, the build guest and the layer store, and it answers with where on this machine each blob sits.
+struct ServiceImageBuilder;
+
+impl super::distribute::ImageBuilder for ServiceImageBuilder {
+    fn resolve<'a>(
+        &'a self,
+        document: &'a [u8],
+        project_dir: &'a std::path::Path,
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<super::distribute::ResolvedDefinition>>
+    {
+        Box::pin(async move {
+            crate::service::require_running().await?;
+            let svc = RealSandboxService::new(crate::service::socket_path()?);
+            let definition = std::str::from_utf8(document)
+                .context("the definition being pushed is not utf-8")?;
+            let resolved =
+                crate::resolve::before_building(&svc, definition, &project_dir.to_string_lossy())
+                    .await?;
+            Ok(super::distribute::ResolvedDefinition {
+                definition: resolved.definition.into_bytes(),
+                authored_egress: resolved.authored_egress,
+                packed_filesets: resolved.packed_filesets,
+            })
+        })
+    }
+
+    fn build<'a>(
+        &'a self,
+        request: &'a super::distribute::ImageRequest<'a>,
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<super::distribute::BuiltImage>> {
+        Box::pin(async move {
+            crate::service::require_running().await?;
+            let svc = RealSandboxService::new(crate::service::socket_path()?);
+            let definition = String::from_utf8(request.document.clone())
+                .context("the definition being pushed is not utf-8")?;
+            let response = crate::service::SandboxService::one_shot(
+                &svc,
+                lns_ipc::Request::BuildImageForPush {
+                    definition,
+                    definition_dir: request.project_dir.to_string_lossy().into_owned(),
+                    rebuild: request.rebuild,
+                    plan_only: request.plan_only,
+                    build_engine: request.build_engine.clone(),
+                    authored_egress: request.authored_egress.clone(),
+                    packed_filesets: request.packed_filesets.clone(),
+                },
+            )
+            .await?;
+            match response {
+                lns_ipc::Response::ImageBuiltForPush {
+                    key,
+                    label,
+                    reused,
+                    image,
+                } => Ok(super::distribute::BuiltImage {
+                    key,
+                    label,
+                    reused,
+                    image: image.map(|image| *image),
+                }),
+                lns_ipc::Response::Error { message } => {
+                    Err(crate::service::reply::failure(&message))
+                }
+                other => anyhow::bail!("unexpected response from daemon: {other:?}"),
+            }
+        })
+    }
 }
 
 struct RealToolResolver;
@@ -256,6 +349,44 @@ impl super::distribute::Producer for RealProducer {
     ) -> crate::local_future::LocalBoxFuture<'a, Result<()>> {
         Box::pin(async move { crate::build::push::push_artifact(built, reference).await })
     }
+
+    fn push_image<'a>(
+        &'a self,
+        image: &'a lns_ipc::PushableImage,
+        repository: &'a str,
+        tag: &'a str,
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move { crate::build::push::push_image(image, repository, tag).await })
+    }
+
+    fn image_at<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+    ) -> crate::local_future::LocalBoxFuture<
+        'a,
+        Result<Option<lns_artifact::image_index::IndexEntry>>,
+    > {
+        Box::pin(async move { crate::build::push::image_at(repository, tag).await })
+    }
+
+    fn index_at<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<Option<lns_artifact::image_index::HeldIndex>>>
+    {
+        Box::pin(async move { crate::build::push::index_at(repository, tag).await })
+    }
+
+    fn push_index<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+        index: &'a [u8],
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move { crate::build::push::push_index(repository, tag, index).await })
+    }
 }
 
 fn run_author(command: &ArtifactCommand, ctx: RunCtx<'_>) -> Result<i32> {
@@ -304,6 +435,9 @@ impl super::author::Fs for RealFs {
         std::fs::symlink_metadata(path)
             .map(|meta| meta.file_type().is_symlink())
             .unwrap_or(false)
+    }
+    fn size(&self, path: &Path) -> std::io::Result<u64> {
+        std::fs::metadata(path).map(|meta| meta.len())
     }
 }
 

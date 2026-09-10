@@ -194,6 +194,14 @@ Feature: managing cached sandboxes
     And the output contains "removed sandbox hermes"
     And the output contains "removed sandbox scribe"
 
+  Scenario: prune names the built images it dropped with the sandboxes
+    Given the service will sweep the stopped sandboxes "scribe" and "hermes"
+    And the sweep also drops a built image no document and no run names
+    And the user will answer "y" to the sandbox prompt
+    When the user runs sandbox command "prune"
+    Then the exit code is 0
+    And the output contains "removed built image lns-build.local/built@sha256:"
+
   Scenario: declining the prune prompt sweeps nothing
     Given the service will sweep the stopped sandboxes "scribe" and "hermes"
     And the user will answer "n" to the sandbox prompt
