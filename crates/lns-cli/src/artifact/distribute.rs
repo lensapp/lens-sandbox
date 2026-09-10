@@ -356,11 +356,12 @@ struct ToolVersion {
     resolved: Option<String>,
 }
 
-/// What a path-form `spec.image` published, or would: this architecture's manifest and the index the document names (§6).
+/// What a path-form `spec.image` published, or would: the key that names the build, this architecture's manifest, and the index the document names (§6). A preview this machine cannot answer carries the key alone.
 #[derive(Debug, serde::Serialize)]
 struct BuiltImageReport {
-    digest: String,
-    index: String,
+    key: String,
+    digest: Option<String>,
+    index: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -688,10 +689,11 @@ fn refuse_an_image_over(limit: u64, image: &lns_ipc::PushableImage) -> Result<()
     lns_artifact::image::refuse_an_image_over(limit, &layers, &image.config)
 }
 
-/// What a dry run says it would publish: this architecture's manifest, and the index the document would then name.
+/// What a dry run says it would publish: the key that names the build, and — only where this machine already answers that key — this architecture's manifest and the index the document would then name.
 pub struct PreviewedImage {
-    pub index: String,
-    pub digest: String,
+    pub key: String,
+    pub index: Option<String>,
+    pub digest: Option<String>,
 }
 
 /// What a dry run can say about the image without building it: the key always, which architectures the index holds, and the digest only when this machine already answers that key.
@@ -753,8 +755,9 @@ where
                 )?;
             }
             Ok(Some(PreviewedImage {
-                index: lns_artifact::image_index::assemble(&entries)?.digest,
-                digest: mine.digest,
+                key: planned.key,
+                index: Some(lns_artifact::image_index::assemble(&entries)?.digest),
+                digest: Some(mine.digest),
             }))
         }
         None => {
@@ -763,7 +766,11 @@ where
                 "note: {} has not been built on this machine, so its image digest can only be known by building; the published digest will differ from this preview",
                 planned.label
             )?;
-            Ok(None)
+            Ok(Some(PreviewedImage {
+                key: planned.key,
+                index: None,
+                digest: None,
+            }))
         }
     }
 }
@@ -962,8 +969,9 @@ where
         readme,
         tools,
         image: image.map(|image| BuiltImageReport {
-            digest: image.digest,
-            index: image.reference,
+            key: image.key,
+            digest: Some(image.digest),
+            index: Some(image.reference),
         }),
         dry_run: false,
     })
@@ -1058,15 +1066,12 @@ where
     .await?;
     let (published, mixins) = preview_planned_mixins(fs, &plan, out)?;
     let pinned = super::mixin_plan::pin_local_mixins(fs, cwd, doc, &published)?;
-    let pinned = match &preview {
-        Some(preview) => lns_artifact::image::rewrite_to_built(
-            &pinned,
-            &format!(
-                "{}@{}",
-                super::mixin_plan::repository_of(reference),
-                preview.index
-            ),
-        )?,
+    let previewed_index = preview
+        .as_ref()
+        .and_then(|preview| preview.index.as_ref())
+        .map(|index| format!("{}@{index}", super::mixin_plan::repository_of(reference)));
+    let pinned = match &previewed_index {
+        Some(index) => lns_artifact::image::rewrite_to_built(&pinned, index)?,
         None => lns_artifact::image::forget_source(&pinned)?,
     };
     let (built, packed) = build(fs, cwd, &pinned, source.as_ref())?;
@@ -1096,12 +1101,9 @@ where
         readme,
         tools: preview_tool_versions(&docs),
         image: preview.map(|preview| BuiltImageReport {
+            key: preview.key,
             digest: preview.digest,
-            index: format!(
-                "{}@{}",
-                super::mixin_plan::repository_of(reference),
-                preview.index
-            ),
+            index: previewed_index,
         }),
         dry_run: true,
     })
@@ -1281,6 +1283,11 @@ mod tests {
         fn merging(mut self, definition: &str) -> Self {
             self.merged = Some(definition.to_string());
             self
+        }
+
+        /// This machine answers the key and holds no image behind it, which is what a Containerfile nobody has built here previews as.
+        fn planned_but_not_built() -> Self {
+            Self::answering(None)
         }
 
         fn built(layers: &[(&str, u64)]) -> Self {
@@ -2988,6 +2995,11 @@ mod tests {
             json["tools"],
             serde_json::json!([{"name":"node","requested":"22.11.0","resolved":"22.11.0"}])
         );
+        assert_eq!(
+            json["image"],
+            serde_json::Value::Null,
+            "a document whose image is a reference builds nothing, so there is no image to preview"
+        );
     }
 
     /// A JSON push must report what a table push reports, and a path-form `spec.image` publishes an image the table names and the object has to name too (§6).
@@ -3065,6 +3077,47 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("ghcr.io/team/hermes@sha256:")
+        );
+        assert_eq!(
+            json["image"]["key"],
+            format!("sha256:{}", "5f".repeat(32)),
+            "the key names the build the digests came from"
+        );
+    }
+
+    /// `"image": null` means the document names no Containerfile; a Containerfile this machine has not built keeps the key and answers with no digest, because those two states mean opposite things.
+    #[tokio::test]
+    async fn a_json_dry_run_of_an_unbuilt_containerfile_carries_the_key_and_no_digest() {
+        let mut out = Vec::new();
+        push_dry_run_formatted(
+            DryRunPorts {
+                fs: &fs_with_a_context(),
+                cwd: cwd(),
+                producer: &FakeProducer::ok(),
+                builder: &FakeBuilder::planned_but_not_built(),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
+            },
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            crate::output::Format::Json,
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["image"]["key"], format!("sha256:{}", "5f".repeat(32)));
+        assert_eq!(
+            json["image"]["digest"],
+            serde_json::Value::Null,
+            "only a build can know it, and this dry run built nothing"
+        );
+        assert_eq!(
+            json["image"]["index"],
+            serde_json::Value::Null,
+            "the index the published document would name holds an entry that does not exist yet"
         );
     }
 }
