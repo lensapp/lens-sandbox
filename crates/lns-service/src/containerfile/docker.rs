@@ -64,6 +64,16 @@ impl ApiRequest {
         }
     }
 
+    fn delete(path: &str) -> Self {
+        Self {
+            method: "DELETE",
+            path: format!("/{API_VERSION}{path}"),
+            query: Vec::new(),
+            content_type: None,
+            body: Vec::new(),
+        }
+    }
+
     fn with(mut self, key: &str, value: impl Into<String>) -> Self {
         self.query.push((key.to_string(), value.into()));
         self
@@ -532,6 +542,7 @@ pub(crate) async fn build_image<H: DockerHost, D: Daemon, F: ContextFs>(
     )
     .await?;
     let saved = read_saved_image(&export(daemon, &tag).await?)?;
+    untag(daemon, &tag).await;
     let built = as_oci_image(&saved)?;
     let reference = host.adopt(&built, &saved.layers).await?;
     let outside_the_gate = Cached {
@@ -547,6 +558,21 @@ pub(crate) async fn build_image<H: DockerHost, D: Daemon, F: ContextFs>(
         reused_steps: 0,
         built_outside_the_gate: true,
     })
+}
+
+/// `DELETE /images/{name}`: the tag is lns's own leftover inside a daemon `lns sandbox prune` cannot see, so it goes as soon as the export is in hand; a daemon that keeps it is said so and stops nothing.
+async fn untag<D: Daemon>(daemon: &D, tag: &str) {
+    let kept = match call(
+        daemon,
+        ApiRequest::delete(&format!("/images/{tag}")).with("force", "1"),
+    )
+    .await
+    {
+        Ok(answer) if answer.status == 200 => return,
+        Ok(answer) => format!("it answered {}", answer.status),
+        Err(e) => format!("{e:#}"),
+    };
+    crate::log::warn!("the Docker daemon still holds its own copy of {tag}: {kept}");
 }
 
 /// The daemon resolves a `FROM` itself and may hold an older image behind the tag, so the file it is handed names the digest lns keyed the build over (§3.1.1).
@@ -1190,6 +1216,7 @@ mod tests {
             &ok("OK"),
             &ok(r#"{"stream":"Successfully built"}"#),
             &ok_bytes(&a_saved_image()),
+            &ok("[]"),
         ])
     }
 
@@ -1238,8 +1265,15 @@ mod tests {
         assert_eq!(built.reference, host.remembered.borrow()[0].1.reference);
         assert_eq!(
             daemon.sent.borrow().len(),
-            3,
-            "a ping, a build and an export, and nothing else",
+            4,
+            "a ping, a build, an export and the removal of the tag, and nothing else",
+        );
+        assert!(
+            daemon.sent.borrow()[3].starts_with("DELETE /v1.43/images/lns-build.local%2Fdocker%3A")
+                || daemon.sent.borrow()[3]
+                    .starts_with("DELETE /v1.43/images/lns-build.local/docker:"),
+            "the daemon's own copy is not left behind: {}",
+            daemon.sent.borrow()[3],
         );
         assert!(
             daemon.sent.borrow()[1].contains("platform=linux%2Farm64"),
@@ -1324,6 +1358,34 @@ mod tests {
             .await
             .expect("building");
         assert!(!built.reused);
+    }
+
+    /// The image is in lns's layer store by then, so a daemon that will not drop its copy is said so and the build stands.
+    #[test]
+    fn a_daemon_that_will_not_drop_its_copy_says_so_and_finishes_the_build() {
+        let daemon = FakeDaemon::answering(&[
+            &ok("OK"),
+            &ok(r#"{"stream":"Successfully built"}"#),
+            &ok_bytes(&a_saved_image()),
+            &b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        ]);
+        let mut built = None;
+        let messages = crate::test_env::captured_messages(|| {
+            built = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("a runtime for one build")
+                    .block_on(built_through(&a_host(), &daemon, false)),
+            );
+        });
+
+        assert!(built.expect("the build was run").is_ok());
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("still holds its own copy")),
+            "{messages:?}",
+        );
     }
 
     #[tokio::test]
