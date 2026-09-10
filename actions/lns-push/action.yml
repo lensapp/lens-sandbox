@@ -12,7 +12,8 @@ inputs:
   tags:
     description: >-
       References to publish, one per line (commas also separate). Each is
-      `<namespace>/<name>:<tag>` or `<host>/<namespace>/<name>:<tag>`.
+      `<namespace>/<name>:<tag>` or `<host>/<namespace>/<name>:<tag>`, and all
+      of them name the same repository, differing only in the tag.
     required: true
   push:
     description: Publish, or stop after the dry run. `true` or `false`.
@@ -39,7 +40,7 @@ outputs:
     value: ${{ steps.push.outputs.refs }}
   first-push:
     description: >-
-      `true` when the first tag's repository did not exist before this push.
+      `true` when the repository did not exist before this push.
     value: ${{ steps.push.outputs.first-push }}
 
 runs:
