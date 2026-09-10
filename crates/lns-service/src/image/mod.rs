@@ -1913,20 +1913,18 @@ mod tests {
         assert!(format!("{err:#}").contains("digest"), "{err:#}");
     }
 
-    /// The index a host nobody built for finds: entries, none of them this host's.
-    fn index_without(
-        architecture: oci_spec::image::Arch,
-    ) -> Vec<lns_artifact::image_index::IndexEntry> {
-        let other = match architecture {
-            oci_spec::image::Arch::ARM64 => "amd64",
-            _ => "arm64",
-        };
+    /// The index a host nobody built for finds: every architecture lns builds except this host's.
+    fn index_without(architecture: &str) -> Vec<lns_artifact::image_index::IndexEntry> {
+        let other = lns_artifact::image_index::ARCHITECTURES
+            .iter()
+            .find(|held| **held != architecture)
+            .expect("lns builds for more than one architecture");
         vec![lns_artifact::image_index::IndexEntry {
             digest: format!("sha256:{}", "ab".repeat(32)),
             size: 512,
             media_type: "application/vnd.oci.image.manifest.v1+json".into(),
             os: lns_artifact::image_index::OS.into(),
-            architecture: other.into(),
+            architecture: (*other).to_string(),
         }]
     }
 
@@ -1937,7 +1935,7 @@ mod tests {
         registry.manifest_failure = Some(
             "no entry found in image index manifest matching client's default platform".into(),
         );
-        registry.index = index_without(want_arch());
+        registry.index = index_without(&want_arch().to_string());
         let (_dir, cache) = cache();
         let err = pull_inner(
             &registry,

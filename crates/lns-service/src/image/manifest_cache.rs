@@ -224,6 +224,7 @@ mod tests {
 
     struct CountingRegistry {
         manifest_calls: Mutex<usize>,
+        index_calls: Mutex<usize>,
     }
 
     impl Registry for CountingRegistry {
@@ -231,6 +232,7 @@ mod tests {
             &self,
             _reference: &Reference,
         ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
+            *self.index_calls.lock().unwrap() += 1;
             Ok(Vec::new())
         }
 
@@ -272,11 +274,29 @@ mod tests {
     const PINNED: &str =
         "ghcr.io/x/y@sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
+    /// An index is what a reference resolves through, not something the manifest cache holds: two pulls of one index are two reads, because what a tag names may have changed.
+    #[tokio::test]
+    async fn an_index_is_read_from_the_registry_every_time_it_is_asked_for() {
+        let d = tempfile::tempdir().unwrap();
+        let caching = CachingRegistry::new(
+            CountingRegistry {
+                manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
+            },
+            ManifestCache::new(d.path()),
+        );
+        let reference: Reference = PINNED.parse().unwrap();
+        assert!(caching.pull_index(&reference).await.unwrap().is_empty());
+        assert!(caching.pull_index(&reference).await.unwrap().is_empty());
+        assert_eq!(*caching.inner.index_calls.lock().unwrap(), 2);
+    }
+
     #[tokio::test]
     async fn first_pull_of_a_digest_ref_hits_the_registry_then_warm_pull_skips_it() {
         let d = tempfile::tempdir().unwrap();
         let inner = CountingRegistry {
             manifest_calls: Mutex::new(0),
+            index_calls: Mutex::new(0),
         };
         let caching = CachingRegistry::new(inner, ManifestCache::new(d.path()));
         let reference: Reference = PINNED.parse().unwrap();
@@ -300,6 +320,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(d.path()),
         );
@@ -329,6 +350,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(&blocked),
         );
@@ -347,6 +369,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(d.path().join("manifests")),
         );
@@ -373,6 +396,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(&blocked),
         );
@@ -390,6 +414,7 @@ mod tests {
         let caching = CachingRegistry::new(
             CountingRegistry {
                 manifest_calls: Mutex::new(0),
+                index_calls: Mutex::new(0),
             },
             ManifestCache::new(d.path()),
         );

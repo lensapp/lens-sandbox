@@ -538,14 +538,10 @@ mod tests {
         );
     }
 
-    /// What a projection says about the image: what the guest starts from, and what built it.
-    fn image_of(
-        inspection: &ArtifactInspection,
-    ) -> Option<(&str, Option<&lns_ipc::BuildSourceView>)> {
+    /// The sandbox a projection answered with, for a test that reads what it says about the image.
+    fn image_of(inspection: &ArtifactInspection) -> Option<&lns_ipc::SandboxView> {
         match inspection {
-            ArtifactInspection::Sandbox(view) => {
-                Some((view.image.as_str(), view.image_source.as_ref()))
-            }
+            ArtifactInspection::Sandbox(view) => Some(view),
             ArtifactInspection::Image(_) | ArtifactInspection::Mixin(_) => None,
         }
     }
@@ -582,14 +578,14 @@ mod tests {
         )
         .unwrap();
 
-        let (image, source) = image_of(&inspection).expect("a published sandbox projects as one");
-        assert_eq!(image, "ghcr.io/team/hermes@sha256:abc");
-        let source = source.expect("an approver decides on what a build ran, not only its digest");
+        let view = image_of(&inspection).expect("a published sandbox projects as one");
+        assert_eq!(view.image, "ghcr.io/team/hermes@sha256:abc");
+        let source = view
+            .image_source
+            .as_ref()
+            .expect("an approver decides on what a build ran, not only its digest");
         assert_eq!(source.containerfile, "./image/Containerfile");
         assert_eq!(source.context.len(), 2);
-        let ArtifactInspection::Sandbox(view) = &inspection else {
-            unreachable!("a published sandbox projects as one")
-        };
         assert_eq!(
             view.image_architectures
                 .iter()

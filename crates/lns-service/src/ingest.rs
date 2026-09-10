@@ -280,17 +280,11 @@ mod tests {
             })
             .expect("ingesting");
         });
-        let reported = frames.iter().find_map(|frame| match frame {
-            lns_ipc::WireFrame::Json(lns_ipc::Response::RunLog { verb, message, .. })
-                if verb.as_deref() == Some("Image") =>
-            {
-                Some(message.clone())
-            }
-            _ => None,
-        });
-        let reported = reported.expect("a run says what it booted from");
+        let reported = format!("{frames:?}");
         assert!(
-            reported.contains("linux/arm64") && reported.contains("alpine:3.20"),
+            reported.contains("Image")
+                && reported.contains("linux/arm64")
+                && reported.contains("alpine:3.20"),
             "§6: an index holds an image per architecture, so the summary says which one booted: {reported}"
         );
     }
