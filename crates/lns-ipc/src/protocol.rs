@@ -606,6 +606,9 @@ pub struct PushableImage {
     pub config: String,
     pub config_digest: String,
     pub config_media_type: String,
+    /// The platform the image config declares, which is the entry the index publishes it under (`docs/sandbox-spec.md` §6).
+    pub os: String,
+    pub architecture: String,
     pub layers: Vec<PushableLayer>,
 }
 
@@ -625,6 +628,13 @@ pub struct BuildSourceView {
     pub containerfile: String,
     pub text: String,
     pub context: Vec<BuildContextFile>,
+}
+
+/// One architecture an image index holds, as `lns inspect` prints it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuiltArchitecture {
+    pub architecture: String,
+    pub digest: String,
 }
 
 /// One file of the packed build context, as an approver reads it.
@@ -672,6 +682,9 @@ pub struct SandboxView {
     /// What the image was built from, when the artifact carries a build source layer (§7.3).
     #[serde(default)]
     pub image_source: Option<BuildSourceView>,
+    /// One digest per architecture the published image index holds, so an approver sees which hosts this document was built for (§6).
+    #[serde(default)]
+    pub image_architectures: Vec<BuiltArchitecture>,
     /// The mixins this sandbox resolved into, since the merged document declares none of its own.
     #[serde(default)]
     pub mixins: Vec<String>,
@@ -1995,6 +2008,8 @@ mod tests {
                 config: "{}".into(),
                 config_digest: format!("sha256:{}", "d".repeat(64)),
                 config_media_type: "application/vnd.oci.image.config.v1+json".into(),
+                os: "linux".into(),
+                architecture: "arm64".into(),
                 layers: vec![PushableLayer {
                     digest: format!("sha256:{}", "e".repeat(64)),
                     media_type: "application/vnd.oci.image.layer.v1.tar+gzip".into(),
@@ -2208,6 +2223,10 @@ mod tests {
     #[test]
     fn sandbox_view_round_trips_declarative_launch_settings() {
         let view = SandboxView {
+            image_architectures: vec![BuiltArchitecture {
+                architecture: "arm64".into(),
+                digest: format!("sha256:{}", "f".repeat(64)),
+            }],
             image_source: None,
             mixins: vec!["ghcr.io/acme/postgres-tools@sha256:c41e8b7d20a95f6c3d84b1e07f92a5c8d63b40e19a7c25f8b0d3e6a94c17f582".into()],
             pinned_mixins: Vec::new(),

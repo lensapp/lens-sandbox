@@ -64,6 +64,10 @@ pub struct BehaviourWorld {
     pub image_limit: Option<u64>,
     /// Every image the push uploaded, and the repository it landed in.
     pub pushed_images: Vec<(String, lns_ipc::PushableImage)>,
+    /// What the registry already holds under each per-architecture image tag, as a scenario stages it.
+    pub published_images: std::collections::HashMap<String, lns_artifact::image_index::IndexEntry>,
+    /// Every image index the push uploaded, with the tag it landed under.
+    pub pushed_indexes: Vec<(String, Vec<lns_artifact::image_index::IndexEntry>)>,
     /// The build source layer the push packed into the artifact, if it packed one.
     pub pushed_build_source: Option<Vec<u8>>,
     /// Whether each build request the push made asked for a plan only.

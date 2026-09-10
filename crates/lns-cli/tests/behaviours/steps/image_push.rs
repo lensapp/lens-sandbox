@@ -7,6 +7,8 @@ const STAGED_CONFIG: &str = r#"{"history":[{"created_by":"FROM docker.io/library
 
 fn staged_image(layer_bytes: &[u64]) -> lns_ipc::PushableImage {
     lns_ipc::PushableImage {
+        os: lns_artifact::image_index::OS.to_string(),
+        architecture: "arm64".to_string(),
         reference: format!("lns-build.local/built@sha256:{}", "cc".repeat(32)),
         digest: format!("sha256:{}", "cc".repeat(32)),
         manifest: "{}".to_string(),
@@ -83,16 +85,86 @@ fn published_document(w: &BehaviourWorld) -> serde_json::Value {
     serde_json::from_slice(doc).expect("the config blob is json")
 }
 
-#[then(r#"the published document's "spec.image" is the digest of the published image"#)]
-fn the_published_image_is_a_digest(w: &mut BehaviourWorld) {
-    let (repository, image) = w
-        .pushed_images
+#[then(r#"the published document's "spec.image" is the digest of the published index"#)]
+fn the_published_image_is_the_index_digest(w: &mut BehaviourWorld) {
+    let (tag, entries) = w
+        .pushed_indexes
         .first()
-        .expect("the push published an image");
+        .expect("the push published an image index");
+    let repository = tag.rsplit_once(':').expect("a tagged index").0;
+    let index = lns_artifact::image_index::assemble(entries).expect("assembling");
     assert_eq!(
         published_document(w)["spec"]["image"],
-        serde_json::Value::String(format!("{repository}@{}", image.digest)),
-        "a consumer must never receive a document it would have to build"
+        serde_json::Value::String(format!("{repository}@{}", index.digest)),
+        "§6: the document names the index, so a consumer's pull picks its own architecture"
+    );
+}
+
+/// The digest another architecture's push left in the repository, which this push must keep.
+const OTHER_DIGEST: &str = "sha256:aaaa";
+
+fn hold(w: &mut BehaviourWorld, reference: &str, architecture: &str, digest: &str) {
+    let tag = lns_artifact::image_index::architecture_tag(
+        lns_artifact::image_index::tag_of(reference),
+        lns_artifact::image_index::OS,
+        architecture,
+    );
+    let repository = reference.rsplit_once(':').expect("a tagged reference").0;
+    w.published_images.insert(
+        format!("{repository}:{tag}"),
+        lns_artifact::image_index::IndexEntry {
+            digest: digest.to_string(),
+            size: 2,
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            os: lns_artifact::image_index::OS.to_string(),
+            architecture: architecture.to_string(),
+        },
+    );
+}
+
+#[given(regex = r#"^the registry already holds an "([^"]+)" image for "([^"]+)"$"#)]
+fn the_registry_holds_another_architecture(
+    w: &mut BehaviourWorld,
+    architecture: String,
+    reference: String,
+) {
+    hold(w, &reference, &architecture, OTHER_DIGEST);
+}
+
+#[given(regex = r#"^the registry already holds this machine's image for "([^"]+)"$"#)]
+fn the_registry_holds_this_machines_image(w: &mut BehaviourWorld, reference: String) {
+    let digest = format!("sha256:{}", "cc".repeat(32));
+    hold(w, &reference, "arm64", &digest);
+}
+
+#[then(regex = r#"^the published index holds "([^"]+)" and "([^"]+)"$"#)]
+fn the_published_index_holds(w: &mut BehaviourWorld, first: String, second: String) {
+    let (_, entries) = w
+        .pushed_indexes
+        .last()
+        .expect("the push published an image index");
+    let mut held: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.architecture.as_str())
+        .collect();
+    held.sort_unstable();
+    let mut want = vec![first.as_str(), second.as_str()];
+    want.sort_unstable();
+    assert_eq!(
+        held, want,
+        "§6: a second architecture adds an entry rather than replacing the image"
+    );
+    assert!(
+        entries.iter().any(|entry| entry.digest == OTHER_DIGEST),
+        "the entry the other architecture published must survive this push: {entries:?}"
+    );
+}
+
+#[then("no image was published")]
+fn no_image_was_published(w: &mut BehaviourWorld) {
+    assert!(
+        w.pushed_images.is_empty() && w.pushed_indexes.is_empty(),
+        "an architecture the index already holds costs the registry nothing"
     );
 }
 

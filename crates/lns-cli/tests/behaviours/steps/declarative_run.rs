@@ -190,6 +190,7 @@ fn published_view(def: &lns_artifact::sandbox::Definition) -> lns_ipc::SandboxVi
         Some(TEST_HOST),
     );
     lns_ipc::SandboxView {
+        image_architectures: Vec::new(),
         image_source: None,
         mixins: def.spec.mixins.clone(),
         pinned_mixins: Vec::new(),

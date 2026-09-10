@@ -58,7 +58,10 @@ pub(crate) fn pushable(
     cached: &crate::image::manifest_cache::CachedManifest,
     path_for: impl Fn(&str) -> Result<String>,
 ) -> Result<lns_ipc::PushableImage> {
+    let (os, architecture) = declared_platform(&cached.config)?;
     Ok(lns_ipc::PushableImage {
+        os,
+        architecture,
         digest: cached.manifest_digest.clone(),
         manifest: manifest_bytes(&cached.manifest, &cached.manifest_digest)?,
         manifest_media_type: cached
@@ -84,6 +87,19 @@ pub(crate) fn pushable(
             .collect::<Result<Vec<_>>>()?,
         reference,
     })
+}
+
+/// The platform an index entry publishes this image under, read off the config it declares rather than off the host that built it.
+fn declared_platform(config: &str) -> Result<(String, String)> {
+    let config: Value = serde_json::from_str(config).context("parsing the built image's config")?;
+    let os = config["os"].as_str();
+    let architecture = config["architecture"].as_str();
+    match (os, architecture) {
+        (Some(os), Some(architecture)) => Ok((os.to_string(), architecture.to_string())),
+        _ => bail!(
+            "the built image's config declares no os and architecture, so no image index can hold it"
+        ),
+    }
 }
 
 pub(crate) fn assemble(
@@ -554,6 +570,30 @@ pub(crate) mod tests {
         let image = pushable("built".into(), &cached_from(&built), |_| Ok(String::new()))
             .expect("projecting");
         assert_eq!(image.layers[0].size, 0);
+    }
+
+    #[test]
+    fn a_pushable_image_carries_the_platform_the_index_will_publish_it_under() {
+        let built = built();
+        let image = pushable("built".into(), &cached_from(&built), |_| Ok(String::new()))
+            .expect("projecting");
+        assert_eq!(
+            (image.os.as_str(), image.architecture.as_str()),
+            ("linux", "arm64"),
+            "§6: the index entry's platform is the one the image config declares"
+        );
+    }
+
+    #[test]
+    fn an_image_whose_config_declares_no_platform_is_not_one_an_index_can_hold() {
+        let mut built = built();
+        built.config = r#"{"rootfs":{"type":"layers","diff_ids":[]}}"#.to_string();
+        let err =
+            pushable("built".into(), &cached_from(&built), |_| Ok(String::new())).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("declares no"),
+            "an entry a pull selects by platform cannot be assembled without one: {err:#}"
+        );
     }
 
     #[test]

@@ -95,11 +95,6 @@ pub fn forget_source(doc: &[u8]) -> Result<Vec<u8>> {
     serde_json::to_vec(&value).context("serializing the image-pinned definition")
 }
 
-/// The tag a built image publishes under, beside the artifact that names it: a digest is not a tag, so the one character a tag cannot carry is replaced and the digest stays legible in the reference (§6).
-pub fn published_tag(repository: &str, digest: &str) -> String {
-    format!("{repository}:{}", digest.replace(':', "-"))
-}
-
 /// One layer of a built image, as its manifest addresses it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageLayer {
@@ -292,15 +287,6 @@ mod tests {
         )
         .expect("json");
         assert_eq!(published["spec"]["image"], "ghcr.io/team/base:1");
-    }
-
-    #[test]
-    fn a_built_image_publishes_under_a_tag_its_digest_is_still_readable_in() {
-        assert_eq!(
-            published_tag("ghcr.io/team/hermes", "sha256:abc"),
-            "ghcr.io/team/hermes:sha256-abc",
-            "a tag carries no colon, and an operator still has to recognize the image"
-        );
     }
 
     #[test]

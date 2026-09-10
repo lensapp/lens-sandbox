@@ -4,6 +4,7 @@ pub mod connector;
 pub mod containerfile;
 pub mod disk;
 pub mod image;
+pub mod image_index;
 pub mod memory;
 pub mod merge;
 pub mod registry;

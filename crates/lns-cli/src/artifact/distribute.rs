@@ -15,12 +15,28 @@ pub trait Producer {
         reference: &'a str,
     ) -> LocalBoxFuture<'a, Result<()>>;
 
-    /// Upload a built image's config, layers and manifest into the artifact's own repository, and answer with the digest reference the published document names (§6).
+    /// Upload a built image's config, layers and manifest into the artifact's own repository, under the tag this architecture owns (§6).
     fn push_image<'a>(
         &'a self,
         image: &'a lns_ipc::PushableImage,
         repository: &'a str,
-    ) -> LocalBoxFuture<'a, Result<String>>;
+        tag: &'a str,
+    ) -> LocalBoxFuture<'a, Result<()>>;
+
+    /// What one architecture's image tag holds today, so a push assembles the index over every architecture the repository already publishes.
+    fn image_at<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+    ) -> LocalBoxFuture<'a, Result<Option<lns_artifact::image_index::IndexEntry>>>;
+
+    /// Upload the assembled image index, which is what the published document names by digest.
+    fn push_index<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+        index: &'a [u8],
+    ) -> LocalBoxFuture<'a, Result<()>>;
 }
 
 /// Builds the image a path-form `spec.image` names. The service owns the executor and the layer store; the CLI owns the registry login, so the image is built there and uploaded here.
@@ -270,9 +286,11 @@ fn report_packed<W: Write>(
 }
 
 /// What a dry run needs of the world: the same document sources a push reads, and the same size discipline it is held to.
-pub struct DryRunPorts<'a, F: Fs + ?Sized, B: ImageBuilder + ?Sized> {
+pub struct DryRunPorts<'a, F: Fs + ?Sized, P: Producer + ?Sized, B: ImageBuilder + ?Sized> {
     pub fs: &'a F,
     pub cwd: &'a Path,
+    /// A dry run uploads nothing and reads the registry, so it can say which architectures the index it would name already holds.
+    pub producer: &'a P,
     pub builder: &'a B,
     pub image_limit: u64,
     pub rebuild: bool,
@@ -425,7 +443,52 @@ where
     Ok(())
 }
 
-/// Build the image `spec.image` names and publish it into the artifact's own repository, before the document that will name its digest is uploaded — `lns push` never publishes a document whose image it does not have (§6).
+/// The entry this push contributes to the index: the manifest it just built, as an index addresses it.
+fn entry_of(image: &lns_ipc::PushableImage) -> lns_artifact::image_index::IndexEntry {
+    lns_artifact::image_index::IndexEntry {
+        digest: image.digest.clone(),
+        size: image.manifest.len() as u64,
+        media_type: image.manifest_media_type.clone(),
+        os: image.os.clone(),
+        architecture: image.architecture.clone(),
+    }
+}
+
+/// What this reference already publishes, read one architecture at a time: the per-architecture tags are the record the index is derived from, so no push has to trust an index another push wrote (§6).
+async fn held_entries<P>(
+    producer: &P,
+    repository: &str,
+    artifact_tag: &str,
+) -> Result<Vec<lns_artifact::image_index::IndexEntry>>
+where
+    P: Producer + ?Sized,
+{
+    let mut held = Vec::new();
+    for architecture in lns_artifact::image_index::ARCHITECTURES {
+        let tag = lns_artifact::image_index::architecture_tag(
+            artifact_tag,
+            lns_artifact::image_index::OS,
+            architecture,
+        );
+        let entry = producer
+            .image_at(repository, &tag)
+            .await
+            .with_context(|| format!("reading what {repository}:{tag} holds"))?;
+        held.extend(entry);
+    }
+    Ok(lns_artifact::image_index::in_index_order(held))
+}
+
+/// How every line that lists an index names what it holds.
+fn holdings(entries: &[lns_artifact::image_index::IndexEntry]) -> String {
+    entries
+        .iter()
+        .map(|entry| format!("{} {}", entry.platform(), entry.digest))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Build the image `spec.image` names and publish it into the artifact's own repository, before the document that will name its digest is uploaded — `lns push` never publishes a document whose image it does not have (§6). The document names an index, so a push from a second architecture adds an entry rather than replacing what the first published.
 async fn publish_the_image<P, B, W>(
     producer: &P,
     builder: &B,
@@ -450,23 +513,65 @@ where
         .context("the build answered with no image, so there is nothing to publish")?;
     refuse_an_image_over(limit, &image)?;
     let repository = super::mixin_plan::repository_of(reference);
-    let published = producer
-        .push_image(&image, repository)
-        .await
-        .with_context(|| format!("publishing the built image into {repository}"))?;
-    writeln!(
-        out,
-        "{} {} as {published} ({} layer{})",
-        if built.reused { "reused" } else { "built" },
-        built.label,
-        image.layers.len(),
-        if image.layers.len() == 1 { "" } else { "s" },
-    )?;
+    let artifact_tag = lns_artifact::image_index::tag_of(reference);
+    let held = held_entries(producer, repository, artifact_tag).await?;
+    let mine = entry_of(&image);
+    let entries = lns_artifact::image_index::with_entry(&held, mine.clone());
+    let index = lns_artifact::image_index::assemble(&entries)?;
+    let published = format!("{repository}@{}", index.digest);
+    if held == entries {
+        writeln!(
+            out,
+            "nothing to publish: the index already holds {} {} for {}",
+            mine.platform(),
+            mine.digest,
+            built.label
+        )?;
+    } else {
+        publish_one_architecture(producer, &image, repository, artifact_tag, &mine).await?;
+        writeln!(
+            out,
+            "{} {} as {repository}@{} ({} layer{})",
+            if built.reused { "reused" } else { "built" },
+            built.label,
+            image.digest,
+            image.layers.len(),
+            if image.layers.len() == 1 { "" } else { "s" },
+        )?;
+        producer
+            .push_index(
+                repository,
+                &lns_artifact::image_index::index_tag(artifact_tag),
+                &index.bytes,
+            )
+            .await
+            .with_context(|| format!("publishing the image index into {repository}"))?;
+    }
+    writeln!(out, "index {published} holds {}", holdings(&entries))?;
     Ok(Some(PublishedImage {
         key: built.key,
         label: built.label,
         reference: published,
     }))
+}
+
+/// This architecture's manifest goes up before the index that names it, and under the tag only this architecture writes.
+async fn publish_one_architecture<P>(
+    producer: &P,
+    image: &lns_ipc::PushableImage,
+    repository: &str,
+    artifact_tag: &str,
+    mine: &lns_artifact::image_index::IndexEntry,
+) -> Result<()>
+where
+    P: Producer + ?Sized,
+{
+    let tag =
+        lns_artifact::image_index::architecture_tag(artifact_tag, &mine.os, &mine.architecture);
+    producer
+        .push_image(image, repository, &tag)
+        .await
+        .with_context(|| format!("publishing the built image into {repository}"))
 }
 
 /// The size discipline (§6), read off the manifest the build produced.
@@ -482,14 +587,17 @@ fn refuse_an_image_over(limit: u64, image: &lns_ipc::PushableImage) -> Result<()
     lns_artifact::image::refuse_an_image_over(limit, &layers, &image.config)
 }
 
-/// What a dry run can say about the image without building it: the key always, and the digest only when this machine already answers that key.
-async fn preview_the_image<B, W>(
+/// What a dry run can say about the image without building it: the key always, which architectures the index holds, and the digest only when this machine already answers that key.
+async fn preview_the_image<P, B, W>(
+    producer: &P,
     builder: &B,
     request: &mut ImageRequest<'_>,
+    reference: &str,
     limit: u64,
     out: &mut W,
 ) -> Result<Option<String>>
 where
+    P: Producer + ?Sized,
     B: ImageBuilder + ?Sized,
     W: Write,
 {
@@ -499,6 +607,17 @@ where
     resolve_before_building(builder, request).await?;
     let planned = builder.build(request).await?;
     writeln!(out, "key {}", planned.key)?;
+    let repository = super::mixin_plan::repository_of(reference);
+    let artifact_tag = lns_artifact::image_index::tag_of(reference);
+    let held = held_entries(producer, repository, artifact_tag).await?;
+    writeln!(
+        out,
+        "the index holds {}",
+        match held.is_empty() {
+            true => "nothing yet".to_string(),
+            false => holdings(&held),
+        }
+    )?;
     match planned.image {
         Some(image) => {
             refuse_an_image_over(limit, &image)?;
@@ -507,7 +626,24 @@ where
                 "would publish the image {} builds to, {}",
                 planned.label, image.digest
             )?;
-            Ok(Some(image.digest))
+            let mine = entry_of(&image);
+            let entries = lns_artifact::image_index::with_entry(&held, mine.clone());
+            if held == entries {
+                writeln!(
+                    out,
+                    "this push would add nothing: the index already holds {} {}",
+                    mine.platform(),
+                    mine.digest
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "this push would add {} {}",
+                    mine.platform(),
+                    mine.digest
+                )?;
+            }
+            Ok(Some(lns_artifact::image_index::assemble(&entries)?.digest))
         }
         None => {
             writeln!(
@@ -610,20 +746,22 @@ where
 }
 
 /// `lns push --dry-run <ref>`: everything a push validates, packs, and builds — printing the digests that would publish; nothing is built and nothing is uploaded.
-pub async fn push_dry_run<F, B, W>(
-    ports: DryRunPorts<'_, F, B>,
+pub async fn push_dry_run<F, P, B, W>(
+    ports: DryRunPorts<'_, F, P, B>,
     doc: &[u8],
     reference: &str,
     out: &mut W,
 ) -> Result<i32>
 where
     F: Fs + ?Sized,
+    P: Producer + ?Sized,
     B: ImageBuilder + ?Sized,
     W: Write,
 {
     let DryRunPorts {
         fs,
         cwd,
+        producer,
         builder,
         image_limit,
         rebuild,
@@ -635,6 +773,7 @@ where
     refuse_unpushable_planned_tools(&plan)?;
     preflight_readmes(fs, cwd, &plan)?;
     let digest = preview_the_image(
+        producer,
         builder,
         &mut ImageRequest {
             document: doc.to_vec(),
@@ -644,6 +783,7 @@ where
             authored_egress: None,
             packed_filesets: Vec::new(),
         },
+        reference,
         image_limit,
         out,
     )
@@ -785,6 +925,7 @@ mod tests {
             DryRunPorts {
                 fs,
                 cwd,
+                producer: &FakeProducer::ok(),
                 builder: &FakeBuilder::unconsultable(),
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,
@@ -859,6 +1000,8 @@ mod tests {
             digest: format!("sha256:{}", "cc".repeat(32)),
             manifest: "{}".into(),
             manifest_media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            os: lns_artifact::image_index::OS.into(),
+            architecture: "arm64".into(),
             config: config.to_string(),
             config_digest: format!("sha256:{}", "dd".repeat(32)),
             config_media_type: "application/vnd.oci.image.config.v1+json".into(),
@@ -934,8 +1077,13 @@ mod tests {
     struct FakeProducer {
         failure: Option<String>,
         uploaded: RefCell<Vec<BuiltArtifact>>,
+        /// Every image upload, as the tag it landed under.
         images: RefCell<Vec<(lns_ipc::PushableImage, String)>>,
         image_failure: Option<String>,
+        /// What the registry holds under each per-architecture image tag, which is what a push assembles its index over.
+        held: RefCell<std::collections::HashMap<String, lns_artifact::image_index::IndexEntry>>,
+        indexes: RefCell<Vec<(String, Vec<u8>)>>,
+        read_failure: Option<String>,
     }
 
     impl FakeProducer {
@@ -948,6 +1096,28 @@ mod tests {
                 failure: Some(message.to_string()),
                 ..Default::default()
             }
+        }
+
+        /// A repository another architecture has already pushed to, which is what a second push adds its entry beside.
+        fn holding(self, tag: &str, architecture: &str, digest: &str) -> Self {
+            self.held.borrow_mut().insert(
+                format!("ghcr.io/team/hermes:{tag}"),
+                lns_artifact::image_index::IndexEntry {
+                    digest: digest.to_string(),
+                    size: 2,
+                    media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                    os: lns_artifact::image_index::OS.to_string(),
+                    architecture: architecture.to_string(),
+                },
+            );
+            self
+        }
+
+        /// The index this push assembled, as the registry received it.
+        fn published_index(&self) -> Vec<lns_artifact::image_index::IndexEntry> {
+            let indexes = self.indexes.borrow();
+            let (_, bytes) = indexes.last().expect("an index was published");
+            lns_artifact::image_index::parse(bytes).expect("the index reads back")
         }
 
         /// The document the registry received, which is what a consumer will read.
@@ -991,18 +1161,52 @@ mod tests {
             &'a self,
             image: &'a lns_ipc::PushableImage,
             repository: &'a str,
-        ) -> LocalBoxFuture<'a, Result<String>> {
+            tag: &'a str,
+        ) -> LocalBoxFuture<'a, Result<()>> {
             self.images
                 .borrow_mut()
-                .push((image.clone(), repository.to_string()));
+                .push((image.clone(), format!("{repository}:{tag}")));
+            self.held
+                .borrow_mut()
+                .insert(format!("{repository}:{tag}"), entry_of(image));
             let failure = self.image_failure.clone();
-            let published = format!("{repository}@{}", image.digest);
             Box::pin(async move {
                 match failure {
                     Some(message) => Err(anyhow::anyhow!(message)),
-                    None => Ok(published),
+                    None => Ok(()),
                 }
             })
+        }
+
+        fn image_at<'a>(
+            &'a self,
+            repository: &'a str,
+            tag: &'a str,
+        ) -> LocalBoxFuture<'a, Result<Option<lns_artifact::image_index::IndexEntry>>> {
+            let held = self
+                .held
+                .borrow()
+                .get(&format!("{repository}:{tag}"))
+                .cloned();
+            let failure = self.read_failure.clone();
+            Box::pin(async move {
+                match failure {
+                    Some(message) => Err(anyhow::anyhow!(message)),
+                    None => Ok(held),
+                }
+            })
+        }
+
+        fn push_index<'a>(
+            &'a self,
+            repository: &'a str,
+            tag: &'a str,
+            index: &'a [u8],
+        ) -> LocalBoxFuture<'a, Result<()>> {
+            self.indexes
+                .borrow_mut()
+                .push((format!("{repository}:{tag}"), index.to_vec()));
+            Box::pin(async move { Ok(()) })
         }
     }
 
@@ -1809,6 +2013,7 @@ mod tests {
             DryRunPorts {
                 fs: &fs_with_a_context_and_a_mixin(),
                 cwd: cwd(),
+                producer: &FakeProducer::ok(),
                 builder: &builder,
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,
@@ -1825,6 +2030,228 @@ mod tests {
             1,
             "a preview plans the document a build would run, not the one on disk"
         );
+    }
+
+    /// The digest another architecture's push left behind, which this one must not replace.
+    const AMD64_DIGEST: &str = "sha256:aaaa";
+
+    #[tokio::test]
+    async fn a_push_from_a_second_architecture_adds_its_entry_to_the_index_the_first_published() {
+        let producer = FakeProducer::ok().holding("1.4.0-image-linux-amd64", "amd64", AMD64_DIGEST);
+        let mut out = Vec::new();
+        let code = push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:base", 10)]),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        let published = producer.published_index();
+        assert_eq!(
+            published
+                .iter()
+                .map(|entry| (entry.platform(), entry.digest.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("linux/amd64".to_string(), AMD64_DIGEST.to_string()),
+                (
+                    "linux/arm64".to_string(),
+                    format!("sha256:{}", "cc".repeat(32))
+                ),
+            ],
+            "§6: a second architecture adds an entry rather than replacing the image"
+        );
+        let uploaded: Vec<String> = producer
+            .images
+            .borrow()
+            .iter()
+            .map(|(_, tag)| tag.clone())
+            .collect();
+        assert_eq!(
+            uploaded,
+            vec!["ghcr.io/team/hermes:1.4.0-image-linux-arm64"],
+            "each architecture writes only the tag it owns"
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("index ghcr.io/team/hermes@sha256:")
+                && text.contains("linux/amd64 sha256:aaaa"),
+            "the publisher sees what the index now holds: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_published_document_names_the_index_rather_than_this_architecture_s_manifest() {
+        let producer = FakeProducer::ok().holding("1.4.0-image-linux-amd64", "amd64", AMD64_DIGEST);
+        let mut out = Vec::new();
+        push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:base", 10)]),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let index = lns_artifact::image_index::assemble(&producer.published_index()).unwrap();
+        assert_eq!(
+            producer.published()["spec"]["image"],
+            format!("ghcr.io/team/hermes@{}", index.digest),
+            "a consumer's pull selects its own architecture, which only an index lets it do"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_push_whose_architecture_the_index_already_holds_publishes_nothing_and_says_so() {
+        let producer = FakeProducer::ok().holding(
+            "1.4.0-image-linux-arm64",
+            "arm64",
+            &format!("sha256:{}", "cc".repeat(32)),
+        );
+        let mut out = Vec::new();
+        push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:base", 10)]).reused(),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        assert!(
+            producer.images.borrow().is_empty() && producer.indexes.borrow().is_empty(),
+            "an unchanged key whose entry is already indexed uploads no image and no index"
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("nothing to publish: the index already holds linux/arm64"),
+            "got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_says_what_the_index_holds_and_what_this_push_would_add() {
+        let producer = FakeProducer::ok().holding("1.4.0-image-linux-amd64", "amd64", AMD64_DIGEST);
+        let mut out = Vec::new();
+        push_dry_run(
+            DryRunPorts {
+                fs: &fs_with_a_context(),
+                cwd: cwd(),
+                producer: &producer,
+                builder: &FakeBuilder::built(&[("sha256:base", 10)]).reused(),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+            },
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("the index holds linux/amd64 sha256:aaaa"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("this push would add linux/arm64"),
+            "got: {text}"
+        );
+        assert!(
+            producer.images.borrow().is_empty() && producer.indexes.borrow().is_empty(),
+            "a dry run uploads nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_of_an_architecture_the_index_already_holds_says_it_would_add_nothing() {
+        let producer = FakeProducer::ok().holding(
+            "1.4.0-image-linux-arm64",
+            "arm64",
+            &format!("sha256:{}", "cc".repeat(32)),
+        );
+        let mut out = Vec::new();
+        push_dry_run(
+            DryRunPorts {
+                fs: &fs_with_a_context(),
+                cwd: cwd(),
+                producer: &producer,
+                builder: &FakeBuilder::built(&[("sha256:base", 10)]).reused(),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+            },
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("this push would add nothing: the index already holds linux/arm64"),
+            "got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_of_a_repository_nobody_has_pushed_to_says_the_index_holds_nothing_yet() {
+        let mut out = Vec::new();
+        push_dry_run(
+            DryRunPorts {
+                fs: &fs_with_a_context(),
+                cwd: cwd(),
+                producer: &FakeProducer::ok(),
+                builder: &FakeBuilder::built(&[("sha256:base", 10)]),
+                image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
+                rebuild: false,
+            },
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("the index holds nothing yet"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn a_repository_this_push_cannot_read_stops_it_before_it_publishes_anything() {
+        let producer = FakeProducer {
+            read_failure: Some("registry timeout".into()),
+            ..FakeProducer::ok()
+        };
+        let mut out = Vec::new();
+        let err = push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:base", 10)]),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("ghcr.io/team/hermes:1.4.0-image-linux"),
+            "an index assembled over a repository nobody could read would drop an entry: {message}"
+        );
+        assert!(producer.uploaded.borrow().is_empty());
     }
 
     #[tokio::test]
@@ -1880,6 +2307,7 @@ mod tests {
             DryRunPorts {
                 fs: &fs_with_a_context(),
                 cwd: cwd(),
+                producer: &FakeProducer::ok(),
                 builder: &FakeBuilder::built(&[("sha256:base", 10)]),
                 image_limit: lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES,
                 rebuild: false,

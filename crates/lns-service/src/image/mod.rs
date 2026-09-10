@@ -21,6 +21,12 @@ pub(crate) trait Registry: Send + Sync {
         reference: &Reference,
     ) -> impl std::future::Future<Output = Result<(OciImageManifest, String, String)>> + Send;
 
+    /// What the index at this reference holds, empty where the reference names a plain manifest — so a pull that found no entry for this host can say which architectures were built (`docs/sandbox-spec.md` §6).
+    fn pull_index(
+        &self,
+        reference: &Reference,
+    ) -> impl std::future::Future<Output = Result<Vec<lns_artifact::image_index::IndexEntry>>> + Send;
+
     fn pull_blob(
         &self,
         reference: &Reference,
@@ -462,6 +468,30 @@ pub(crate) fn verify_digest_pin(
 }
 
 #[allow(clippy::cognitive_complexity)] // manifest fetch → digest verify → per-layer parallel pull → diff_id check
+/// A pull an index answered with nothing for this host is told what the index holds and what would add its own architecture, rather than the registry's own "no entry found" (§6).
+async fn explain_architecture<R: Registry>(
+    client: &R,
+    reference: &Reference,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let architecture = want_arch().to_string();
+    let Ok(entries) = client.pull_index(reference).await else {
+        return error;
+    };
+    if entries.is_empty()
+        || lns_artifact::image_index::select(&entries, lns_artifact::image_index::OS, &architecture)
+            .is_some()
+    {
+        return error;
+    }
+    anyhow::anyhow!(lns_artifact::image_index::refuse_missing_architecture(
+        &reference.whole(),
+        &entries,
+        lns_artifact::image_index::OS,
+        &architecture,
+    ))
+}
+
 pub(crate) async fn pull_inner<R: Registry>(
     client: &R,
     image: &str,
@@ -472,7 +502,10 @@ pub(crate) async fn pull_inner<R: Registry>(
         .with_context(|| format!("invalid image reference: {image}"))?;
 
     let (manifest, manifest_digest, config_str) =
-        client.pull_manifest_and_config(&reference).await?;
+        match client.pull_manifest_and_config(&reference).await {
+            Ok(answer) => answer,
+            Err(error) => return Err(explain_architecture(client, &reference, error).await),
+        };
 
     let config: oci_client::config::ConfigFile =
         serde_json::from_str(&config_str).context("parsing image config")?;
@@ -982,6 +1015,8 @@ mod tests {
                 manifest_digest: self.manifest_digest,
                 blobs: self.blobs,
                 calls: Mutex::new(Vec::new()),
+                index: Vec::new(),
+                manifest_failure: None,
             }
         }
     }
@@ -992,6 +1027,9 @@ mod tests {
         manifest_digest: String,
         blobs: Vec<(String, Vec<u8>)>,
         calls: Mutex<Vec<String>>,
+        /// What an index at this reference holds, for a registry that answers a manifest list rather than a manifest.
+        index: Vec<lns_artifact::image_index::IndexEntry>,
+        manifest_failure: Option<String>,
     }
 
     impl Registry for FakeRegistry {
@@ -1000,11 +1038,22 @@ mod tests {
             _reference: &Reference,
         ) -> Result<(OciImageManifest, String, String)> {
             self.calls.lock().unwrap().push("manifest".into());
+            if let Some(failure) = &self.manifest_failure {
+                anyhow::bail!("{failure}");
+            }
             Ok((
                 self.manifest.clone(),
                 self.manifest_digest.clone(),
                 self.config_json.clone(),
             ))
+        }
+
+        async fn pull_index(
+            &self,
+            _reference: &Reference,
+        ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
+            self.calls.lock().unwrap().push("index".into());
+            Ok(self.index.clone())
         }
 
         async fn pull_blob(
@@ -1828,6 +1877,99 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("digest"), "{err:#}");
+    }
+
+    /// The index a host nobody built for finds: entries, none of them this host's.
+    fn index_without(
+        architecture: oci_spec::image::Arch,
+    ) -> Vec<lns_artifact::image_index::IndexEntry> {
+        let other = match architecture {
+            oci_spec::image::Arch::ARM64 => "amd64",
+            _ => "arm64",
+        };
+        vec![lns_artifact::image_index::IndexEntry {
+            digest: format!("sha256:{}", "ab".repeat(32)),
+            size: 512,
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            os: lns_artifact::image_index::OS.into(),
+            architecture: other.into(),
+        }]
+    }
+
+    #[tokio::test]
+    async fn a_pull_of_an_index_nobody_built_this_host_s_architecture_for_says_what_it_holds() {
+        ensure_global_trace_subscriber();
+        let mut registry = build_two_layer_image().into_registry();
+        registry.manifest_failure = Some(
+            "no entry found in image index manifest matching client's default platform".into(),
+        );
+        registry.index = index_without(want_arch());
+        let (_dir, cache) = cache();
+        let err = pull_inner(
+            &registry,
+            &format!("ghcr.io/team/hermes@sha256:{}", "ee".repeat(32)),
+            &cache,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&registry.index[0].platform()),
+            "the approver has to see which architectures were built: {message}"
+        );
+        assert!(
+            message.contains(&format!("linux/{}", want_arch())),
+            "and which one this host is: {message}"
+        );
+        assert!(
+            message.contains("lns push"),
+            "the build happens where the push runs, so the refusal names the command: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pull_that_failed_for_another_reason_keeps_the_registry_s_own_error() {
+        ensure_global_trace_subscriber();
+        let mut registry = build_two_layer_image().into_registry();
+        registry.manifest_failure = Some("registry timeout".into());
+        let (_dir, cache) = cache();
+        let err = pull_inner(
+            &registry,
+            &format!("ghcr.io/team/hermes@sha256:{}", "ee".repeat(32)),
+            &cache,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("registry timeout"),
+            "an index is not what went wrong here: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_index_that_does_hold_this_host_s_architecture_explains_nothing_away() {
+        ensure_global_trace_subscriber();
+        let mut registry = build_two_layer_image().into_registry();
+        registry.manifest_failure = Some("blob unknown to registry".into());
+        registry.index = vec![lns_artifact::image_index::IndexEntry {
+            digest: format!("sha256:{}", "ab".repeat(32)),
+            size: 512,
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            os: lns_artifact::image_index::OS.into(),
+            architecture: want_arch().to_string(),
+        }];
+        let (_dir, cache) = cache();
+        let err = pull_inner(
+            &registry,
+            &format!("ghcr.io/team/hermes@sha256:{}", "ee".repeat(32)),
+            &cache,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("blob unknown"),
+            "an entry for this host was there, so the architecture is not the story: {err:#}"
+        );
     }
 
     #[tokio::test]

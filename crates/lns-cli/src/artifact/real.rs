@@ -130,6 +130,7 @@ async fn push_local(reference: &str, options: PushOptions<'_>, cwd: PathBuf) -> 
             super::distribute::DryRunPorts {
                 fs: &RealFs,
                 cwd: &project_dir,
+                producer: &RealProducer,
                 builder: &ServiceImageBuilder,
                 image_limit: crate::config::load_image_limit(
                     &crate::config::default_config_path()?
@@ -343,8 +344,29 @@ impl super::distribute::Producer for RealProducer {
         &'a self,
         image: &'a lns_ipc::PushableImage,
         repository: &'a str,
-    ) -> crate::local_future::LocalBoxFuture<'a, Result<String>> {
-        Box::pin(async move { crate::build::push::push_image(image, repository).await })
+        tag: &'a str,
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move { crate::build::push::push_image(image, repository, tag).await })
+    }
+
+    fn image_at<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+    ) -> crate::local_future::LocalBoxFuture<
+        'a,
+        Result<Option<lns_artifact::image_index::IndexEntry>>,
+    > {
+        Box::pin(async move { crate::build::push::image_at(repository, tag).await })
+    }
+
+    fn push_index<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+        index: &'a [u8],
+    ) -> crate::local_future::LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move { crate::build::push::push_index(repository, tag, index).await })
     }
 }
 

@@ -61,6 +61,13 @@ impl<R: Registry> CachingRegistry<R> {
 }
 
 impl<R: Registry> Registry for CachingRegistry<R> {
+    async fn pull_index(
+        &self,
+        reference: &Reference,
+    ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
+        self.inner.pull_index(reference).await
+    }
+
     async fn pull_manifest_and_config(
         &self,
         reference: &Reference,
@@ -220,6 +227,13 @@ mod tests {
     }
 
     impl Registry for CountingRegistry {
+        async fn pull_index(
+            &self,
+            _reference: &Reference,
+        ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
+            Ok(Vec::new())
+        }
+
         async fn pull_manifest_and_config(
             &self,
             _reference: &Reference,

@@ -146,6 +146,19 @@ pub(crate) fn read_build_source(title: &str, layer: &[u8]) -> Result<lns_ipc::Bu
     })
 }
 
+/// The architectures an approver reads off the index the published document names, in the order the index holds them (§6).
+pub(crate) fn built_architectures(
+    entries: &[lns_artifact::image_index::IndexEntry],
+) -> Vec<lns_ipc::BuiltArchitecture> {
+    entries
+        .iter()
+        .map(|entry| lns_ipc::BuiltArchitecture {
+            architecture: entry.architecture.clone(),
+            digest: entry.digest.clone(),
+        })
+        .collect()
+}
+
 /// Project an already-peeked manifest into the pre-run inspection: a plain image reports its digest, a published sandbox reports its base image, mounts, filesets, declared connectors, and any over-broad-policy flags.
 pub(crate) fn project_inspection(
     image_ref: &str,
@@ -155,6 +168,7 @@ pub(crate) fn project_inspection(
     resolution: &crate::artifact::mixin::Resolution,
     host: Option<lns_artifact::resources::HostCapacity>,
     build_source: Option<lns_ipc::BuildSourceView>,
+    image_architectures: Vec<lns_ipc::BuiltArchitecture>,
 ) -> Result<ArtifactInspection> {
     match dispatch(artifact_type, Some(config_media_type))? {
         None => Ok(ArtifactInspection::Image(ImageView {
@@ -197,6 +211,7 @@ pub(crate) fn project_inspection(
             Ok(ArtifactInspection::Sandbox(Box::new(
                 lns_ipc::SandboxView {
                     image_source: build_source,
+                    image_architectures,
                     mixins: resolution.mixins.clone(),
                     pinned_mixins: resolution.pinned_extra.clone(),
                     contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
@@ -326,6 +341,7 @@ mod tests {
             &resolution(config, mixins),
             host,
             None,
+            Vec::new(),
         )
     }
 
@@ -529,6 +545,16 @@ mod tests {
         }
     }
 
+    fn index_entry(architecture: &str, digest: &str) -> lns_artifact::image_index::IndexEntry {
+        lns_artifact::image_index::IndexEntry {
+            digest: digest.to_string(),
+            size: 512,
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            os: lns_artifact::image_index::OS.to_string(),
+            architecture: architecture.to_string(),
+        }
+    }
+
     #[test]
     fn a_sandbox_built_from_a_containerfile_discloses_it_beside_the_digest_it_runs() {
         let inspection = project_inspection(
@@ -542,6 +568,7 @@ mod tests {
             ),
             None,
             Some(read_build_source("./image", &packed_source().data).unwrap()),
+            built_architectures(&[index_entry("arm64", "sha256:aa"), index_entry("amd64", "sha256:bb")]),
         )
         .unwrap();
 
@@ -550,6 +577,17 @@ mod tests {
         let source = source.expect("an approver decides on what a build ran, not only its digest");
         assert_eq!(source.containerfile, "./image/Containerfile");
         assert_eq!(source.context.len(), 2);
+        let ArtifactInspection::Sandbox(view) = &inspection else {
+            unreachable!("a published sandbox projects as one")
+        };
+        assert_eq!(
+            view.image_architectures
+                .iter()
+                .map(|built| (built.architecture.as_str(), built.digest.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("arm64", "sha256:aa"), ("amd64", "sha256:bb")],
+            "§6: an approver reads one digest per architecture the index holds"
+        );
     }
 
     #[test]
@@ -562,6 +600,7 @@ mod tests {
             &resolution("{}", &[]),
             None,
             None,
+            Vec::new(),
         )
         .unwrap();
         assert!(
@@ -580,6 +619,7 @@ mod tests {
             &resolution("{}", &[]),
             None,
             None,
+            Vec::new(),
         )
         .unwrap();
 
@@ -602,6 +642,7 @@ mod tests {
             &resolution("{}", &[]),
             None,
             None,
+            Vec::new(),
         )
         .unwrap_err();
 
@@ -651,6 +692,7 @@ mod tests {
         disk_bytes: Option<u64>,
     ) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_architectures: Vec::new(),
             image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
@@ -677,6 +719,7 @@ mod tests {
     /// The bare projection with declared credentials, so a test compares a whole value rather than reaching into the enum.
     fn sandbox_view_with_credentials(credentials: Vec<lns_spec::Credential>) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_architectures: Vec::new(),
             image_source: None,
             credentials,
             mixins: Vec::new(),
@@ -702,6 +745,7 @@ mod tests {
 
     fn sandbox_view_with_mixins(mixins: Vec<String>, pinned: Vec<String>) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_architectures: Vec::new(),
             image_source: None,
             mixins,
             pinned_mixins: pinned,
@@ -727,6 +771,7 @@ mod tests {
 
     fn sandbox_view_with_filesets(filesets: Vec<SandboxFileset>) -> ArtifactInspection {
         ArtifactInspection::Sandbox(Box::new(SandboxView {
+            image_architectures: Vec::new(),
             image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
@@ -765,6 +810,7 @@ mod tests {
                 ),
                 None,
                 None,
+                Vec::new(),
             )
             .unwrap(),
             sandbox_view_with_credentials(vec![lns_spec::Credential {
@@ -794,6 +840,7 @@ mod tests {
             &resolution(&document, &[]),
             None,
             None,
+            Vec::new(),
         )
         .unwrap();
         assert_eq!(
@@ -838,6 +885,7 @@ mod tests {
             ),
             None,
             None,
+            Vec::new(),
         )
         .unwrap_err();
         assert!(
@@ -859,6 +907,7 @@ mod tests {
             ),
             None,
             None,
+            Vec::new(),
         )
         .unwrap_err();
         assert!(
@@ -886,6 +935,7 @@ mod tests {
                 },
                 None,
                 None,
+                Vec::new(),
             )
             .unwrap(),
             sandbox_view_with_mixins(vec![declared, pinned.clone()], vec![pinned]),
@@ -1072,6 +1122,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                image_architectures: Vec::new(),
                 image_source: None,
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
@@ -1152,6 +1203,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                image_architectures: Vec::new(),
                 image_source: None,
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),
@@ -1185,6 +1237,7 @@ mod tests {
         assert_eq!(
             inspection,
             ArtifactInspection::Sandbox(Box::new(SandboxView {
+                image_architectures: Vec::new(),
                 image_source: None,
                 mixins: Vec::new(),
                 pinned_mixins: Vec::new(),

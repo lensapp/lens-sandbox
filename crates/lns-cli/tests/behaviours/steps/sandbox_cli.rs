@@ -470,6 +470,10 @@ struct StepProducer {
     fail_after: Option<usize>,
     /// Every built image the push uploaded, with the repository it landed in.
     images: RefCell<Vec<(lns_ipc::PushableImage, String)>>,
+    /// What the registry already holds under each per-architecture image tag, which is what a push assembles its index over.
+    held: RefCell<std::collections::HashMap<String, lns_artifact::image_index::IndexEntry>>,
+    /// Every index the push uploaded, with the tag it landed under.
+    indexes: RefCell<Vec<(String, Vec<u8>)>>,
 }
 
 impl distribute::Producer for StepProducer {
@@ -497,18 +501,43 @@ impl distribute::Producer for StepProducer {
         &'a self,
         image: &'a lns_ipc::PushableImage,
         repository: &'a str,
-    ) -> LocalBoxFuture<'a, anyhow::Result<String>> {
+        _tag: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<()>> {
         self.images
             .borrow_mut()
             .push((image.clone(), repository.to_string()));
-        let published = format!("{repository}@{}", image.digest);
         let refused = self.outcome.clone().err();
         Box::pin(async move {
             match refused {
                 Some(message) => Err(anyhow::anyhow!(message)),
-                None => Ok(published),
+                None => Ok(()),
             }
         })
+    }
+
+    fn image_at<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<Option<lns_artifact::image_index::IndexEntry>>> {
+        let held = self
+            .held
+            .borrow()
+            .get(&format!("{repository}:{tag}"))
+            .cloned();
+        Box::pin(async move { Ok(held) })
+    }
+
+    fn push_index<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+        index: &'a [u8],
+    ) -> LocalBoxFuture<'a, anyhow::Result<()>> {
+        self.indexes
+            .borrow_mut()
+            .push((format!("{repository}:{tag}"), index.to_vec()));
+        Box::pin(async move { Ok(()) })
     }
 }
 
@@ -818,6 +847,8 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
         uploaded: RefCell::new(Vec::new()),
         fail_after: w.push_fails_after,
         images: RefCell::new(Vec::new()),
+        held: RefCell::new(w.published_images.clone()),
+        indexes: RefCell::new(Vec::new()),
     };
     let mut out: Vec<u8> = Vec::new();
     let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
@@ -835,6 +866,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                 distribute::DryRunPorts {
                     fs: &fs,
                     cwd: &project_dir,
+                    producer: &producer,
                     builder: &builder,
                     image_limit: w
                         .image_limit
@@ -881,6 +913,14 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
     w.build_requests = builder.asked.into_inner();
     w.build_inputs = builder.inputs.into_inner();
     w.resolve_requests = builder.resolved.into_inner();
+    w.pushed_indexes = producer
+        .indexes
+        .borrow()
+        .iter()
+        .filter_map(|(tag, bytes)| {
+            Some((tag.clone(), lns_artifact::image_index::parse(bytes).ok()?))
+        })
+        .collect();
     w.pushed_images = producer
         .images
         .into_inner()

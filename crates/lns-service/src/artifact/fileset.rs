@@ -1414,6 +1414,15 @@ mod tests {
     }
 
     impl crate::image::Registry for StreamingRegistry {
+        async fn pull_index(
+            &self,
+            _reference: &oci_client::Reference,
+        ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
+            Self::refuse(
+                "read an index: a packed layer is addressed by its own artifact's manifest",
+            )
+        }
+
         async fn pull_manifest_and_config(
             &self,
             _reference: &oci_client::Reference,

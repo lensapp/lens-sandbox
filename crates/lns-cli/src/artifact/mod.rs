@@ -644,7 +644,29 @@ pub(crate) async fn inspect_cached<W: std::io::Write>(
     }
 }
 
-/// What a pulled artifact discloses about the image it was built from: the file, the context it sent, and the instructions themselves — an approver decides on what a build ran (§7.3).
+/// What a guest starts from, as an approver reads it: an image somebody built, named by the file it was built from and by one digest per architecture the index holds (§6); anything else is the reference the document names.
+fn image_line(view: &lns_ipc::SandboxView) -> String {
+    let Some(source) = &view.image_source else {
+        return view.image.clone();
+    };
+    let built = match view.image_architectures.is_empty() {
+        true => view.image.clone(),
+        false => view
+            .image_architectures
+            .iter()
+            .map(|built| format!("{} {}", built.architecture, built.digest))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    format!(
+        "built from {} ({} lines, context {} files), {built}",
+        source.containerfile,
+        source.text.lines().count(),
+        source.context.len()
+    )
+}
+
+/// What a pulled artifact discloses about the image it was built from: the context it sent and the instructions themselves — an approver decides on what a build ran (§7.3).
 fn render_build_source<W: std::io::Write>(
     out: &mut W,
     source: Option<&lns_ipc::BuildSourceView>,
@@ -652,13 +674,6 @@ fn render_build_source<W: std::io::Write>(
     let Some(source) = source else {
         return Ok(());
     };
-    writeln!(
-        out,
-        "imageSource: built from {} ({} lines, context {} files)",
-        source.containerfile,
-        source.text.lines().count(),
-        source.context.len()
-    )?;
     for file in &source.context {
         writeln!(
             out,
@@ -687,7 +702,7 @@ fn render_cached_inspect<W: std::io::Write>(
             if !view.digest.is_empty() {
                 writeln!(out, "digest: {}", view.digest)?;
             }
-            writeln!(out, "image: {}", view.image)?;
+            writeln!(out, "image: {}", image_line(view))?;
             for mixin in
                 crate::run::summary::mixin_display(&view.mixins, typed, &view.pinned_mixins)
             {
@@ -1322,6 +1337,7 @@ mod tests {
             },
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                    image_architectures: Vec::new(),
                     image_source: None,
                     mixins: Vec::new(),
                     pinned_mixins: Vec::new(),
@@ -1400,6 +1416,7 @@ mod tests {
             },
             Response::ImageInspected {
                 inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+                    image_architectures: Vec::new(),
                     image_source: None,
                     mixins: vec!["ghcr.io/acme/obs:2".into()],
                     pinned_mixins: Vec::new(),

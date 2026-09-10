@@ -28,13 +28,40 @@ Feature: publishing the image a Containerfile builds beside the document
     And the image was published into "ghcr.io/team/hermes"
     And the output contains "built and pushed ghcr.io/team/hermes:1.4.0@sha256:"
 
-  Scenario: the published document names the image by digest and keeps the path the author wrote
+  Scenario: the published document names the index by digest and keeps the path the author wrote
     Given the registry accepts the push
     And the build answers with an image of 2 layers
     When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
-    And the published document's "spec.image" is the digest of the published image
+    And the published document's "spec.image" is the digest of the published index
     And the published document's "spec.imageSource" is "./image"
+
+  Scenario: a push from a second architecture adds an entry to the index the first published
+    Given the registry already holds an "amd64" image for "ghcr.io/team/hermes:1.4.0"
+    And the registry accepts the push
+    And the build answers with an image of 2 layers
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the published index holds "amd64" and "arm64"
+    And the output contains "index ghcr.io/team/hermes@sha256:"
+
+  Scenario: a push whose architecture the index already holds publishes nothing and says so
+    Given the registry already holds this machine's image for "ghcr.io/team/hermes:1.4.0"
+    And the registry accepts the push
+    And the build answers with an image of 2 layers it did not have to build
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the output contains "nothing to publish: the index already holds linux/arm64"
+    And no image was published
+
+  Scenario: push --dry-run says what the index holds and what this push would add
+    Given the registry already holds an "amd64" image for "ghcr.io/team/hermes:1.4.0"
+    And the build answers with an image of 2 layers it did not have to build
+    When the user runs artifact command "push --dry-run ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the output contains "the index holds linux/amd64 sha256:"
+    And the output contains "this push would add linux/arm64 sha256:"
+    And nothing is pushed
 
   Scenario: the Containerfile and its context ship as a layer of the same artifact
     Given the registry accepts the push
