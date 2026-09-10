@@ -287,6 +287,14 @@ impl SandboxService for RealSandboxService {
         serde_json::to_value(&policy).ok()
     }
 
+    fn document(&self, file: Option<&std::path::Path>) -> anyhow::Result<(PathBuf, String)> {
+        let cwd = std::env::current_dir().context("reading the current directory")?;
+        let path = crate::artifact::author::selected_definition_path(file, &cwd);
+        let yaml = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        Ok((path, yaml))
+    }
+
     fn write_document(&self, path: &std::path::Path, contents: &str) -> std::io::Result<()> {
         use std::io::Write as _;
         std::fs::OpenOptions::new()

@@ -69,6 +69,56 @@ impl LocalRegistry {
         self.online.store(online, Ordering::SeqCst);
     }
 
+    /// One architecture's image manifest, written the way a push from a host of that architecture writes it — the seam a scenario needs to prove the second push adds to the index rather than replacing it (`sandbox-spec.md` §6.2). Answers with the manifest's digest.
+    pub fn publish_architecture_image(
+        &self,
+        repository: &str,
+        tag: &str,
+        architecture: &str,
+    ) -> String {
+        let config = format!(
+            r#"{{"architecture":"{architecture}","os":"linux","rootfs":{{"type":"layers","diff_ids":[]}}}}"#
+        )
+        .into_bytes();
+        let config_digest = digest_of(&config);
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": config.len(),
+            },
+            "layers": [],
+        });
+        let bytes = serde_json::to_vec(&manifest).expect("serializing the foreign manifest");
+        let digest = digest_of(&bytes);
+        let mut store = self.store.lock().expect("registry store lock");
+        store.blobs.insert(config_digest, config);
+        let held = Manifest {
+            bytes,
+            content_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            digest: digest.clone(),
+        };
+        store
+            .manifests
+            .insert((repository.to_string(), tag.to_string()), held.clone());
+        store
+            .manifests
+            .insert((repository.to_string(), digest.clone()), held);
+        digest
+    }
+
+    /// What this repository holds under one tag, so a scenario can read the index a push assembled.
+    pub fn manifest_at(&self, repository: &str, tag: &str) -> Option<Vec<u8>> {
+        self.store
+            .lock()
+            .expect("registry store lock")
+            .manifests
+            .get(&(repository.to_string(), tag.to_string()))
+            .map(|manifest| manifest.bytes.clone())
+    }
+
     pub fn manifest_repositories(&self) -> Vec<String> {
         let mut repositories: Vec<_> = self
             .store

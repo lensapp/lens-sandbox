@@ -8,8 +8,81 @@ mod save;
 pub(crate) use save::render as render_saved;
 mod scratch;
 mod shutdown;
+pub(crate) use orchestrator::run_build_step;
 pub use orchestrator::{PreparedRun, handle, prepare};
 pub use scratch::{RealRemoveDir, RemoveDir, reclaim_run_dir};
+
+/// What one build step's guest left behind: the code its instruction exited with, and what its upper holds.
+pub(crate) struct BuildStepOutcome {
+    pub code: i32,
+    pub changes: crate::containerfile::upper::ChangeSet,
+    pub fileset_paths: Vec<String>,
+}
+
+/// Where a build step's guest writes are left for the executor that asked for them. A build step is
+/// an ordinary run with the document's policy in force, so the capture rides the ordinary boot path.
+#[derive(Default)]
+pub struct BuildStep {
+    captured: std::sync::Mutex<Option<(crate::containerfile::upper::ChangeSet, Vec<String>)>>,
+}
+
+impl BuildStep {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn record(
+        &self,
+        changes: crate::containerfile::upper::ChangeSet,
+        fileset_paths: Vec<String>,
+    ) {
+        *self.captured.lock().expect("BuildStep poisoned") = Some((changes, fileset_paths));
+    }
+
+    pub(super) fn take(&self) -> (crate::containerfile::upper::ChangeSet, Vec<String>) {
+        self.captured
+            .lock()
+            .expect("BuildStep poisoned")
+            .take()
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod build_step_tests {
+    use super::*;
+    use crate::containerfile::upper::{Change, ChangeSet};
+
+    fn wrote(path: &str) -> ChangeSet {
+        ChangeSet {
+            changes: vec![Change::Removed { path: path.into() }],
+        }
+    }
+
+    /// The capture happens inside the boot and the executor reads it after, so what one build step
+    /// recorded has to survive the handover once and only once.
+    #[test]
+    fn what_the_capture_recorded_is_handed_over_once() {
+        let step = BuildStep::new();
+        step.record(wrote("etc/motd"), vec!["/opt/agent-skills".into()]);
+
+        let (changes, filesets) = step.take();
+        assert_eq!(changes, wrote("etc/motd"));
+        assert_eq!(filesets, vec!["/opt/agent-skills".to_string()]);
+        assert_eq!(
+            step.take(),
+            (ChangeSet::default(), Vec::new()),
+            "a step whose guest wrote nothing must read as an empty change set, not as the last one",
+        );
+    }
+}
+
+/// Whether the guest was done with its filesystem when the run's shutdown returned, or the grace period ended first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestStop {
+    Stopped,
+    GraceExpired,
+}
 
 /// How a run ended: the code its workload left, whether --rm takes its state, and when.
 pub struct RunEnd {

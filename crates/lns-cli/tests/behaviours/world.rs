@@ -59,6 +59,26 @@ pub struct BehaviourWorld {
     pub pulled_view: Option<lns_ipc::SandboxView>,
     /// The config blob the push uploaded, which is the document a consumer reads.
     pub pushed_doc: Option<Vec<u8>>,
+    /// What the scripted service answers a push's build request with; `None` means the builder must never be consulted.
+    pub built_image: Option<StagedBuild>,
+    /// What this machine lets a built image weigh, in bytes.
+    pub image_limit: Option<u64>,
+    /// Every image the push uploaded, and the repository it landed in.
+    pub pushed_images: Vec<(String, lns_ipc::PushableImage)>,
+    /// What the registry already holds under each per-architecture image tag, as a scenario stages it.
+    pub published_images: std::collections::HashMap<String, lns_artifact::image_index::IndexEntry>,
+    /// Every image index the push uploaded, with the tag it landed under.
+    pub pushed_indexes: Vec<(String, Vec<lns_artifact::image_index::IndexEntry>)>,
+    /// The build source layer the push packed into the artifact, if it packed one.
+    pub pushed_build_source: Option<Vec<u8>>,
+    /// Whether each build request the push made asked for a plan only.
+    pub build_requests: Vec<StagedRequest>,
+    /// The document and the mixin-authored egress each build request carried.
+    pub build_inputs: Vec<StagedBuildInput>,
+    /// What the scripted service answers a push's resolution request with; `None` means the builder must never ask for one.
+    pub staged_resolution: Option<StagedResolution>,
+    /// Every document the push asked the builder to resolve.
+    pub resolve_requests: Vec<String>,
     pub tool_index: std::collections::HashMap<String, String>,
     /// Exact pins the scripted index answers "not listed" for at push verification.
     pub unlisted_pins: std::collections::HashSet<String>,
@@ -66,6 +86,8 @@ pub struct BehaviourWorld {
     pub declared_mounts: DeclaredMountRig,
     /// In-memory `./lns.yaml` (and friends) for the offline author verbs; keyed by path under the fake cwd `/work`.
     pub author_files: std::collections::HashMap<std::path::PathBuf, String>,
+    /// Paths the offline author verbs see as symlinks rather than files, keyed the same way.
+    pub author_symlinks: std::collections::HashSet<std::path::PathBuf>,
     /// Request sequence each shortcut-equivalence invocation sent, in invocation order.
     pub equivalence_requests: Vec<Vec<lns_ipc::Request>>,
     pub decisions: LocalDecisionsRig,
@@ -255,10 +277,14 @@ pub struct SandboxCliRig {
     pub cached_references: Vec<String>,
     /// What a prune would remove right now, served for a `ListPrunableImages` request.
     pub prunable_references: Vec<String>,
+    /// What a run prune's sweep would drop right now, served for a `ListPrunableBuiltImages` request.
+    pub prunable_built_images: Vec<String>,
     /// Response the fake returns for a `ListRuns` request specifically, so prune can canned-serve both the stopped listing and the sweep.
     pub list_runs_response: Option<lns_ipc::Response>,
     /// Response the fake returns for a `RemoveRun` request, so a scenario can pin the service's own refusal of a running sandbox.
     pub remove_run_response: Option<lns_ipc::Response>,
+    /// Response the fake returns for a `ResolveDefinition` request, so a build can resolve a document's mixins before it builds it.
+    pub resolve_response: Option<lns_ipc::Response>,
     pub frames: Vec<Vec<u8>>,
     pub unreachable: bool,
     pub policy: Option<serde_json::Value>,
@@ -346,4 +372,34 @@ impl lns_cli::terminal::Terminal for ScriptedTerminal {
     fn read_secret(&mut self) -> std::io::Result<String> {
         self.read_answer()
     }
+}
+
+/// What a scenario stages the service's build answer as.
+#[derive(Debug, Clone, Default)]
+pub struct StagedBuild {
+    pub key: String,
+    pub label: String,
+    pub reused: bool,
+    pub image: Option<lns_ipc::PushableImage>,
+}
+
+/// What one push asked the builder for, so a scenario can assert that `--rebuild` and `--dry-run` travelled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedRequest {
+    pub plan_only: bool,
+    pub rebuild: bool,
+}
+
+/// What a scenario stages the service's resolution of a document as, so a push can be asserted to build the merged document rather than the one on disk.
+#[derive(Debug, Clone)]
+pub struct StagedResolution {
+    pub definition: String,
+    pub authored_egress: String,
+}
+
+/// The document one build request carried, and the egress the document's other sources authored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedBuildInput {
+    pub definition: String,
+    pub authored_egress: Option<String>,
 }

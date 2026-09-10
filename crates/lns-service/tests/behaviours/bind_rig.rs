@@ -66,6 +66,7 @@ impl BindRig {
             "lns-content",
             None,
             false,
+            false,
             &[],
             &self.binds,
         )

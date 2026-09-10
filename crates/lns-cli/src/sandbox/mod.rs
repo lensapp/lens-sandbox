@@ -44,6 +44,10 @@ pub enum SandboxCommand {
     Rm(SandboxRmArgs),
     #[command(about = "Remove every stopped sandbox, writable layers included.")]
     Prune(SandboxPruneArgs),
+    #[command(
+        about = "Build the Containerfile this document's spec.image names; publishes nothing."
+    )]
+    Build(SandboxBuildArgs),
 }
 
 #[derive(clap::Args)]
@@ -88,6 +92,24 @@ pub struct SandboxStartArgs {
         help = "With -a: detach chord; on match the CLI detaches, leaving the sandbox running."
     )]
     pub detach_keys: DetachChord,
+}
+
+#[derive(clap::Args)]
+pub struct SandboxBuildArgs {
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        help = "Document to build instead of ./lns.yaml."
+    )]
+    pub file: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Ignore the build cache for this build; every instruction runs again."
+    )]
+    pub rebuild: bool,
 }
 
 #[derive(clap::Args)]
@@ -368,7 +390,65 @@ where
         SandboxCommand::Attach(args) => attach(svc, args, term, stdout, stderr).await,
         SandboxCommand::Rm(args) => rm(svc, args, out).await,
         SandboxCommand::Save(args) => save(svc, args, out).await,
+        SandboxCommand::Build(args) => build(svc, args, out).await,
     }
+}
+
+/// The document names the Containerfile; the service does the building, and the key it answers with is what names the build everywhere else.
+async fn build<W: std::io::Write>(
+    svc: &impl SandboxService,
+    args: &SandboxBuildArgs,
+    out: &mut W,
+) -> Result<i32> {
+    let (path, yaml) = svc.document(args.file.as_deref())?;
+    let definition = definition_json(&yaml, &path)?;
+    let definition_dir = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_string_lossy()
+        .into_owned();
+    let resolved = crate::resolve::before_building(svc, &definition, &definition_dir).await?;
+
+    match svc
+        .one_shot(Request::BuildSandbox {
+            definition: resolved.definition,
+            definition_dir,
+            rebuild: args.rebuild,
+            authored_egress: resolved.authored_egress,
+            packed_filesets: resolved.packed_filesets,
+        })
+        .await?
+    {
+        Response::SandboxBuilt {
+            key,
+            reference,
+            label,
+            layers,
+            reused,
+        } => {
+            writeln!(out, "key {key}")?;
+            match reused {
+                true => writeln!(
+                    out,
+                    "nothing to build: {label} is unchanged, and {reference} is what it builds to"
+                )?,
+                false => writeln!(
+                    out,
+                    "built {label} as {reference} ({layers} layer{})",
+                    if layers == 1 { "" } else { "s" }
+                )?,
+            }
+            Ok(0)
+        }
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
+fn definition_json(yaml: &str, path: &std::path::Path) -> Result<String> {
+    let value: serde_json::Value =
+        serde_yaml::from_str(yaml).with_context(|| format!("parsing {}", path.display()))?;
+    serde_json::to_string(&value).context("normalizing the definition to json")
 }
 
 /// §8.4 has the service render what ran and this machine write where the user said, so a document nobody named is never created.
@@ -720,23 +800,32 @@ async fn prune<W: std::io::Write, E: AsyncWriteExt + Unpin>(
             );
         }
         let stopped = stopped_run_names(svc).await?;
-        if stopped.is_empty() {
+        let built = prunable_built_images(svc).await?;
+        if stopped.is_empty() && built.is_empty() {
             writeln!(out, "No stopped sandboxes.")?;
             return Ok(0);
         }
-        crate::output::announce_prune_candidates(&stopped, stderr).await?;
+        let mut candidates = stopped;
+        candidates.extend(built);
+        crate::output::announce_prune_candidates(&candidates, stderr).await?;
         if !confirm_prune(terminal, stderr).await? {
             return Ok(0);
         }
     }
     match svc.one_shot(Request::PruneRuns).await? {
-        Response::RunsPruned { mut removed } => {
+        Response::RunsPruned {
+            mut removed,
+            built_images,
+        } => {
             removed.sort_unstable();
             for run in &removed {
                 writeln!(out, "removed sandbox {run}")?;
             }
             if removed.is_empty() {
                 writeln!(out, "No stopped sandboxes.")?;
+            }
+            for reference in &built_images {
+                writeln!(out, "removed built image {reference}")?;
             }
             Ok(0)
         }
@@ -767,12 +856,23 @@ async fn stopped_run_names(svc: &impl SandboxService) -> Result<Vec<String>> {
     }
 }
 
+async fn prunable_built_images(svc: &impl SandboxService) -> Result<Vec<String>> {
+    match svc.one_shot(Request::ListPrunableBuiltImages).await? {
+        Response::PrunableBuiltImages { mut references } => {
+            references.sort_unstable();
+            Ok(references)
+        }
+        Response::Error { message } => Err(crate::service::reply::failure(&message)),
+        other => bail!("unexpected response from daemon: {other:?}"),
+    }
+}
+
 async fn confirm_prune<E: AsyncWriteExt + Unpin>(
     terminal: &mut dyn crate::terminal::Terminal,
     err: &mut E,
 ) -> Result<bool> {
     err.write_all(
-        b"This removes every stopped sandbox, writable layers included. Continue? [y/N] ",
+        b"This removes every stopped sandbox, writable layers included, and every built image nothing names. Continue? [y/N] ",
     )
     .await?;
     err.flush().await?;
@@ -1430,6 +1530,75 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    /// A prune says what it would drop before it asks, so a service that cannot read the index must stop it, not silence it.
+    #[tokio::test]
+    async fn a_built_image_listing_surfaces_the_refusal_and_rejects_an_unrelated_answer() {
+        let svc = CannedService::new(Response::Error {
+            message: "the image index is not readable".into(),
+        });
+        let err = prunable_built_images(&svc).await.unwrap_err();
+        assert!(format!("{err:#}").contains("the image index is not readable"));
+
+        let svc = CannedService::new(Response::Pong);
+        let err = prunable_built_images(&svc).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    const A_DOCUMENT: &str =
+        "apiVersion: lns.run/v1\nkind: sandbox\nname: agent\nspec:\n  image: ./image\n";
+
+    #[tokio::test]
+    async fn build_surfaces_the_services_refusal_and_rejects_an_unrelated_answer() {
+        let svc = CannedService::holding_a_document(
+            Response::Error {
+                message: "there is nothing to build".into(),
+            },
+            A_DOCUMENT,
+        );
+        let err = build(&svc, &build_args(), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("there is nothing to build"));
+
+        let svc = CannedService::holding_a_document(Response::Pong, A_DOCUMENT);
+        let err = build(&svc, &build_args(), &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected response"));
+    }
+
+    /// A document nobody wrote is named, and no build reaches the service.
+    #[tokio::test]
+    async fn build_names_the_document_it_could_not_read() {
+        let svc = CannedService::new(Response::Pong);
+
+        let err = build(&svc, &build_args(), &mut Vec::new())
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("lns.yaml"), "{err:#}");
+        assert!(svc.requests.lock().unwrap().is_empty());
+    }
+
+    /// A document that is not a document at all is named where it is, not where it went wrong later.
+    #[tokio::test]
+    async fn build_names_the_document_it_could_not_parse() {
+        let svc = CannedService::holding_a_document(Response::Pong, "spec: [unterminated\n");
+
+        let err = build(&svc, &build_args(), &mut Vec::new())
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("/work/lns.yaml"), "{err:#}");
+    }
+
+    fn build_args() -> SandboxBuildArgs {
+        SandboxBuildArgs {
+            file: None,
+            rebuild: false,
+        }
     }
 
     #[tokio::test]

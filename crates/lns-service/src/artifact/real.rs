@@ -424,6 +424,11 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
     )
     .await
     .with_context(|| format!("resolving {image_ref}"))?;
+    let source = fetch_build_source(&registry, &reference, &manifest).await?;
+    let architectures = match &source {
+        Some(_) => built_architectures_of(&registry, &resolution).await,
+        None => Vec::new(),
+    };
     crate::artifact::inspect::project_inspection(
         image_ref,
         digest,
@@ -431,7 +436,49 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
         &manifest.config.media_type,
         &resolution,
         lns_artifact::resources::host::probe(),
+        crate::artifact::inspect::BuiltImageDisclosure {
+            source,
+            architectures,
+        },
     )
+}
+
+/// Which architectures the index a published document names holds; a document naming no readable index discloses none, because an inspect that cannot read one still has to print the rest.
+async fn built_architectures_of<R: crate::image::Registry>(
+    registry: &R,
+    resolution: &crate::artifact::mixin::Resolution,
+) -> Vec<lns_ipc::BuiltArchitecture> {
+    let Ok(def) = lns_artifact::sandbox::parse_resolved(&resolution.document) else {
+        return Vec::new();
+    };
+    let Ok(reference) = def.spec.image.parse::<Reference>() else {
+        return Vec::new();
+    };
+    match registry.pull_index(&reference).await {
+        Ok(entries) => crate::artifact::inspect::built_architectures(&entries),
+        Err(error) => {
+            crate::log::warn!("this artifact discloses no image index: {error:#}");
+            Vec::new()
+        }
+    }
+}
+
+/// The Containerfile a published image was built from, fetched off the artifact so an approver reads what a build ran rather than only its digest (§7.3).
+async fn fetch_build_source<R: crate::image::Registry>(
+    registry: &R,
+    reference: &Reference,
+    manifest: &oci_client::manifest::OciImageManifest,
+) -> Result<Option<lns_ipc::BuildSourceView>> {
+    let Some((title, descriptor)) = crate::artifact::inspect::build_source_layer(manifest)? else {
+        return Ok(None);
+    };
+    let bytes = registry
+        .pull_blob(reference, &descriptor, &|_| {})
+        .await
+        .with_context(|| format!("fetching the build source layer {}", descriptor.digest))?;
+    Ok(crate::artifact::inspect::build_source_or_warning(
+        &title, &bytes,
+    ))
 }
 
 #[cfg(test)]

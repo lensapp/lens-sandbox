@@ -332,7 +332,8 @@ guest path, or port repeats.
 
 | Field | Required | Summary |
 |---|---|---|
-| [`image`](#311-image) | **REQUIRED** | The base OCI image the sandbox runs. |
+| [`image`](#311-image) | **REQUIRED** | The OCI image the sandbox runs, or the Containerfile lns builds it from. |
+| [`imageSource`](#6-publish-time-transforms) | published only | The Containerfile path the published image was built from. Written by `lns push`, never by an author. |
 | [`command`](#312-command-and-workdir) | optional | Replaces the image's default command; keeps its `ENTRYPOINT`. |
 | [`workdir`](#312-command-and-workdir) | optional | Absolute guest working directory. |
 | [`user`](#313-user) | optional | The user the workload runs as. |
@@ -355,11 +356,89 @@ image: ghcr.io/acme/base@sha256:<64 hex>
 
 | Field | Type | Rules |
 |---|---|---|
-| `image` | string | REQUIRED. MUST NOT be empty or whitespace. Any OCI reference form is accepted. |
+| `image` | string | REQUIRED. MUST NOT be empty or whitespace. Either an OCI reference or a path to a Containerfile, in the two forms below. |
 
 An author SHOULD pin the image by digest before publishing. A tag makes the
 published sandbox mutable underneath its consumers, which defeats the digest the
 consumer approved.
+
+**The two forms.**
+
+| Form | Written | Rules |
+|---|---|---|
+| OCI reference | `ghcr.io/acme/base@sha256:<64 hex>` | Any OCI reference form is accepted. Published as written; pin it by digest yourself. |
+| Containerfile path | `./image` | A value beginning `.`, `/` or `~` names a path rather than a reference. It MUST be relative and beside the document — no leading `/`, no leading `~`, no `..` segment, no control character — because the artifact ships what it names. A directory MUST hold a `Containerfile` or a `Dockerfile` and is the build context; when it holds both, `Containerfile` is the one built, as Podman does. A path naming a file is the Containerfile whatever it is called, and its parent directory is the context. |
+
+lns builds a Containerfile itself, in a build guest under the document's own
+[`egress`](#316-egress) and [`credentials`](#317-credentials): what a `RUN`
+reaches is decided by the same rules a run's traffic is, and no Docker on the
+host is involved. A published document never carries a path — see
+[§6](#6-publish-time-transforms).
+
+**The build context.** The context is the directory the path names, or the
+Containerfile's own directory when the path names a file. It carries regular
+files and directories only: a symlink inside it is not part of the context, is
+not sent to the build, and a `COPY` resolves nothing through it. Offline
+validation ([§5](#5-validation-summary)) MUST list such an entry and say it is not
+sent rather than refuse the document, because an ordinary dependency install
+writes symlinks into a directory an author then names as a context.
+
+**The instruction subset.** Because lns builds the file rather than handing it
+to another engine, it builds a defined subset of the instruction set. The subset
+below is what `lns.run/v1` accepts. Every other instruction MUST be refused by
+offline validation ([§5](#5-validation-summary)), naming the instruction, the line it
+sits on, and the alternative to write instead — a build MUST NOT silently skip
+an instruction it does not implement.
+
+| Accepted | Form |
+|---|---|
+| `FROM` | One stage, naming a digest or a tag. |
+| `ARG` | With or without a default; a default is part of the build. |
+| `ENV`, `LABEL` | Both the `KEY=value` and the legacy `KEY value` spellings. |
+| `USER`, `WORKDIR` | As written. |
+| `RUN` | Shell form, exec form, and here-documents. |
+| `COPY`, `ADD` | From the build context only. |
+| `ENTRYPOINT`, `CMD` | Shell and exec form. |
+| `SHELL` | Exec form only — a JSON array, as Docker defines it. |
+| `EXPOSE`, `VOLUME` | As written. |
+
+| Refused | Alternative the refusal MUST name |
+|---|---|
+| A second `FROM`, and `COPY --from` | One stage; build the earlier stage as its own image and name it in `FROM`. |
+| `RUN --mount` | `COPY` the file into the image and `RUN` against it. |
+| `ADD` from a URL | `RUN curl`, so the fetch is decided by the document's [`egress`](#316-egress). |
+| `ADD` of an archive it would unpack — decided by the source's content where offline validation can read it, and by its name otherwise | `COPY` the archive and `RUN tar`. |
+| `ONBUILD`, `HEALTHCHECK`, `STOPSIGNAL` | None in v1; the refusal names where the subset grows. |
+| `MAINTAINER` | `LABEL org.opencontainers.image.authors`. |
+| A `SHELL` in shell form | The exec form: `SHELL ["/bin/bash", "-c"]`. |
+| A `COPY` or `ADD` source that leaves the context — a `..` segment or an absolute path | A path inside the context; the artifact ships the context, so a source outside it reaches nothing a consumer receives. |
+
+The subset grows by decision, never by accident.
+
+**What a build is keyed by.** When `image` names a Containerfile beside the
+document, the image it builds to is a function of four inputs and of nothing
+else:
+
+| Input | Why |
+|---|---|
+| The digest the `FROM` resolved to | The build stands on that image, not on the tag that named it. |
+| The Containerfile's text, as written | Comments and whitespace included: the key measures the file, not the parse, so no reuse needs explaining. |
+| The content hash of the build context | Every file's path, mode and bytes, and every symlink's target. A file rewritten with the bytes it already had is the same context. |
+| The guest architecture | An arm64 image is not an amd64 one. |
+
+Same key, same image: a build whose key this machine already answers runs
+nothing. The key changes when the Containerfile, a context file, the `FROM`
+digest or the architecture changes, and only then.
+
+One instruction is keyed the same way, by the image it stands on and by what it
+resolved to: the parent image's digest, the instruction as it runs (a `RUN`'s
+command, environment, user and working directory; a config instruction's
+resulting config), and, for `COPY` and `ADD`, the content hash of the files
+copied. A build reuses every leading instruction whose key still answers and
+runs the rest, beginning with the first that differs.
+
+Nothing but a key decides reuse. An implementation MUST NOT reuse a build on a
+timestamp, a file's modification time, or the path a document sits at.
 
 #### 3.1.2 `command` and `workdir`
 
@@ -2100,7 +2179,10 @@ Offline validation (`lns artifact validate`, and every load path including
   `name` matches the name pattern; no unrecognized field at any level, with the
   one exception [§1.2](#12-strict-decoding) states — the body of a connector
   method's `auth` whose `kind` this reader does not know.
-- **Sandbox**: `image` present and non-empty; `workdir` absolute with no `..`;
+- **Sandbox**: `image` present and non-empty, and, when it names a Containerfile
+  ([§3.1.1](#311-image)), relative and beside the document with no `..` segment,
+  naming a file this machine can read whose every instruction is in the subset
+  [§3.1.1](#311-image) states; `workdir` absolute with no `..`;
   `user` has at most one `:`, no empty segment, and no `=`, whitespace, control
   character, or quote.
 - **env**: every key is a legal environment-variable name; within one source, no
@@ -2191,12 +2273,13 @@ document: `lns artifact validate` cannot see it.
 
 ## 6. Publish-time transforms
 
-`lns push` publishes the document with three resolutions applied, so a consumer
+`lns push` publishes the document with every resolution below applied, so a consumer
 runs exactly what the author tested:
 
 | Surface | Transform |
 |---|---|
 | `filesets[].path` | The directory is packed into a layer of this artifact. The entry keeps its `path` and `guestPath`; the content is now part of the artifact's digest. |
+| `image` naming a Containerfile | The Containerfile and its context are built, the built image publishes beside this artifact — the same repository, so one grant and one visibility setting cover both — and `image` is rewritten to the digest of the image index that holds it ([§6.2](#62-one-image-index-per-published-document)). `imageSource` keeps the path the author wrote, and the Containerfile with its context packs into a layer ([§7.3](#73-the-build-source-layer)), so what the guest starts from is disclosed with the rest of the document. A built image over the machine's limit — 4 GiB unless the machine says otherwise — fails the push, naming the layer that grew it and the instruction that wrote it, the way a fileset over its limit fails validate. |
 | `tools[]` | A fuzzy version (`node@22`, `python@latest`) is resolved against the tool's public version index and rewritten exact. |
 | `mixins[]` local entry | The document it names publishes first, as its own artifact, and the entry is rewritten to that artifact's digest ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)). A digest-pinned entry publishes untouched. |
 | `README.md` | A `README.md` beside the document is packed into a `text/markdown` layer of this artifact ([§7.2](#72-the-readme-layer)). No file, no layer; the document itself never carries it. |
@@ -2214,10 +2297,19 @@ surfaces stay unresolved, on purpose:
 
 `workdir`, every volume, every fileset, and every other field publish unchanged.
 
+**A push never publishes a document whose image it does not have.** For a
+path-form `image` that means the build happens first and the image is uploaded
+before the document that names its digest: a consumer that receives the document
+receives an image to pull, never a Containerfile to build.
+
 `lns push --dry-run` performs everything short of the upload and prints the
-digests that would publish, for every artifact the push would create. It stays
-offline, so it does **not** resolve tool versions — in any of them — and it says
-when declared tools mean the real digest may differ from the preview.
+digests that would publish, for every artifact the push would create. It builds
+nothing: for a path-form `image` it prints the build key ([§3.1.1](#311-image))
+and, only where that key is already answered on this machine, the digest it
+answers with. Where it is not, the preview says so — a digest that has not been
+built can be known only by building. It stays offline otherwise, so it does
+**not** resolve tool versions — in any of them — and it says when declared tools
+mean the real digest may differ from the preview.
 
 ### 6.1 A local mixin publishes with the document that names it
 
@@ -2267,6 +2359,50 @@ pinned mixin and merges it exactly as [§1.5](#15-one-disclosure) describes.
 
 ---
 
+### 6.2 One image index per published document
+
+A build runs on the architecture of the host that runs it ([§3.1.1](#311-image)).
+A team on mixed hardware therefore publishes one document from more than one
+host, and the second push MUST add to what the first published rather than take
+its place.
+
+Three names decide it, all derived from the `<REF>` the author typed:
+
+| What | Tag | Written by |
+|---|---|---|
+| One architecture's image manifest | `<TAG>-image-<OS>-<ARCH>` | Only a push running on that architecture. |
+| The image index over every architecture | `<TAG>-image` | Every push. |
+| The document itself | `<TAG>` | Every push. |
+
+A push reads the per-architecture tags, adds or replaces the entry for the
+architecture it built, assembles an OCI image index
+(`application/vnd.oci.image.index.v1+json`) over every entry it found plus its
+own, publishes it, and rewrites `image` to that index's digest. The
+per-architecture tags are the record; the index is derived from them, so an
+index a push never sees costs nothing and a later push from either architecture
+re-derives the whole set. Assembly is by platform order, so the same set of
+entries is always the same bytes and the same digest.
+
+A push whose architecture the index already holds with the same manifest digest
+publishes nothing and says so.
+
+**What the registry guarantees, and what it does not.** A manifest `PUT` is
+atomic and a tag names one manifest at a time, so no architecture can corrupt
+another's tag. The distribution API offers no compare-and-swap on a tag, so two
+pushes from different architectures that overlap may each assemble an index
+without the other's entry, and the document published last may name an index
+missing one. Nothing is lost: each architecture's manifest stays under the tag
+it owns, and the next push from either host publishes an index holding both.
+
+**A pull selects by platform.** A consumer pulls the index the document names
+and boots the entry whose platform is the host's, by digest. An index holding no
+entry for the host is refused before anything boots, naming the architectures the
+index does hold and the command that would add this one — `lns push` for that
+document, run on a host of this architecture, because the build happens where the
+push runs.
+
+---
+
 ## 7. Distribution
 
 Every kind is an OCI artifact, published individually. The document is the config
@@ -2280,7 +2416,8 @@ blob, and the media type names the kind:
 
 Every kind carries one layer per `filesets[].path` entry it declares
 ([§3.1.11](#3111-filesets)), plus at most one README layer
-([§7.2](#72-the-readme-layer)). Nothing else is addressable on its own, so one
+([§7.2](#72-the-readme-layer)) and, for a sandbox published from a Containerfile,
+one build source layer ([§7.3](#73-the-build-source-layer)). Nothing else is addressable on its own, so one
 reference names one complete, digest-pinned thing. A consumer correlates fileset
 layers by their media type, in manifest order, and MUST leave out any layer whose
 media type it does not consume rather than guess at it.
@@ -2422,6 +2559,40 @@ The README never enters the guest. It is not a fileset, it is not mounted, and a
 consumer that materializes filesets leaves it out like any other layer whose
 media type it does not consume ([§7](#7-distribution)). Relative links inside it
 resolve against nothing; a README SHOULD use absolute URLs.
+
+### 7.3 The build source layer
+
+A sandbox whose `image` named a Containerfile publishes that file and its context
+as a layer of the same artifact:
+
+```json
+{
+  "mediaType": "application/vnd.lns.image.source.v1.tar+gzip",
+  "digest": "sha256:…",
+  "size": 4096,
+  "annotations": { "org.opencontainers.image.title": "./image" }
+}
+```
+
+The layer is a deterministic gzipped tar of the build context, rooted at the
+context directory, so the Containerfile sits in it under its own name and every
+file a build would send sits beside it. The title annotation is exactly the path
+[`imageSource`](#6-publish-time-transforms) records — the path the author wrote,
+which may name the context directory rather than the file. Which entry of the
+tar holds the instructions is therefore read out of the tar: the name the
+recorded path ends in where the author named a file, and otherwise
+`Containerfile`, then `Dockerfile`, in the order a build searches a context.
+
+The layer exists so disclosure survives the push. `image` names a digest, and a
+digest says nothing about what produced it; with the layer,
+[`lns inspect`](cli-spec.md#31-lns-artifact) on a pulled artifact prints the
+instructions and lists the context with each file's size, without building or
+running anything. A symlink in the context is listed by offline validation and
+not sent ([§3.1.1](#311-image)), so it is not in the layer either.
+
+The layer never enters the guest. It is not a fileset, it is not mounted, and a
+consumer that materializes filesets leaves it out like any other layer whose
+media type it does not consume ([§7](#7-distribution)).
 
 ---
 

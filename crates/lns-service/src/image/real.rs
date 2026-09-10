@@ -73,6 +73,34 @@ pub async fn verify_login(registry: &str, username: &str, secret: &str) -> Resul
 }
 
 impl Registry for RealRegistry {
+    async fn pull_index(
+        &self,
+        reference: &Reference,
+    ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
+        let (manifest, _) = self
+            .client
+            .pull_manifest(reference, &self.auth)
+            .await
+            .with_context(|| format!("reading the manifest of {reference}"))?;
+        match manifest {
+            oci_client::manifest::OciManifest::ImageIndex(index) => Ok(index
+                .manifests
+                .iter()
+                .filter_map(|entry| {
+                    let platform = entry.platform.as_ref()?;
+                    Some(lns_artifact::image_index::IndexEntry {
+                        digest: entry.digest.clone(),
+                        size: entry.size.max(0) as u64,
+                        media_type: entry.media_type.clone(),
+                        os: platform.os.to_string(),
+                        architecture: platform.architecture.to_string(),
+                    })
+                })
+                .collect()),
+            oci_client::manifest::OciManifest::Image(_) => Ok(Vec::new()),
+        }
+    }
+
     async fn pull_manifest_and_config(
         &self,
         reference: &Reference,

@@ -36,6 +36,8 @@ pub struct VmSpec {
     #[cfg(target_os = "macos")]
     pub console_fd: std::os::fd::RawFd,
     pub debug: bool,
+    /// The host will read this run's upper as one OCI layer when the run ends, so the guest keeps every copy-up whole.
+    pub capture_upper: bool,
     pub exec: ExecSpec,
 }
 
@@ -283,6 +285,7 @@ pub fn build_kernel_cmdline(
     content_tag: &str,
     descriptor_sha256: Option<&str>,
     debug: bool,
+    capture_upper: bool,
     volumes: &[VolumeAttachment],
     binds: &[BindAttachment],
 ) -> String {
@@ -295,6 +298,9 @@ pub fn build_kernel_cmdline(
         parts.push("pci=off".to_string());
     }
     parts.push("upper.dev=/dev/vda".to_string());
+    if capture_upper {
+        parts.push("upper.capture=1".to_string());
+    }
     parts.push("composefs.descriptor.dev=/dev/vdb".to_string());
     parts.push(format!("content.tag={content_tag}"));
     if let Some(hex) = descriptor_sha256 {
@@ -424,6 +430,7 @@ mod tests {
             "lns-content",
             None,
             /*debug*/ false,
+            false,
             &[],
             &[],
         );
@@ -441,6 +448,7 @@ mod tests {
             "lns-content",
             None,
             /*debug*/ true,
+            false,
             &[],
             &[],
         );
@@ -455,6 +463,43 @@ mod tests {
         );
     }
 
+    /// The host reads a captured run's upper as one OCI layer through a reader that sees no xattr, so
+    /// the guest is asked for whole copy-ups — and only then, because they cost a full copy.
+    #[test]
+    fn build_kernel_cmdline_asks_for_whole_copy_ups_only_for_a_captured_run() {
+        let exec = ExecSpec::from_image_config(None, None, &["true".into()]);
+        let captured = build_kernel_cmdline(
+            &exec,
+            "hvc0",
+            true,
+            "lns-content",
+            None,
+            false,
+            /*capture_upper*/ true,
+            &[],
+            &[],
+        );
+        assert!(
+            captured
+                .split_whitespace()
+                .any(|tok| tok == "upper.capture=1"),
+            "{captured}"
+        );
+
+        let ordinary = build_kernel_cmdline(
+            &exec,
+            "hvc0",
+            true,
+            "lns-content",
+            None,
+            false,
+            /*capture_upper*/ false,
+            &[],
+            &[],
+        );
+        assert!(!ordinary.contains("upper.capture"), "{ordinary}");
+    }
+
     #[test]
     fn build_kernel_cmdline_pci_off_gated_on_pci_flag() {
         let exec = ExecSpec::from_image_config(None, None, &["true".into()]);
@@ -464,6 +509,7 @@ mod tests {
             /*pci*/ true,
             "lns-content",
             None,
+            false,
             false,
             &[],
             &[],
@@ -480,6 +526,7 @@ mod tests {
             /*pci*/ false,
             "lns-content",
             None,
+            false,
             false,
             &[],
             &[],
@@ -500,6 +547,7 @@ mod tests {
             true,
             "lns-content",
             Some("deadbeef"),
+            false,
             false,
             &[],
             &[],
@@ -542,8 +590,17 @@ mod tests {
     #[test]
     fn build_kernel_cmdline_no_volumes_emits_no_volume_keys() {
         let exec = ExecSpec::from_image_config(None, None, &["true".into()]);
-        let cmdline =
-            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &[], &[]);
+        let cmdline = build_kernel_cmdline(
+            &exec,
+            "hvc0",
+            true,
+            "lns-content",
+            None,
+            false,
+            false,
+            &[],
+            &[],
+        );
         assert!(
             !cmdline.contains("volume."),
             "no volume keys when none attached: {cmdline}"
@@ -582,8 +639,17 @@ mod tests {
                 seeded_paths: Vec::new(),
             },
         ];
-        let cmdline =
-            build_kernel_cmdline(&exec, "hvc0", true, "lns-content", None, false, &[], &binds);
+        let cmdline = build_kernel_cmdline(
+            &exec,
+            "hvc0",
+            true,
+            "lns-content",
+            None,
+            false,
+            false,
+            &[],
+            &binds,
+        );
         let toks: Vec<&str> = cmdline.split_whitespace().collect();
         for expected in [
             "bind.0.tag=lns-bind-0",
@@ -626,6 +692,7 @@ mod tests {
             true,
             "lns-content",
             None,
+            false,
             false,
             &volumes,
             &[],
@@ -697,6 +764,7 @@ mod tests {
             true,
             "lns-content",
             None,
+            false,
             false,
             &volumes,
             &[],
@@ -999,6 +1067,7 @@ mod tests {
             #[cfg(target_os = "macos")]
             console_fd: -1,
             debug: false,
+            capture_upper: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
         }
     }

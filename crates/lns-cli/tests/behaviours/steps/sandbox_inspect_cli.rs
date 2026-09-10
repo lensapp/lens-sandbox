@@ -1,5 +1,5 @@
 use crate::world::BehaviourWorld;
-use cucumber::given;
+use cucumber::{given, then};
 use lns_ipc::{
     ArtifactInspection, ImageView, Response, SandboxMount, SandboxMountKind, SandboxPort,
     SandboxView,
@@ -30,9 +30,87 @@ fn inspects_plain_image(world: &mut BehaviourWorld, reference: String) {
     cached_artifact(world, &reference, inspection);
 }
 
+#[given(
+    regex = r#"^the service inspects "([^"]+)" as a sandbox built for arm64 and amd64 from "([^"]+)"$"#
+)]
+fn inspects_sandbox_built_for_two_architectures(
+    world: &mut BehaviourWorld,
+    reference: String,
+    from: String,
+) {
+    inspects_sandbox_built_from(world, reference, from);
+    let Some(Response::ImageInspected {
+        inspection: ArtifactInspection::Sandbox(view),
+    }) = world.sandbox.inspect_image_response.as_mut()
+    else {
+        unreachable!("the step above staged a sandbox inspection")
+    };
+    view.image_architectures = vec![
+        lns_ipc::BuiltArchitecture {
+            architecture: "arm64".into(),
+            digest: "sha256:aaaa".into(),
+        },
+        lns_ipc::BuiltArchitecture {
+            architecture: "amd64".into(),
+            digest: "sha256:bbbb".into(),
+        },
+    ];
+}
+
+#[given(regex = r#"^the service inspects "([^"]+)" as a sandbox built from "([^"]+)"$"#)]
+fn inspects_sandbox_built_from(world: &mut BehaviourWorld, reference: String, from: String) {
+    let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_architectures: Vec::new(),
+        image_source: Some(lns_ipc::BuildSourceView {
+            containerfile: from,
+            text: "FROM docker.io/library/node:24-bookworm\nRUN npm install -g @anthropic-ai/claude-code\n".into(),
+            context: vec![
+                lns_ipc::BuildContextFile {
+                    path: "Containerfile".into(),
+                    bytes: 87,
+                },
+                lns_ipc::BuildContextFile {
+                    path: "app/main.js".into(),
+                    bytes: 15,
+                },
+            ],
+        }),
+        mixins: Vec::new(),
+        pinned_mixins: Vec::new(),
+        contributions: Vec::new(),
+        reference: reference.clone(),
+        digest: full_digest(),
+        image: format!("ghcr.io/team/hermes@{}", full_digest()),
+        workdir: None,
+        user: None,
+        mounts: vec![lns_ipc::SandboxMount {
+            kind: lns_ipc::SandboxMountKind::Bind,
+            source: ".".into(),
+            target: "/workspace".into(),
+            read_only: false,
+            exclude: Vec::new(),
+            optional: false,
+            size_bytes: None,
+        }],
+        ports: Vec::new(),
+        filesets: Vec::new(),
+        credentials: Vec::new(),
+        env: Vec::new(),
+        tools: Vec::new(),
+        scripts: Vec::new(),
+        policy_flags: Vec::new(),
+        cpus: None,
+        mem_mib: None,
+        disk_bytes: None,
+    }));
+    cached_artifact(world, &reference, inspection);
+}
+
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox with launch settings$"#)]
 fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -80,6 +158,8 @@ fn inspects_sandbox_settings(world: &mut BehaviourWorld, reference: String) {
 )]
 fn inspects_sandbox_ports(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -152,6 +232,8 @@ fn inspects_sandbox_with_a_pinned_flag_mixin(
     pinned: String,
 ) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: vec![pinned.clone()],
         pinned_mixins: vec![pinned],
         contributions: Vec::new(),
@@ -184,6 +266,8 @@ fn inspects_sandbox_resolved_from_a_mixin(
     mixin: String,
 ) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: vec![mixin],
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -212,6 +296,8 @@ fn inspects_sandbox_resolved_from_a_mixin(
 )]
 fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, mount: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -245,6 +331,8 @@ fn inspects_sandbox_filesets(world: &mut BehaviourWorld, reference: String, moun
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox declaring user "([^"]+)"$"#)]
 fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -273,6 +361,8 @@ fn inspects_sandbox_user(world: &mut BehaviourWorld, reference: String, user: St
 )]
 fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -301,6 +391,8 @@ fn inspects_sandbox_permissive_policy(world: &mut BehaviourWorld, reference: Str
 #[given(regex = r#"^the service inspects "([^"]+)" as a sandbox setting env "([^"]+)"$"#)]
 fn inspects_sandbox_env(world: &mut BehaviourWorld, reference: String, entry: String) {
     let inspection = ArtifactInspection::Sandbox(Box::new(SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -330,4 +422,19 @@ fn inspect_needs_login(world: &mut BehaviourWorld, host: String) {
     world.sandbox.inspect_image_response = Some(Response::Error {
         message: format!("inspecting the sandbox needs a login for {host}: run `lns login {host}`"),
     });
+}
+
+/// §7.3 renders the instructions as the last thing an approver reads, locally and off a pulled artifact alike.
+#[then(regex = r#"^the output prints "([^"]+)" after "([^"]+)"$"#)]
+fn the_output_prints_after(world: &mut BehaviourWorld, last: String, first: String) {
+    let output = &world.result.as_ref().expect("no CLI run captured").output;
+    let at = |needle: &str| {
+        output
+            .find(needle)
+            .unwrap_or_else(|| panic!("the output does not carry {needle:?}:\n{output}"))
+    };
+    assert!(
+        at(&last) > at(&first),
+        "{last:?} must come after {first:?}:\n{output}"
+    );
 }

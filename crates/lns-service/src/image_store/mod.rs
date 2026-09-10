@@ -1,4 +1,4 @@
-mod real;
+pub(crate) mod real;
 pub(crate) use real::RealFs;
 mod traits;
 
@@ -17,8 +17,17 @@ use crate::image::PulledImage;
 #[serde(rename_all = "lowercase")]
 pub enum RecordKind {
     Image,
+    /// What a Containerfile build wrote: no registry holds it, and only `lns sandbox prune` sweeps it.
+    Built,
     Sandbox,
     Mixin,
+}
+
+impl RecordKind {
+    /// Whether the image namespace can see this record: a pulled base image and a built image are both cache-internal.
+    fn is_an_artifact(self) -> bool {
+        matches!(self, Self::Sandbox | Self::Mixin)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,7 +195,7 @@ fn holder(active: &[lns_ipc::RunSummary], reference: &str) -> Option<String> {
 
 fn kind_of(record: &ImageRecord) -> Option<lns_ipc::CachedKind> {
     match record.kind {
-        RecordKind::Image => None,
+        RecordKind::Image | RecordKind::Built => None,
         RecordKind::Sandbox => Some(lns_ipc::CachedKind::Sandbox),
         RecordKind::Mixin => Some(lns_ipc::CachedKind::Mixin),
     }
@@ -288,7 +297,7 @@ pub async fn remove_with<F: Fs, C: Caches>(
     let records = load_records(fs, images_root).await?;
     if !records
         .iter()
-        .any(|record| record.reference == reference && record.kind != RecordKind::Image)
+        .any(|record| record.reference == reference && record.kind.is_an_artifact())
     {
         bail!("no such image: {reference}");
     }
@@ -346,6 +355,55 @@ pub async fn remove_with<F: Fs, C: Caches>(
     })
 }
 
+/// Drop every image a Containerfile build produced that nothing names any more, and reclaim the
+/// layers no surviving record needs; a built image is `RecordKind::Built`, which no verb of the
+/// image namespace can see or remove, so this is the only sweep that reaches one.
+/// The built images `remove_unreferenced_builds_with` would drop right now, read without dropping one.
+pub async fn unreferenced_builds_with<F: Fs>(
+    fs: &F,
+    images_root: &Path,
+    named: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>> {
+    Ok(load_records(fs, images_root)
+        .await?
+        .into_iter()
+        .filter(|record| record.kind == RecordKind::Built && !named.contains(&record.reference))
+        .map(|record| record.reference)
+        .collect())
+}
+
+pub async fn remove_unreferenced_builds_with<F: Fs, C: Caches>(
+    fs: &F,
+    caches: &C,
+    images_root: &Path,
+    pinned_layers: &HashSet<String>,
+    named: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>> {
+    let records = load_records(fs, images_root).await?;
+    let (unnamed, kept): (Vec<ImageRecord>, Vec<ImageRecord>) = records
+        .into_iter()
+        .partition(|record| record.kind == RecordKind::Built && !named.contains(&record.reference));
+    if unnamed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let kept_manifests = manifest_keep_set(kept.iter())?;
+    let mut removed = Vec::with_capacity(unnamed.len());
+    for record in &unnamed {
+        fs.remove_file(&record_path(images_root, &record.reference))
+            .await
+            .with_context(|| format!("removing image record for {}", record.reference))?;
+        let pinned = pinned_reference(&record.reference, &record.digest)?;
+        if !kept_manifests.contains(&pinned) {
+            caches.remove_manifest(&pinned)?;
+        }
+        removed.push(record.reference.clone());
+    }
+    let mut keep = layer_keep_set(kept.iter());
+    keep.extend(pinned_layers.iter().cloned());
+    caches.sweep_layers(&keep)?;
+    Ok(removed)
+}
+
 pub async fn tag_with<F: Fs>(fs: &F, images_root: &Path, from: &str, to: &str) -> Result<()> {
     let from_parsed: oci_client::Reference = from
         .parse()
@@ -368,7 +426,7 @@ pub async fn tag_with<F: Fs>(fs: &F, images_root: &Path, from: &str, to: &str) -
     };
     let mut record: ImageRecord =
         serde_json::from_slice(&bytes).context("parsing cached sandbox record")?;
-    if record.kind == RecordKind::Image {
+    if !record.kind.is_an_artifact() {
         bail!("no such cached sandbox: {from_ref}");
     }
     record.reference = to_ref;
@@ -424,7 +482,7 @@ pub async fn prune_with<F: RuntimeCacheFs, C: Caches>(
             caches.remove_manifest(&record.reference)?;
         }
         removable_manifests.insert(pinned);
-        if record.kind != RecordKind::Image {
+        if record.kind.is_an_artifact() {
             removed.push(record.reference.clone());
         }
     }
@@ -512,7 +570,8 @@ fn images_root() -> Result<PathBuf> {
     Ok(crate::cache::root()?.join("images"))
 }
 
-fn cache_lock() -> &'static tokio::sync::RwLock<()> {
+/// The one lock every writer of the image index takes: a sweep and an install must not see each other half-done.
+pub(crate) fn cache_lock() -> &'static tokio::sync::RwLock<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::RwLock<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::RwLock::new(()))
 }
@@ -776,7 +835,8 @@ pub async fn remove(image: &str) -> Result<RemovedImage> {
     .await
 }
 
-async fn recorded_run_pins() -> Result<HashSet<String>> {
+/// Every layer digest a recorded run still stands on, which no sweep may reclaim.
+pub(crate) async fn recorded_run_pins() -> Result<HashSet<String>> {
     let scan = crate::run_record::load_all_with(&real::RealFs, &crate::cache::root()?).await?;
     Ok(crate::run_record::pinned_digests(&scan.records))
 }
@@ -1193,6 +1253,145 @@ mod tests {
         HashSet::new()
     }
 
+    /// A built image is nobody's cached sandbox: `ListImages` hides it and `remove` refuses it, so
+    /// the sweep `lns sandbox prune` runs is the only thing that can take one back.
+    #[tokio::test]
+    async fn a_built_image_nothing_names_is_dropped_and_one_something_names_is_kept() {
+        let named = &format!("lns-build.local/built@sha256:{}", "a".repeat(64));
+        let orphan = &format!("lns-build.local/built@sha256:{}", "b".repeat(64));
+        let fs = FakeFs::with_records(&[
+            ImageRecord {
+                digest: format!("sha256:{}", "a".repeat(64)),
+                ..built_rec(named, &[("sha256:kept-layer", 7)])
+            },
+            ImageRecord {
+                digest: format!("sha256:{}", "b".repeat(64)),
+                ..built_rec(orphan, &[("sha256:gone-layer", 9)])
+            },
+        ]);
+        let caches = FakeCaches::default();
+
+        let removed = remove_unreferenced_builds_with(
+            &fs,
+            &caches,
+            Path::new(ROOT),
+            &no_pins(),
+            &std::collections::BTreeSet::from([named.to_string()]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(removed, vec![orphan.clone()]);
+        assert!(fs.has(&record_path(Path::new(ROOT), named)));
+        assert!(!fs.has(&record_path(Path::new(ROOT), orphan)));
+        assert_eq!(
+            caches.removed_manifests.lock().unwrap().len(),
+            1,
+            "the manifest of the image that went goes with it",
+        );
+        assert_eq!(
+            *caches.swept_with.lock().unwrap(),
+            vec![HashSet::from(["sha256:kept-layer".to_string()])],
+            "the layers of the image that stays must survive the sweep",
+        );
+    }
+
+    /// A pull writes the same record kind a boot writes for a base image, and neither is a build; only what a build wrote is this sweep's to take.
+    #[tokio::test]
+    async fn a_pulled_image_survives_the_built_image_sweep() {
+        let pulled = "docker.io/library/alpine:3.20";
+        let fs = FakeFs::with_records(&[base_rec(pulled, &[("sha256:alpine-layer", 11)])]);
+        let caches = FakeCaches::default();
+
+        let removed = remove_unreferenced_builds_with(
+            &fs,
+            &caches,
+            Path::new(ROOT),
+            &no_pins(),
+            &std::collections::BTreeSet::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(removed.is_empty());
+        assert!(
+            fs.has(&record_path(Path::new(ROOT), pulled)),
+            "a pulled image is not a built image, and a build sweep must not reach it",
+        );
+        assert!(
+            caches.swept_with.lock().unwrap().is_empty(),
+            "nothing was dropped, so no layer of the pulled image may be reclaimed",
+        );
+    }
+
+    /// A prune says what it would drop before it asks, so the same reading must be available without removing anything.
+    #[tokio::test]
+    async fn what_the_build_sweep_would_drop_is_readable_without_dropping_it() {
+        let built = "lns-build.local/scribe:latest";
+        let fs = FakeFs::with_records(&[
+            built_rec(built, &[("sha256:built-layer", 7)]),
+            base_rec(
+                "docker.io/library/alpine:3.20",
+                &[("sha256:alpine-layer", 11)],
+            ),
+        ]);
+
+        let candidates =
+            unreferenced_builds_with(&fs, Path::new(ROOT), &std::collections::BTreeSet::new())
+                .await
+                .unwrap();
+
+        assert_eq!(candidates, [built]);
+        assert!(
+            fs.has(&record_path(Path::new(ROOT), built)),
+            "reading what would go must leave every record where it is",
+        );
+    }
+
+    /// A built image a document or a run still names is not a candidate, so a prune never offers it.
+    #[tokio::test]
+    async fn a_named_built_image_is_not_a_candidate() {
+        let built = "lns-build.local/scribe:latest";
+        let fs = FakeFs::with_records(&[built_rec(built, &[("sha256:built-layer", 7)])]);
+
+        let candidates = unreferenced_builds_with(
+            &fs,
+            Path::new(ROOT),
+            &std::collections::BTreeSet::from([built.to_string()]),
+        )
+        .await
+        .unwrap();
+
+        assert!(candidates.is_empty());
+    }
+
+    /// A pulled image is not this sweep's business, however little names it; `lns artifact prune` owns that.
+    #[tokio::test]
+    async fn a_cached_sandbox_is_never_dropped_by_the_built_image_sweep() {
+        let fs = FakeFs::with_records(&[rec("registry.example.test/team/image:1", &[])]);
+        let caches = FakeCaches::default();
+
+        let removed = remove_unreferenced_builds_with(
+            &fs,
+            &caches,
+            Path::new(ROOT),
+            &no_pins(),
+            &std::collections::BTreeSet::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(removed.is_empty());
+        assert!(fs.has(&record_path(
+            Path::new(ROOT),
+            "registry.example.test/team/image:1"
+        )));
+        assert!(
+            caches.swept_with.lock().unwrap().is_empty(),
+            "a sweep with nothing to drop must not walk the layer cache",
+        );
+    }
+
     #[tokio::test]
     async fn remove_refuses_an_image_a_stopped_run_still_needs() {
         let sandbox = "registry.example.test/some-sandbox:1";
@@ -1291,6 +1490,13 @@ mod tests {
     fn base_rec(reference: &str, layers: &[(&str, u64)]) -> ImageRecord {
         ImageRecord {
             kind: RecordKind::Image,
+            ..rec(reference, layers)
+        }
+    }
+
+    fn built_rec(reference: &str, layers: &[(&str, u64)]) -> ImageRecord {
+        ImageRecord {
+            kind: RecordKind::Built,
             ..rec(reference, layers)
         }
     }

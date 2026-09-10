@@ -59,6 +59,7 @@ pub(crate) fn kernel_cmdline(spec: &VmSpec) -> String {
         &spec.content_tag,
         spec.descriptor_sha256.as_deref(),
         spec.debug,
+        spec.capture_upper,
         &spec.volumes,
         &spec.binds,
     )
@@ -211,6 +212,7 @@ mod tests {
             workload_uid: Some(65534),
             workload_gid: Some(65534),
             debug: false,
+            capture_upper: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
             vsock: None,
             connector_tx: None,

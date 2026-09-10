@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::task::JoinHandle;
 
+use super::GuestStop;
 use crate::forward::ForwardGuard;
 use crate::log;
 
@@ -10,30 +11,30 @@ pub(crate) async fn shutdown_after_session(
     forwards: ForwardGuard,
     grace: Duration,
     mut vm_task: JoinHandle<Result<()>>,
-) -> Result<()> {
+) -> Result<GuestStop> {
     drop(forwards);
     let sleep = tokio::time::sleep(grace);
     tokio::pin!(sleep);
     tokio::select! {
         _ = &mut sleep => {
             log::debug!("vm did not stop within grace period; proceeding");
+            Ok(GuestStop::GraceExpired)
         }
         r = &mut vm_task => {
             r??;
+            Ok(GuestStop::Stopped)
         }
     }
-    Ok(())
 }
 
 pub(crate) async fn publish_exit_after_quiesce(
     run_id: &str,
     code: i32,
-    shutdown: impl std::future::Future<Output = Result<()>>,
-) -> Result<i32> {
+    shutdown: impl std::future::Future<Output = Result<GuestStop>>,
+) -> Result<(i32, GuestStop)> {
     let quiesce = shutdown.await;
     crate::run_registry::set_exit_code(run_id, code);
-    quiesce?;
-    Ok(code)
+    Ok((code, quiesce?))
 }
 
 #[cfg(test)]
@@ -90,10 +91,15 @@ mod tests {
         // exercises the "vm did not stop within grace period" branch.
         let vm_task = tokio::spawn(std::future::pending::<Result<()>>());
 
-        shutdown_after_session(guard, Duration::from_secs(2), vm_task)
+        let outcome = shutdown_after_session(guard, Duration::from_secs(2), vm_task)
             .await
             .unwrap();
 
+        assert_eq!(
+            outcome,
+            GuestStop::GraceExpired,
+            "a vm task still running when the grace ends leaves the guest's filesystem live",
+        );
         let instants = fake.unbind_instants();
         assert_eq!(instants.len(), 1);
         assert_eq!(
@@ -114,10 +120,11 @@ mod tests {
             Ok(())
         });
 
-        shutdown_after_session(guard, Duration::from_secs(2), vm_task)
+        let outcome = shutdown_after_session(guard, Duration::from_secs(2), vm_task)
             .await
             .unwrap();
 
+        assert_eq!(outcome, GuestStop::Stopped);
         let instants = fake.unbind_instants();
         assert_eq!(instants.len(), 1);
         assert_eq!(instants[0], t0, "unbind still happens at T=0");
@@ -156,9 +163,9 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let seen_in_shutdown = seen.clone();
         let shutdown_id = id.clone();
-        let code = publish_exit_after_quiesce(&id, 7, async move {
+        let published = publish_exit_after_quiesce(&id, 7, async move {
             *seen_in_shutdown.lock().unwrap() = crate::run_registry::status(&shutdown_id);
-            Ok(())
+            Ok(GuestStop::Stopped)
         })
         .await;
         let status_after = crate::run_registry::status(&id);
@@ -169,7 +176,11 @@ mod tests {
             "rm and prune must not see Exited while the VM still holds the writable layer"
         );
         assert_eq!(status_after, Some(lns_ipc::RunStatus::Exited { code: 7 }));
-        assert_eq!(code.unwrap(), 7);
+        assert_eq!(
+            published.unwrap(),
+            (7, GuestStop::Stopped),
+            "what the exit code is, and whether the guest is done with its filesystem",
+        );
     }
 
     #[tokio::test]

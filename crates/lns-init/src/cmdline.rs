@@ -10,6 +10,8 @@ pub struct CmdlineParams {
     pub incomplete_volumes: Vec<usize>,
     pub binds: Vec<BindParam>,
     pub incomplete_binds: Vec<usize>,
+    /// The host will read this run's upper as one OCI layer, so every copy-up must carry its data where the host can see it.
+    pub capture_upper: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +136,7 @@ impl CmdlineParams {
                     out.composefs_descriptor_dev = Some(value.to_string())
                 }
                 "content.tag" => out.content_tag = Some(value.to_string()),
+                "upper.capture" => out.capture_upper = value == "1",
                 "composefs.descriptor.sha256" => {
                     out.composefs_descriptor_sha256 = Some(value.to_string())
                 }
@@ -304,6 +307,15 @@ mod tests {
     fn quoted_value_preserves_spaces() {
         let p = CmdlineParams::parse(r#"content.tag="lns content""#);
         assert_eq!(p.content_tag.as_deref(), Some("lns content"));
+    }
+
+    /// The host reads a captured run's upper as one OCI layer, and it can see no xattr; the key asks
+    /// the guest for an upper whose every copy-up carries its data.
+    #[test]
+    fn the_capture_key_asks_for_an_upper_a_layer_can_be_read_from() {
+        assert!(CmdlineParams::parse("upper.dev=/dev/vda upper.capture=1").capture_upper);
+        assert!(!CmdlineParams::parse("upper.dev=/dev/vda").capture_upper);
+        assert!(!CmdlineParams::parse("upper.capture=0").capture_upper);
     }
 
     #[test]
