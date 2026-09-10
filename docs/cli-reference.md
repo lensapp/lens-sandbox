@@ -534,7 +534,7 @@ built ./image/Containerfile as ghcr.io/team/agent@sha256:761743bb… (2 layers) 
 index ghcr.io/team/agent@sha256:aa41f0c9… holds linux/arm64 sha256:761743bb…
 
 $ lns inspect ghcr.io/team/agent:1.4.0
-image: built from ./image/Containerfile (2 lines, context 2 files), arm64 sha256:761743bb… (built outside the gate by the host Docker daemon)
+image: built from ./image/Containerfile (2 lines, context 2 files), arm64 sha256:761743bb… (arm64 was built outside the gate by the host Docker daemon)
 ```
 
 The record travels with the image: it is an annotation on the entry inside the

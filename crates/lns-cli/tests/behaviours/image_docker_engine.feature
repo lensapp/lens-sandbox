@@ -56,4 +56,4 @@ Feature: a machine that builds on its own Docker daemon says so
     And the index says "amd64" was built outside the gate
     When the user runs artifact command "inspect ghcr.io/team/hermes:1.4.0"
     Then the exit code is 0
-    And the output contains "arm64 sha256:aaaa, amd64 sha256:bbbb (built outside the gate by the host Docker daemon)"
+    And the output contains "arm64 sha256:aaaa, amd64 sha256:bbbb (amd64 was built outside the gate by the host Docker daemon)"
