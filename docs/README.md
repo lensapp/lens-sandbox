@@ -23,6 +23,9 @@ You drive everything through one binary: the `lns` CLI.
   and the stopped-run lifecycle.
 - **[Example: Claude Code](examples/claude-code/)** — a complete agent recipe:
   manifest, seed config, and network allowlist.
+- **[Example: the GitHub connector](../connectors/github/)** — a connector that
+  ships its own sign-in as a WebAssembly component: GitHub's device flow, the
+  bounds lns holds it to, and how to rebuild it.
 - **[Policy and approvals](policy.md)** — a run's own `decisions.yaml`, being asked
   about what no rule decides, closing a directory, the approval window, and editing
   the rules by hand.

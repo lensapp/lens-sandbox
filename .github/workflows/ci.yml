@@ -92,12 +92,14 @@ jobs:
         with:
           # Per-job cache-shared-key so lint/test/coverage don't fight
           # for the same target/ slot. `make complexity` nests its own dir
-          # inside target/, which rust-cache stores with the rest. The
-          # mechanism fixtures are their own workspace, so their target dir
-          # is cached separately or every run rebuilds all of them.
+          # inside target/, which rust-cache stores with the rest.
+          # The mechanism fixtures and the shipped connector's component are
+          # each their own workspace, so their target dirs are cached
+          # separately or every run rebuilds all of them.
           cache-workspaces: |
             .
             crates/lns-service/tests/fixtures/mechanism
+            connectors/github/mechanism
           cache-on-failure: true
           cache-shared-key: lns-ci-lint
 
