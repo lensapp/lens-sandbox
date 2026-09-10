@@ -63,7 +63,8 @@ pub struct BehaviourWorld {
     /// What this machine lets a built image weigh, in bytes.
     pub image_limit: Option<u64>,
     /// Whether this machine's `build.engine` points the build at the host Docker daemon.
-    pub built_outside_the_gate: bool,
+    /// The engine this machine builds a Containerfile with, as `build.engine` names it (§3.1.1).
+    pub build_engine: lns_ipc::BuildEngine,
     /// Every image the push uploaded, and the repository it landed in.
     pub pushed_images: Vec<(String, lns_ipc::PushableImage)>,
     /// What the registry already holds under each per-architecture image tag, as a scenario stages it.
@@ -371,6 +372,7 @@ pub struct StagedBuild {
 pub struct StagedRequest {
     pub plan_only: bool,
     pub rebuild: bool,
+    pub build_engine: lns_ipc::BuildEngine,
 }
 
 /// What a scenario stages the service's resolution of a document as, so a push can be asserted to build the merged document rather than the one on disk.

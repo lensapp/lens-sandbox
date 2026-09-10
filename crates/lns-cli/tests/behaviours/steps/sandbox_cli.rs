@@ -39,6 +39,7 @@ pub(crate) struct FakeSandboxService {
     written_documents: Arc<Mutex<Vec<(PathBuf, String)>>>,
     /// The documents this machine holds, so a verb that reads one before it asks the service can.
     documents: std::collections::HashMap<PathBuf, String>,
+    build_engine: lns_ipc::BuildEngine,
 }
 
 impl SandboxService for FakeSandboxService {
@@ -144,6 +145,10 @@ impl SandboxService for FakeSandboxService {
             anyhow::anyhow!("reading {}; run `lns init` to scaffold one", path.display())
         })?;
         Ok((path, yaml.clone()))
+    }
+
+    fn build_engine(&self) -> anyhow::Result<lns_ipc::BuildEngine> {
+        Ok(self.build_engine.clone())
     }
 
     fn write_document(&self, path: &Path, contents: &str) -> std::io::Result<()> {
@@ -633,6 +638,7 @@ impl distribute::ImageBuilder for StepImageBuilder<'_> {
         self.asked.borrow_mut().push(crate::world::StagedRequest {
             plan_only: request.plan_only,
             rebuild: request.rebuild,
+            build_engine: request.build_engine.clone(),
         });
         self.inputs
             .borrow_mut()
@@ -762,6 +768,7 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         unwritable_documents: w.sandbox.unwritable_documents.clone(),
         written_documents: w.sandbox.written_documents.clone(),
         documents: w.author_files.clone(),
+        build_engine: w.build_engine.clone(),
     }
 }
 
@@ -927,6 +934,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                         .image_limit
                         .unwrap_or(lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES),
                     rebuild: push_args.rebuild,
+                    build_engine: w.build_engine.clone(),
                 },
                 &doc,
                 &push_args.reference,
@@ -952,6 +960,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                         .image_limit
                         .unwrap_or(lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES),
                     rebuild: push_args.rebuild,
+                    build_engine: w.build_engine.clone(),
                 },
                 &doc,
                 &push_args.reference,

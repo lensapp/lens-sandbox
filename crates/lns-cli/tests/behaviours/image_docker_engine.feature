@@ -26,6 +26,7 @@ Feature: a machine that builds on its own Docker daemon says so
     And the image was published into "ghcr.io/team/hermes"
     And the index entry for "arm64" says it was built outside the gate
     And the output contains "built outside the gate by the host Docker daemon"
+    And the build the push asked for names the host Docker daemon
 
   Scenario: the same document with the switch off publishes an entry that says nothing about the gate
     Given the registry accepts the push
@@ -34,6 +35,21 @@ Feature: a machine that builds on its own Docker daemon says so
     Then the exit code is 0
     And the index entry for "arm64" says nothing about the gate
     And the output does not contain "built outside the gate by the host Docker daemon"
+
+  Scenario: a sandbox build sends the switch this machine is set to
+    Given a document whose spec.image names a Containerfile
+    And this machine builds on the host Docker daemon
+    And the service builds it into 3 layers
+    When the user runs sandbox command "build"
+    Then the exit code is 0
+    And the build request names the host Docker daemon
+
+  Scenario: a sandbox build with the switch off asks for a build guest
+    Given a document whose spec.image names a Containerfile
+    And the service builds it into 3 layers
+    When the user runs sandbox command "build"
+    Then the exit code is 0
+    And the build request names a build guest
 
   Scenario: inspect marks the architecture a daemon built and leaves the other alone
     Given the service inspects "ghcr.io/team/hermes:1.4.0" as a sandbox built for arm64 and amd64 from "./image/Containerfile"

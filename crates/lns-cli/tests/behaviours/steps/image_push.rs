@@ -41,13 +41,13 @@ fn stage(w: &mut BehaviourWorld, reused: bool, image: Option<lns_ipc::PushableIm
 
 #[given(regex = r"^the build answers with an image of (\d+) layers$")]
 fn build_answers_with_an_image(w: &mut BehaviourWorld, layers: usize) {
-    let outside = w.built_outside_the_gate;
+    let outside = w.build_engine != lns_ipc::BuildEngine::Lns;
     stage(w, false, Some(staged_image(&vec![64; layers], outside)));
 }
 
 #[given(regex = r"^the build answers with an image of (\d+) layers it did not have to build$")]
 fn build_answers_with_a_reused_image(w: &mut BehaviourWorld, layers: usize) {
-    let outside = w.built_outside_the_gate;
+    let outside = w.build_engine != lns_ipc::BuildEngine::Lns;
     stage(w, true, Some(staged_image(&vec![64; layers], outside)));
 }
 
@@ -59,7 +59,16 @@ fn build_answers_with_no_image(w: &mut BehaviourWorld) {
 /// The switch this machine builds with, which decides whether the gate applied to what it built (`docs/sandbox-spec.md` §3.1.1).
 #[given("this machine builds on the host Docker daemon")]
 fn the_build_runs_on_the_host_daemon(w: &mut BehaviourWorld) {
-    w.built_outside_the_gate = true;
+    w.build_engine = lns_ipc::BuildEngine::Docker { socket: None };
+}
+
+/// The switch reaches the service on the request, and nothing but a request pins that it did.
+#[then("the build the push asked for names the host Docker daemon")]
+fn the_push_asked_for_the_daemon(w: &mut BehaviourWorld) -> Result<(), String> {
+    match w.build_requests.first().map(|asked| &asked.build_engine) {
+        Some(lns_ipc::BuildEngine::Docker { .. }) => Ok(()),
+        other => Err(format!("the push asked for {other:?}")),
+    }
 }
 
 #[then(regex = r#"^the index entry for "([^"]+)" says it was built outside the gate$"#)]
@@ -236,6 +245,7 @@ fn the_build_was_a_plan(w: &mut BehaviourWorld) {
         vec![StagedRequest {
             plan_only: true,
             rebuild: false,
+            build_engine: lns_ipc::BuildEngine::Lns,
         }],
         "a dry run builds nothing"
     );
@@ -248,6 +258,7 @@ fn the_build_ignored_the_cache(w: &mut BehaviourWorld) {
         vec![StagedRequest {
             plan_only: false,
             rebuild: true,
+            build_engine: lns_ipc::BuildEngine::Lns,
         }],
     );
 }

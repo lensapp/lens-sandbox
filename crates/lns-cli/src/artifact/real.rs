@@ -136,6 +136,9 @@ async fn push_local(reference: &str, options: PushOptions<'_>, cwd: PathBuf) -> 
                     &crate::config::default_config_path()?
                 )?,
                 rebuild: options.rebuild,
+                build_engine: crate::config::load_build_engine(
+                    &crate::config::default_config_path()?,
+                )?,
             },
             &doc,
             reference,
@@ -152,6 +155,7 @@ async fn push_local(reference: &str, options: PushOptions<'_>, cwd: PathBuf) -> 
             builder: &ServiceImageBuilder,
             image_limit: crate::config::load_image_limit(&crate::config::default_config_path()?)?,
             rebuild: options.rebuild,
+            build_engine: crate::config::load_build_engine(&crate::config::default_config_path()?)?,
         },
         &doc,
         reference,
@@ -206,9 +210,7 @@ impl super::distribute::ImageBuilder for ServiceImageBuilder {
                     definition_dir: request.project_dir.to_string_lossy().into_owned(),
                     rebuild: request.rebuild,
                     plan_only: request.plan_only,
-                    build_engine: crate::config::load_build_engine(
-                        &crate::config::default_config_path()?,
-                    )?,
+                    build_engine: request.build_engine.clone(),
                     authored_egress: request.authored_egress.clone(),
                     packed_filesets: request.packed_filesets.clone(),
                 },
