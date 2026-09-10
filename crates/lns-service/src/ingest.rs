@@ -26,6 +26,12 @@ pub async fn run(
         Some(image) => {
             let pulled = pull(image, layer_cache).await?;
             ensure_runnable_here(&pulled.config, guest_arch)?;
+            crate::log::info!(
+                "Image",
+                "{image}, {}/{}",
+                pulled.config.os,
+                pulled.config.architecture
+            );
             let bytes: Vec<Vec<u8>> = pulled
                 .layers
                 .into_iter()
@@ -255,6 +261,37 @@ mod tests {
             ingested.manifest_reference.as_deref(),
             Some("docker.io/library/alpine@sha256:deadbeef"),
             "the same spelling `CachingRegistry` writes the cache entry under",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_run_reports_the_image_it_booted_and_the_architecture_it_booted_it_on() {
+        let (_dir, cache) = empty_cache();
+        let pulled_cell: Mutex<Option<PulledImage>> = Mutex::new(Some(sample_pulled()));
+        let frames = crate::log::testing::capture_run_frames(|| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(run(
+                    Some("alpine:3.20"),
+                    &[],
+                    &Arch::ARM64,
+                    &cache,
+                    async |_: &str, _: &LayerCache| Ok(pulled_cell.lock().unwrap().take().unwrap()),
+                ))
+            })
+            .expect("ingesting");
+        });
+        let reported = frames.iter().find_map(|frame| match frame {
+            lns_ipc::WireFrame::Json(lns_ipc::Response::RunLog { verb, message, .. })
+                if verb.as_deref() == Some("Image") =>
+            {
+                Some(message.clone())
+            }
+            _ => None,
+        });
+        let reported = reported.expect("a run says what it booted from");
+        assert!(
+            reported.contains("linux/arm64") && reported.contains("alpine:3.20"),
+            "§6: an index holds an image per architecture, so the summary says which one booted: {reported}"
         );
     }
 
