@@ -4,7 +4,7 @@ use lns_artifact::build::BuiltArtifact;
 use lns_policy::registry_auth::{JsonFileRegistryAuthStore, RegistryAuthStore};
 use oci_client::{Reference, RegistryOperation, secrets::RegistryAuth};
 
-use crate::build::push_auth::{auth_error, push_error, select_auth};
+use crate::build::push_auth::{auth_error, names_nothing_yet, push_error, select_auth};
 
 /// The stored login for `reference`'s registry, or anonymous when none is recorded.
 fn registry_auth_for(reference: &Reference) -> Result<RegistryAuth> {
@@ -136,18 +136,15 @@ pub(crate) async fn image_at(
         .with_context(|| format!("invalid image target {target}"))?;
     let client = oci_client::Client::new(super::push_client_config(reference.registry()));
     let auth = registry_auth_for(&reference)?;
-    if client
-        .auth(&reference, &auth, RegistryOperation::Pull)
-        .await
-        .is_err()
-    {
-        return Ok(None);
+    if let Some(absent) = read_denied(&client, &reference, &auth, &target).await? {
+        return Ok(absent);
     }
-    let Ok((bytes, digest)) = client
+    let (bytes, digest) = match client
         .pull_manifest_raw(&reference, &auth, &IMAGE_MANIFEST_TYPES)
         .await
-    else {
-        return Ok(None);
+    {
+        Ok(answer) => answer,
+        Err(error) => return nothing_or_error(&target, error),
     };
     let manifest: oci_client::manifest::OciImageManifest = serde_json::from_slice(&bytes)
         .with_context(|| format!("reading the manifest at {target}"))?;
@@ -183,22 +180,46 @@ pub(crate) async fn index_at(repository: &str, tag: &str) -> Result<Option<Strin
         .with_context(|| format!("invalid image index target {target}"))?;
     let client = oci_client::Client::new(super::push_client_config(reference.registry()));
     let auth = registry_auth_for(&reference)?;
-    if client
-        .auth(&reference, &auth, RegistryOperation::Pull)
-        .await
-        .is_err()
-    {
-        return Ok(None);
+    if let Some(absent) = read_denied(&client, &reference, &auth, &target).await? {
+        return Ok(absent);
     }
-    Ok(client
+    match client
         .pull_manifest_raw(
             &reference,
             &auth,
             &[lns_artifact::image_index::INDEX_MEDIA_TYPE],
         )
         .await
-        .ok()
-        .map(|(_, digest)| digest))
+    {
+        Ok((_, digest)) => Ok(Some(digest)),
+        Err(error) => nothing_or_error(&target, error),
+    }
+}
+
+/// A tag no push has written holds nothing, which is not an error; every other failure stops the push, because an index assembled over a read that failed would drop what another architecture published (§6.2).
+fn nothing_or_error<T>(
+    target: &str,
+    error: oci_client::errors::OciDistributionError,
+) -> Result<Option<T>> {
+    match names_nothing_yet(&error) {
+        true => Ok(None),
+        false => {
+            Err(anyhow::Error::new(error)).with_context(|| format!("reading what {target} holds"))
+        }
+    }
+}
+
+/// The pull-scope handshake this read needs, answered with `Some(None)` where the registry says the repository holds nothing at all.
+async fn read_denied<T>(
+    client: &oci_client::Client,
+    reference: &Reference,
+    auth: &RegistryAuth,
+    target: &str,
+) -> Result<Option<Option<T>>> {
+    match client.auth(reference, auth, RegistryOperation::Pull).await {
+        Ok(_) => Ok(None),
+        Err(error) => nothing_or_error(target, error).map(Some),
+    }
 }
 
 /// Upload the assembled image index, which the published document names by digest, under a tag so the manifests it holds stay reachable from one.
