@@ -267,14 +267,24 @@ pub(crate) async fn export<D: Daemon>(daemon: &D, tag: &str) -> Result<Vec<u8>> 
 }
 
 /// The build context as the daemon reads it: every regular file and directory, and, as §3.1.1 says of a context, no symlink.
-pub(crate) fn context_tar<F: ContextFs>(fs: &F, context: &Path) -> Result<Vec<u8>> {
+pub(crate) fn context_tar<F: ContextFs>(
+    fs: &F,
+    context: &Path,
+    pinned: &PinnedContainerfile<'_>,
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut bytes);
-        pack(fs, context, "", &mut builder)?;
+        pack(fs, context, "", &mut builder, pinned)?;
         builder.finish().context("closing the build context tar")?;
     }
     Ok(bytes)
+}
+
+/// The Containerfile as the daemon reads it out of the context: named where it sits inside the tar, and written with the `FROM` the key stands on.
+pub(crate) struct PinnedContainerfile<'a> {
+    pub path: &'a str,
+    pub text: &'a str,
 }
 
 fn pack<F: ContextFs, W: std::io::Write>(
@@ -282,6 +292,7 @@ fn pack<F: ContextFs, W: std::io::Write>(
     directory: &Path,
     prefix: &str,
     builder: &mut tar::Builder<W>,
+    pinned: &PinnedContainerfile<'_>,
 ) -> Result<()> {
     let mut names = fs
         .entries(directory)
@@ -305,12 +316,15 @@ fn pack<F: ContextFs, W: std::io::Write>(
                 builder
                     .append_data(&mut header, format!("{relative}/"), std::io::empty())
                     .with_context(|| format!("writing {relative} into the build context tar"))?;
-                pack(fs, &path, &relative, builder)?;
+                pack(fs, &path, &relative, builder, pinned)?;
             }
             EntryKind::Regular => {
-                let content = fs
-                    .read(&path)
-                    .with_context(|| format!("reading {} in the build context", path.display()))?;
+                let content = match relative == pinned.path {
+                    true => pinned.text.as_bytes().to_vec(),
+                    false => fs.read(&path).with_context(|| {
+                        format!("reading {} in the build context", path.display())
+                    })?,
+                };
                 let mut header =
                     entry_header(meta.mode, content.len() as u64, tar::EntryType::Regular);
                 builder
@@ -504,7 +518,14 @@ pub(crate) async fn build_image<H: DockerHost, D: Daemon, F: ContextFs>(
     build(
         daemon,
         &DockerBuild {
-            context_tar: context_tar(fs, where_from.context)?,
+            context_tar: context_tar(
+                fs,
+                where_from.context,
+                &PinnedContainerfile {
+                    path: &where_from.containerfile,
+                    text: &pin_the_base(plan.text, preamble.line, &base.reference),
+                },
+            )?,
             containerfile: where_from.containerfile.clone(),
             build_args: executor::arg_defaults(plan.file)?,
             platform: format!("{}/{}", lns_artifact::image_index::OS, plan.arch),
@@ -529,6 +550,33 @@ pub(crate) async fn build_image<H: DockerHost, D: Daemon, F: ContextFs>(
         reused_steps: 0,
         built_outside_the_gate: true,
     })
+}
+
+/// The daemon resolves a `FROM` itself and may hold an older image behind the tag, so the file it is handed names the digest lns keyed the build over (§3.1.1).
+pub(crate) fn pin_the_base(text: &str, from_line: usize, reference: &str) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropping = false;
+    for (index, line) in text.lines().enumerate() {
+        if index + 1 == from_line {
+            kept.push(format!("FROM {reference}"));
+            dropping = continues_on_the_next_line(line);
+            continue;
+        }
+        if dropping {
+            dropping = continues_on_the_next_line(line);
+            continue;
+        }
+        kept.push(line.to_string());
+    }
+    let mut pinned = kept.join("\n");
+    if text.ends_with('\n') {
+        pinned.push('\n');
+    }
+    pinned
+}
+
+fn continues_on_the_next_line(line: &str) -> bool {
+    line.trim_end().ends_with('\\')
 }
 
 /// The socket the daemon is reached at: what `build.dockerSocket` names, else the `unix://` socket `DOCKER_HOST` names, else the one a daemon listens on by default.
@@ -950,6 +998,68 @@ mod tests {
         assert!(format!("{err:#}").contains("no layer"), "{err:#}");
     }
 
+    /// The daemon pulls its own base, so the file it reads must name the digest the key was taken over rather than the tag that named it (§3.1.1).
+    #[test]
+    fn the_from_the_daemon_reads_is_the_digest_the_key_stands_on() {
+        assert_eq!(
+            pin_the_base(
+                "ARG V=1.2.3\nFROM node:$V\nRUN npm i\n",
+                2,
+                "docker.io/library/node@sha256:base",
+            ),
+            "ARG V=1.2.3\nFROM docker.io/library/node@sha256:base\nRUN npm i\n",
+        );
+    }
+
+    #[test]
+    fn a_from_written_over_more_than_one_line_is_pinned_whole() {
+        assert_eq!(
+            pin_the_base("FROM \\\n  node:24\nRUN npm i\n", 1, "node@sha256:base"),
+            "FROM node@sha256:base\nRUN npm i\n",
+        );
+    }
+
+    #[test]
+    fn a_file_that_ends_without_a_newline_is_pinned_without_one() {
+        assert_eq!(
+            pin_the_base("FROM node:24", 1, "node@sha256:base"),
+            "FROM node@sha256:base",
+        );
+    }
+
+    #[test]
+    fn the_containerfile_the_daemon_reads_out_of_the_context_is_the_pinned_one() {
+        let mut context = FakeContext::new();
+        context
+            .file("Containerfile", 0o644, b"FROM node:24\n")
+            .file("app.js", 0o644, b"console.log(1)\n");
+
+        let bytes = context_tar(
+            &context,
+            Path::new("/ctx"),
+            &PinnedContainerfile {
+                path: "Containerfile",
+                text: "FROM node@sha256:base\n",
+            },
+        )
+        .expect("packing");
+
+        let held = tar_entries(&bytes).expect("reading the context back");
+        assert_eq!(
+            held.iter()
+                .find(|(name, _)| name == "Containerfile")
+                .map(|(_, bytes)| bytes.clone()),
+            Some(b"FROM node@sha256:base\n".to_vec()),
+        );
+        assert_eq!(
+            held.iter()
+                .find(|(name, _)| name == "app.js")
+                .map(|(_, bytes)| bytes.clone()),
+            Some(b"console.log(1)\n".to_vec()),
+            "every other file goes up as it is on the host",
+        );
+    }
+
     #[test]
     fn the_context_goes_up_as_a_tar_of_its_files_and_directories() {
         let mut context = FakeContext::new();
@@ -959,7 +1069,7 @@ mod tests {
             .file("app/main.js", 0o755, b"console.log(1)\n")
             .symlink("app/link", "main.js");
 
-        let bytes = context_tar(&context, Path::new("/ctx")).expect("packing");
+        let bytes = context_tar(&context, Path::new("/ctx"), &no_pin()).expect("packing");
         let mut archive = tar::Archive::new(std::io::Cursor::new(&bytes));
         let names: Vec<String> = archive
             .entries()
@@ -979,7 +1089,7 @@ mod tests {
         context
             .file("Containerfile", 0o644, b"FROM alpine\n")
             .unreadable_bytes("Containerfile");
-        let err = context_tar(&context, Path::new("/ctx")).unwrap_err();
+        let err = context_tar(&context, Path::new("/ctx"), &no_pin()).unwrap_err();
         assert!(
             format!("{err:#}").contains("in the build context"),
             "{err:#}"
@@ -993,7 +1103,7 @@ mod tests {
             .file("Containerfile", 0o644, b"FROM alpine\n")
             .dir("app", 0o755)
             .ghost("app", "gone");
-        let bytes = context_tar(&context, Path::new("/ctx")).expect("packing");
+        let bytes = context_tar(&context, Path::new("/ctx"), &no_pin()).expect("packing");
         let mut archive = tar::Archive::new(std::io::Cursor::new(&bytes));
         assert_eq!(archive.entries().unwrap().count(), 2);
     }
@@ -1002,7 +1112,7 @@ mod tests {
     fn a_context_directory_that_cannot_be_listed_names_it() {
         let mut context = FakeContext::new();
         context.dir("app", 0o755).unlistable("app");
-        let err = context_tar(&context, Path::new("/ctx")).unwrap_err();
+        let err = context_tar(&context, Path::new("/ctx"), &no_pin()).unwrap_err();
         assert!(
             format!("{err:#}").contains("reading the build context"),
             "{err:#}"
@@ -1081,7 +1191,8 @@ mod tests {
         rebuild: bool,
     ) -> Result<Built> {
         let file = lns_artifact::containerfile::parse(TEXT).expect("a Containerfile lns builds");
-        let context = FakeContext::new();
+        let mut context = FakeContext::new();
+        context.file("Containerfile", 0o644, TEXT.as_bytes());
         build_image(
             host,
             daemon,
@@ -1109,6 +1220,10 @@ mod tests {
             &ok(r#"{"stream":"Successfully built"}"#),
             &ok_bytes(&a_saved_image()),
         ])
+    }
+
+    fn no_pin() -> PinnedContainerfile<'static> {
+        PinnedContainerfile { path: "", text: "" }
     }
 
     fn ok_bytes(body: &[u8]) -> Vec<u8> {
@@ -1162,6 +1277,11 @@ mod tests {
         assert!(
             daemon.sent.borrow()[1].contains("buildargs=%7B%22V%22%3A%221.2.3%22%7D"),
             "the ARG defaults are stated rather than left to the daemon",
+        );
+        assert!(
+            daemon.sent.borrow()[1].contains("FROM docker.io/library/node@sha256:base"),
+            "the daemon builds on the digest the key was taken over, not on the tag: {}",
+            daemon.sent.borrow()[1],
         );
     }
 
