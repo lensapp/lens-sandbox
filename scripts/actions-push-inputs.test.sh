@@ -113,11 +113,55 @@ test_only_surrounding_whitespace_is_trimmed() {
 
 test_every_tag_is_kept_in_order() {
     run_inputs "acme/hermes:v1
-ghcr.io/acme/hermes:ci, acme/hermes:latest" true
+acme/hermes:ci, acme/hermes:latest" true
     assert_eq "many tags: first" "hub.lns.run/acme/hermes:v1" "$(output first)"
     assert_eq "many tags: the pushed list" \
         "hub.lns.run/acme/hermes:v1
-ghcr.io/acme/hermes:ci
+hub.lns.run/acme/hermes:ci
+hub.lns.run/acme/hermes:latest" "$(cat "$TAGS_FILE")"
+}
+
+# One push, one digest: the dry run of the first tag stands for all of them and
+# `digest` is a single output, so every tag has to name the same repository and
+# differ only in the tag. A mix is refused before anything is validated.
+test_every_tag_must_name_one_repository() {
+    run_inputs "acme/hermes:v1
+acme/hermes-two:v1" true
+    assert_eq "two names: status" 1 "$STATUS"
+    case "$(cat "$LOG")" in
+        *"hub.lns.run/acme/hermes:v1"*"hub.lns.run/acme/hermes-two:v1"*)
+            record "two names: shows the offending pair" yes "" ;;
+        *)
+            record "two names: shows the offending pair" no "$(cat "$LOG")" ;;
+    esac
+
+    run_inputs "acme/hermes:v1
+ghcr.io/acme/hermes:v1" true
+    assert_eq "two hosts: status" 1 "$STATUS"
+    case "$(cat "$LOG")" in
+        *"hub.lns.run/acme/hermes:v1"*"ghcr.io/acme/hermes:v1"*)
+            record "two hosts: shows the offending pair" yes "" ;;
+        *)
+            record "two hosts: shows the offending pair" no "$(cat "$LOG")" ;;
+    esac
+
+    run_inputs "acme/hermes:v1
+acme/hermes-two:v1
+acme/hermes-three:v1" true
+    case "$(cat "$LOG")" in
+        *hermes-three*)
+            record "the pair named is the first mismatch" no "$(cat "$LOG")" ;;
+        *)
+            record "the pair named is the first mismatch" yes "" ;;
+    esac
+
+    # One host, written twice with the hub left implicit once: the same
+    # repository, so this is not a mix.
+    run_inputs "acme/hermes:v1
+hub.lns.run/acme/hermes:latest" true
+    assert_eq "the hub written out is the same repository: status" 0 "$STATUS"
+    assert_eq "the hub written out is the same repository: the pushed list" \
+        "hub.lns.run/acme/hermes:v1
 hub.lns.run/acme/hermes:latest" "$(cat "$TAGS_FILE")"
 }
 
@@ -217,6 +261,7 @@ test_qualified_tag_is_left_alone
 test_localhost_and_port_stay_hosts
 test_only_surrounding_whitespace_is_trimmed
 test_every_tag_is_kept_in_order
+test_every_tag_must_name_one_repository
 test_a_reference_without_a_tag_is_refused
 test_a_reference_without_a_namespace_is_refused
 test_no_tags_at_all_is_refused

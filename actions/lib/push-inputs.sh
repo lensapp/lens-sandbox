@@ -11,6 +11,11 @@ refuse_tag() {
   exit 1
 }
 
+refuse_second_repository() {
+  echo "::error::tags name two repositories, '$1' and '$2'. Every tag must name one <namespace>/<name> — a single push has a single digest, so they may differ only in the tag."
+  exit 1
+}
+
 # Only what the workflow's line wrapping added: whitespace inside a reference
 # is a malformed reference, and lns is the one that says so.
 trim() {
@@ -69,6 +74,10 @@ main() {
       *) refuse_tag "$tag" "has no namespace segment" ;;
     esac
     tag="$tag_host/$tag_repository:${tag##*:}"
+    if [ -n "$first" ] &&
+      [ "$tag_host/$tag_repository" != "$host/$repository" ]; then
+      refuse_second_repository "$first" "$tag"
+    fi
     printf '%s\n' "$tag" >>"$file"
     if [ -z "$first" ]; then
       first=$tag
