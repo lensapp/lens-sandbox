@@ -213,6 +213,10 @@ mod tests {
             .await
             .expect_err("a closed channel is not an applied address");
         assert!(matches!(error, BootstrapError::Disconnected), "{error:?}");
+        assert!(
+            error.to_string().contains("without reporting an address"),
+            "{error}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -249,6 +253,7 @@ mod tests {
             matches!(error, BootstrapError::Unexpected(what) if what == "workload output"),
             "{error:?}"
         );
+        assert!(error.to_string().contains("before it reported"), "{error}");
     }
 
     #[tokio::test]

@@ -629,6 +629,10 @@ pub(crate) mod tests {
             "guest_address_not_applied",
             "a guest that never applied the plan is its own failure, not an exhausted host"
         );
+        assert!(
+            unanswered.to_string().contains("20s"),
+            "the user is told how long the guest was waited for: {unanswered}"
+        );
         let unheld = ReserveError::Select(SelectError::UnknownOwner);
         assert_eq!(unheld.as_str(), "guest_address_not_applied");
         assert!(
@@ -1275,6 +1279,11 @@ pub(crate) mod tests {
         assert!(
             matches!(&error, AddressError::Refused(got) if got.as_str() == "no_static_address"),
             "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            reason.summary(),
+            "the guest's own words are what the run reports"
         );
         assert!(
             allocator.reserved().is_empty(),
