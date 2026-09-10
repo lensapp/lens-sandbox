@@ -785,6 +785,29 @@ fn readme_layer(built: &BuiltArtifact) -> Option<ReadmeLayer> {
     })
 }
 
+/// A push that fails at the last upload has already published everything the document names, so the failure says what landed and a retry is not a guess.
+fn what_already_landed(mixins: usize, image: Option<&PublishedImage>) -> Option<String> {
+    let mut landed = Vec::new();
+    if mixins > 0 {
+        landed.push(format!(
+            "its {mixins} mixin(s) are already uploaded under their own digests"
+        ));
+    }
+    if let Some(image) = image {
+        landed.push(format!(
+            "its image is already published as {}",
+            image.reference
+        ));
+    }
+    match landed.is_empty() {
+        true => None,
+        false => Some(format!(
+            "the sandbox was not published; {}, and re-running the push re-derives the same digests, so retrying is safe",
+            landed.join(" and ")
+        )),
+    }
+}
+
 /// `lns push <ref>`: validate the document, pack each of its path filesets into a layer of the same artifact, and upload the whole thing in one step. The caller reads `./lns.yaml` into `doc`.
 pub async fn push<F, P, R, B, W>(
     ports: PushPorts<'_, F, P, R, B>,
@@ -921,15 +944,12 @@ where
             .map(tool_version)
             .collect::<Result<Vec<_>>>()?,
     );
-    producer
-        .push_built(&built, reference)
-        .await
-        .map_err(|e| match plan.nodes.len() {
-            0 => e,
-            published => e.context(format!(
-                "the sandbox was not published; its {published} mixin(s) are already uploaded under their own digests, and re-running the push re-derives the same digests, so retrying is safe"
-            )),
-        })?;
+    producer.push_built(&built, reference).await.map_err(|e| {
+        match what_already_landed(plan.nodes.len(), image.as_ref()) {
+            Some(landed) => e.context(landed),
+            None => e,
+        }
+    })?;
     writeln!(
         out,
         "built and pushed {reference}@{}",

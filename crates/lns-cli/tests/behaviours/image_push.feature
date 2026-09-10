@@ -54,6 +54,14 @@ Feature: publishing the image a Containerfile builds beside the document
     And the output contains "nothing to publish: the index already holds linux/arm64"
     And no image was published
 
+  Scenario: a push that fails after the image landed names the index it published
+    Given the registry accepts 0 upload(s) then refuses
+    And the build answers with an image of 2 layers
+    When the user runs artifact command "push ghcr.io/team/hermes:1.4.0"
+    Then the command fails with an exit code other than 0
+    And the output contains "its image is already published as ghcr.io/team/hermes@sha256:"
+    And the output contains "retrying is safe"
+
   Scenario: push --dry-run says what the index holds and what this push would add
     Given the registry already holds an "amd64" image for "ghcr.io/team/hermes:1.4.0"
     And the build answers with an image of 2 layers it did not have to build
