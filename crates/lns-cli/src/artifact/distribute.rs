@@ -815,6 +815,21 @@ fn what_already_landed(mixins: usize, image: Option<&PublishedImage>) -> Option<
     }
 }
 
+/// A `--format json` push emits one object and buffers every other line, so the mixin prompt would land where nobody reads it and then block on an answer that never comes; the push refuses instead of hanging the script.
+fn accept_the_mixins_up_front(
+    plan: &super::mixin_plan::MixinPlan,
+    reference: &str,
+    assume_yes: bool,
+) -> Result<()> {
+    if plan.is_empty() || assume_yes {
+        return Ok(());
+    }
+    bail!(
+        "{reference} publishes {} local mixin(s) first and --format json never prompts — pass --yes to accept them, or push without --format json to be asked",
+        plan.nodes.len()
+    )
+}
+
 /// `lns push <ref>`: validate the document, pack each of its path filesets into a layer of the same artifact, and upload the whole thing in one step. The caller reads `./lns.yaml` into `doc`.
 pub async fn push<F, P, R, B, W>(
     ports: PushPorts<'_, F, P, R, B>,
@@ -858,12 +873,12 @@ where
 {
     match format {
         crate::output::Format::Table => {
-            push_collect(ports, doc, reference, confirm, out).await?;
+            push_collect(ports, doc, reference, confirm, format, out).await?;
             Ok(0)
         }
         crate::output::Format::Json => {
             let mut table = Vec::new();
-            let report = push_collect(ports, doc, reference, confirm, &mut table).await?;
+            let report = push_collect(ports, doc, reference, confirm, format, &mut table).await?;
             crate::output::emit_object(&report, out)?;
             Ok(0)
         }
@@ -875,6 +890,7 @@ async fn push_collect<F, P, R, B, W>(
     doc: &[u8],
     reference: &str,
     confirm: Confirm<'_>,
+    format: crate::output::Format,
     out: &mut W,
 ) -> Result<PushReport>
 where
@@ -905,7 +921,12 @@ where
     let plan = super::mixin_plan::plan_local_mixins(fs, cwd, doc, reference)?;
     refuse_unpushable_planned_tools(&plan)?;
     preflight_readmes(fs, cwd, &plan)?;
-    super::mixin_plan::confirm_mixin_publication(&plan, reference, assume_yes, terminal, out)?;
+    match format {
+        crate::output::Format::Table => super::mixin_plan::confirm_mixin_publication(
+            &plan, reference, assume_yes, terminal, out,
+        )?,
+        crate::output::Format::Json => accept_the_mixins_up_front(&plan, reference, assume_yes)?,
+    }
     let image = publish_the_image(
         producer,
         builder,
