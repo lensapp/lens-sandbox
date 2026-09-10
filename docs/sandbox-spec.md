@@ -375,6 +375,31 @@ reaches is decided by the same rules a run's traffic is, and no Docker on the
 host is involved. A published document never carries a path — see
 [§6](#6-publish-time-transforms).
 
+**The host-Docker switch.** A machine that has a Docker daemon and prefers it
+MAY point the build at that daemon over the Docker Engine API, with the
+`build.engine` setting of the machine's own configuration
+([`cli-spec.md` §3.5](cli-spec.md#35-lns-config)). It is a property of the
+machine, never of the document: no field of `lns.run/v1` selects an engine, and
+the same document builds either way. The value `lns` is the default and is the
+build guest above; the value `docker` sends the Containerfile and its context to
+the daemon, and the image the daemon answers with is imported into the local
+layer store exactly as the build guest's is, so the key
+([below](#what-a-build-is-keyed-by)), the publish
+([§6](#6-publish-time-transforms)) and the index ([§6.2](#62-one-image-index-per-published-document))
+are unchanged.
+
+**The gate does not apply to a daemon build**, and this MUST be disclosed. A
+`RUN` inside the daemon reaches whatever the host lets the daemon reach: the
+document's `egress` decides nothing there, no `Connect to <host>?` card is
+raised, and the document's `credentials` are not in force. So an implementation
+that builds through the daemon MUST record it on the image
+([§6.2](#62-one-image-index-per-published-document)) and MUST say so in words
+wherever it names that image — `lns inspect` and the run summary both — with
+`built outside the gate by the host Docker daemon`. A machine whose switch says
+`docker` and whose daemon does not answer MUST refuse by name rather than build
+through the guest silently, and the refusal MUST name the setting that turns the
+switch off.
+
 **The build context.** The context is the directory the path names, or the
 Containerfile's own directory when the path names a file. It carries regular
 files and directories only: a symlink inside it is not part of the context, is
@@ -2385,6 +2410,17 @@ entries is always the same bytes and the same digest.
 
 A push whose architecture the index already holds with the same manifest digest
 publishes nothing and says so.
+
+**An image built outside the gate is recorded on its entry.** Where the image
+was built by a host Docker daemon rather than in a build guest
+([§3.1.1](#311-image)), the entry's descriptor inside the index MUST carry the
+annotation `run.lns.built-outside-the-gate` with the value `"true"`; an entry
+built in a build guest MUST carry no such annotation. The annotation sits on the
+entry inside the index, not on the per-architecture manifest, because the
+document pins the index by digest: a consumer verifying that digest verifies the
+record with it, and a reader of the index needs no further request to see it.
+Each architecture carries its own: one host may build through its daemon while
+another builds in a guest, and the index says which did which.
 
 **What the registry guarantees, and what it does not.** A manifest `PUT` is
 atomic and a tag names one manifest at a time, so no architecture can corrupt
