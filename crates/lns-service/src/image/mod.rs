@@ -1046,6 +1046,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 index: Vec::new(),
                 manifest_failure: None,
+                index_failure: None,
             }
         }
     }
@@ -1059,6 +1060,7 @@ mod tests {
         /// What an index at this reference holds, for a registry that answers a manifest list rather than a manifest.
         index: Vec<lns_artifact::image_index::IndexEntry>,
         manifest_failure: Option<String>,
+        index_failure: Option<String>,
     }
 
     impl Registry for FakeRegistry {
@@ -1082,7 +1084,10 @@ mod tests {
             _reference: &Reference,
         ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
             self.calls.lock().unwrap().push("index".into());
-            Ok(self.index.clone())
+            match &self.index_failure {
+                Some(failure) => anyhow::bail!("{failure}"),
+                None => Ok(self.index.clone()),
+            }
         }
 
         async fn pull_blob(
@@ -1972,6 +1977,26 @@ mod tests {
         assert!(
             format!("{err:#}").contains("registry timeout"),
             "an index is not what went wrong here: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reference_whose_index_cannot_be_read_keeps_the_failure_that_was_already_there() {
+        ensure_global_trace_subscriber();
+        let mut registry = build_two_layer_image().into_registry();
+        registry.manifest_failure = Some("manifest unknown to registry".into());
+        registry.index_failure = Some("registry timeout".into());
+        let (_dir, cache) = cache();
+        let err = pull_inner(
+            &registry,
+            &format!("ghcr.io/team/hermes@sha256:{}", "ee".repeat(32)),
+            &cache,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("manifest unknown"),
+            "a second failure must not hide the first: {err:#}"
         );
     }
 

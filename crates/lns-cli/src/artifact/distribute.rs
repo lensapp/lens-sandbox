@@ -1092,6 +1092,7 @@ mod tests {
         indexes: RefCell<Vec<(String, Vec<u8>)>>,
         /// The digest the index tag names today, which decides whether a push that adds no entry still has an index to repair.
         published_indexes: RefCell<std::collections::HashMap<String, String>>,
+        index_failure: Option<String>,
         read_failure: Option<String>,
     }
 
@@ -1243,6 +1244,9 @@ mod tests {
             tag: &'a str,
             index: &'a [u8],
         ) -> LocalBoxFuture<'a, Result<()>> {
+            if let Some(failure) = self.index_failure.clone() {
+                return Box::pin(async move { Err(anyhow::anyhow!(failure)) });
+            }
             self.indexes
                 .borrow_mut()
                 .push((format!("{repository}:{tag}"), index.to_vec()));
@@ -2307,6 +2311,33 @@ mod tests {
         .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("the index holds nothing yet"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn an_index_the_registry_refuses_stops_the_push_naming_the_repository() {
+        let producer = FakeProducer {
+            index_failure: Some("credential for ghcr.io lacks push scope".into()),
+            ..FakeProducer::ok()
+        };
+        let mut out = Vec::new();
+        let err = push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:base", 10)]),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("image index into ghcr.io/team/hermes"),
+            "a document may not name an index the registry never took: {message}"
+        );
+        assert!(producer.uploaded.borrow().is_empty());
     }
 
     #[tokio::test]
