@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.26.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.25.0...lns-v0.26.0) (2026-09-10)
+
+
+### Features
+
+* **approval:** a run keeps every card, and `lns approval` answers it ([3cd442a](https://github.com/lensapp/lens-sandbox/commit/3cd442af1359d3b41ca2ad70a301024f846e8854))
+* **cli:** add JSON artifact push output ([aae90c1](https://github.com/lensapp/lens-sandbox/commit/aae90c1a194231bcb1c0e72d716d37bb341dee66))
+* **service:** a connector row is listed at the raise, and grants there ([38a12bd](https://github.com/lensapp/lens-sandbox/commit/38a12bd0610b1ceed35b2ba604a380229e1b9851))
+* **service:** an Approvals view answers a card you closed ([02b1366](https://github.com/lensapp/lens-sandbox/commit/02b136613590f403d83da2b4fb096188b5e0d03f))
+* **service:** rm takes any entry, and changes no rule ([ea632db](https://github.com/lensapp/lens-sandbox/commit/ea632db6568b0ce1bb4cda398686b7045cb63109))
+* **service:** the Approvals list is gathered under the sandbox it asks for ([43943b1](https://github.com/lensapp/lens-sandbox/commit/43943b1742c06f217fc27de7b4ef1ecfa94444d8))
+* **service:** the approvals view is a live list and an archive ([5f4fb82](https://github.com/lensapp/lens-sandbox/commit/5f4fb828e3b090250b05c7fb38da2c764fee9394))
+* **service:** the Approvals view is a table you open a row of ([9b154b4](https://github.com/lensapp/lens-sandbox/commit/9b154b4572ebd8f93c3576e13a06feb93ee66e09))
+* **service:** the Approvals view removes, filters, and shows the answer ([dda4b0b](https://github.com/lensapp/lens-sandbox/commit/dda4b0b18ed30b0d6b54f9abdda9dab551178ca8))
+* support registry auth without service ([fcba151](https://github.com/lensapp/lens-sandbox/commit/fcba1512a6ec2eaad56c0d98fba3c3a5c2955343))
+
+
+### Bug Fixes
+
+* **coverage:** a struct-literal field that computes nothing is not a line ([abc2692](https://github.com/lensapp/lens-sandbox/commit/abc26921ce3297895c7770cbaab1ab9852c9ecda))
+* **coverage:** an operator that can dispatch to an impl keeps its line ([6be2ec4](https://github.com/lensapp/lens-sandbox/commit/6be2ec46e266073d1b678f87c2d5f6fc61c89747))
+* **service:** a card raised while the answer travels leaves it ([f33670d](https://github.com/lensapp/lens-sandbox/commit/f33670d214cbce4e8c78550ac665e83b58849d10))
+* **service:** a connector nobody answered waits with the destinations ([3f46193](https://github.com/lensapp/lens-sandbox/commit/3f46193c579266075ba8e7ba9ea1279368d142be))
+* **service:** a notice raised off the card names the sandbox the list does ([673dc26](https://github.com/lensapp/lens-sandbox/commit/673dc265d3fc71c6a1735b67da3d54b5c791c7bd))
+* **service:** a run's write lock goes when the last store holding it does ([9e3746e](https://github.com/lensapp/lens-sandbox/commit/9e3746ebd480d2166b3daf0f2856389ee21d961a))
+* **service:** a verdict that writes no rule leaves the answer the entry has ([0e307d2](https://github.com/lensapp/lens-sandbox/commit/0e307d2d510f7448305767dc08e221baf7e892b1))
+* **service:** every list scrolls, and each keeps its own place ([6b86964](https://github.com/lensapp/lens-sandbox/commit/6b8696484e6baba01046cd7187f9837404891474))
+* **service:** one lock per run's approvals, not one per store ([100b9e7](https://github.com/lensapp/lens-sandbox/commit/100b9e74822d4d847ca848dae68d6cc2858d289f))
+* **service:** search belongs to the view it searches ([e6ddbb2](https://github.com/lensapp/lens-sandbox/commit/e6ddbb214f6375e54ca92b16a6f27a0692a771a6))
+* **service:** the approvals a surface lists are the runs on disk ([3f01471](https://github.com/lensapp/lens-sandbox/commit/3f01471e8af9675a6bb721b808db2f8c6e8193d7))
+* support connector artifact kinds ([e4ad357](https://github.com/lensapp/lens-sandbox/commit/e4ad3579abfdc746f098f2c133643fa00ef8c911))
+
 ## [0.25.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.24.0...lns-v0.25.0) (2026-09-04)
 
 
