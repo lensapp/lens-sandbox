@@ -159,6 +159,28 @@ pub(crate) fn built_architectures(
         .collect()
 }
 
+/// Which architectures the index a published document names holds; a document that does not read back, one whose image is no reference, and an index this machine cannot read each disclose none, because an inspect that cannot read one still has to print the rest (§6.2).
+pub(crate) async fn built_architectures_of<R: crate::image::Registry>(
+    registry: &R,
+    resolution: &crate::artifact::mixin::Resolution,
+) -> Vec<lns_ipc::BuiltArchitecture> {
+    let Ok(def) = lns_artifact::sandbox::parse_resolved(&resolution.document) else {
+        return Vec::new();
+    };
+    let Ok(reference) = def.spec.image.parse::<oci_client::Reference>() else {
+        return Vec::new();
+    };
+    match registry.pull_index(&reference).await {
+        Ok(held) => held
+            .map(|held| built_architectures(&held.entries))
+            .unwrap_or_default(),
+        Err(error) => {
+            crate::log::warn!("this artifact discloses no image index: {error:#}");
+            Vec::new()
+        }
+    }
+}
+
 /// What a published artifact discloses about an image lns built: the Containerfile it shipped, and one digest per architecture the index holds (§6.2, §7.3).
 #[derive(Default)]
 pub(crate) struct BuiltImageDisclosure {
@@ -593,6 +615,139 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("arm64", "sha256:aa"), ("amd64", "sha256:bb")],
             "§6: an approver reads one digest per architecture the index holds"
+        );
+    }
+
+    /// A registry that answers only what an index read asks for: the disclosure decides on that read alone.
+    struct IndexRegistry(std::result::Result<Option<lns_artifact::image_index::HeldIndex>, String>);
+
+    impl crate::image::Registry for IndexRegistry {
+        async fn pull_index(
+            &self,
+            _reference: &oci_client::Reference,
+        ) -> Result<Option<lns_artifact::image_index::HeldIndex>> {
+            self.0.clone().map_err(|error| anyhow::anyhow!(error))
+        }
+
+        async fn pull_manifest_and_config(
+            &self,
+            _reference: &oci_client::Reference,
+        ) -> Result<(oci_client::manifest::OciImageManifest, String, String)> {
+            anyhow::bail!("an inspect's disclosure reads the index and nothing else")
+        }
+
+        async fn pull_blob(
+            &self,
+            _reference: &oci_client::Reference,
+            _descriptor: &oci_client::manifest::OciDescriptor,
+            _on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<Vec<u8>> {
+            anyhow::bail!("an inspect's disclosure fetches nothing")
+        }
+
+        async fn pull_blob_to_path(
+            &self,
+            _reference: &oci_client::Reference,
+            _descriptor: &oci_client::manifest::OciDescriptor,
+            _max_bytes: u64,
+            _path: &std::path::Path,
+            _on_chunk: &(dyn Fn(u64) + Send + Sync),
+        ) -> Result<()> {
+            anyhow::bail!("an inspect's disclosure writes nothing")
+        }
+    }
+
+    fn an_index_holding(
+        architecture: &str,
+        digest: &str,
+    ) -> Option<lns_artifact::image_index::HeldIndex> {
+        let entries = vec![index_entry(architecture, digest)];
+        Some(lns_artifact::image_index::HeldIndex {
+            digest: lns_artifact::image_index::assemble(&entries)
+                .expect("assembling")
+                .digest,
+            entries,
+        })
+    }
+
+    const BUILT: &str = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"ghcr.io/team/hermes@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","imageSource":"./image"}}"#;
+
+    #[tokio::test]
+    async fn a_document_naming_an_index_discloses_one_digest_per_architecture_it_holds() {
+        let registry = IndexRegistry(Ok(an_index_holding("arm64", "sha256:aa")));
+        assert_eq!(
+            built_architectures_of(&registry, &resolution(BUILT, &[])).await,
+            vec![lns_ipc::BuiltArchitecture {
+                architecture: "arm64".to_string(),
+                digest: "sha256:aa".to_string(),
+            }],
+        );
+    }
+
+    #[tokio::test]
+    async fn an_index_this_machine_cannot_read_discloses_no_architecture() {
+        let registry = IndexRegistry(Err("registry timeout".to_string()));
+        assert!(
+            built_architectures_of(&registry, &resolution(BUILT, &[]))
+                .await
+                .is_empty(),
+            "an inspect that cannot read the index still has to print the rest"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reference_naming_a_plain_manifest_discloses_no_architecture() {
+        let registry = IndexRegistry(Ok(None));
+        assert!(
+            built_architectures_of(&registry, &resolution(BUILT, &[]))
+                .await
+                .is_empty(),
+            "an image that is not an index holds no per-architecture entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_document_or_an_image_that_does_not_read_back_discloses_no_architecture() {
+        let registry = IndexRegistry(Ok(an_index_holding("arm64", "sha256:aa")));
+        assert!(
+            built_architectures_of(&registry, &resolution("not a document", &[]))
+                .await
+                .is_empty(),
+            "a document that does not parse names no image to read an index at"
+        );
+        let no_reference = r#"{"apiVersion":"lns.run/v1","kind":"sandbox","name":"hermes","spec":{"image":"NOT A REFERENCE","imageSource":"./image"}}"#;
+        assert!(
+            built_architectures_of(&registry, &resolution(no_reference, &[]))
+                .await
+                .is_empty(),
+        );
+    }
+
+    #[tokio::test]
+    async fn the_double_refuses_everything_an_index_read_must_never_do() {
+        use crate::image::Registry;
+        let registry = IndexRegistry(Ok(None));
+        let reference: oci_client::Reference = "ghcr.io/team/hermes:1.4.0".parse().unwrap();
+        let descriptor = oci_client::manifest::OciDescriptor::default();
+        let ignored: &(dyn Fn(u64) + Send + Sync) = &|_| {};
+        assert!(registry.pull_manifest_and_config(&reference).await.is_err());
+        assert!(
+            registry
+                .pull_blob(&reference, &descriptor, ignored)
+                .await
+                .is_err()
+        );
+        assert!(
+            registry
+                .pull_blob_to_path(
+                    &reference,
+                    &descriptor,
+                    1,
+                    std::path::Path::new("/dev/null"),
+                    ignored
+                )
+                .await
+                .is_err()
         );
     }
 
