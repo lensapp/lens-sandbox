@@ -21,6 +21,10 @@ fn allocator() -> &'static Arc<Allocator> {
     })
 }
 
+/// How long the host waits for a bridge another guest is bringing up before it falls back to what vmnet declares.
+const BRIDGE_ATTEMPTS: usize = 20;
+const BRIDGE_RETRY: Duration = Duration::from_millis(250);
+
 /// Only the macOS backend attaches a NAT interface, so a Linux guest keeps its no-interface behaviour whatever the environment says.
 pub const SUPPORTED: bool = cfg!(target_os = "macos");
 
@@ -103,12 +107,17 @@ pub async fn reserve(owner: &str, vm_id: &str) -> Result<Option<Lease>> {
     if !SUPPORTED || !super::enabled(|k| std::env::var(k).ok()) {
         return Ok(None);
     }
-    let observed =
-        crate::vm::host_net::observe_host_network(&RealHostNetwork, 20, Duration::from_millis(250))
-            .await?;
-    allocator().set_network(observed);
     let mac = super::mac_for(vm_id);
-    let net = allocator().reserve(owner, &mac)?;
+    let net = super::reserve_on(
+        allocator(),
+        &RealHostNetwork,
+        &RealHostFiles,
+        owner,
+        &mac,
+        BRIDGE_ATTEMPTS,
+        BRIDGE_RETRY,
+    )
+    .await?;
     log::info!(
         "Address",
         "{} via {} for {owner}",

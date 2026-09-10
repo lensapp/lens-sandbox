@@ -1070,8 +1070,14 @@ LNS_STATIC_GUEST_NET=1 lns service start
 
 What the host does, per booting guest:
 
-- reads the shared network's own parameters (`/etc/bootpd.plist`, falling back
-  to Apple's `192.168.64.0/24` with the gateway at `.1`) — it never writes them;
+- reads the shared network's own parameters — the address and netmask of the
+  live `bridge100` interface when a guest is already running, and otherwise the
+  `Shared_Net_Address` / `Shared_Net_Mask` that
+  `/Library/Preferences/SystemConfiguration/com.apple.vmnet.plist` declares the
+  network will be created with, so the very first guest (which is the one that
+  creates the bridge) is addressed too. If the network is neither running nor
+  declared, the run stops; lns never assumes a subnet, and it never writes
+  either source;
 - excludes the network and broadcast addresses, the gateway, every unexpired
   lease in `/var/db/dhcpd_leases`, every address answering ARP, and every
   address already reserved for another guest, under one lock so two guests

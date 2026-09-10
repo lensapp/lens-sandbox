@@ -74,6 +74,58 @@ impl std::fmt::Display for AllocError {
 
 impl std::error::Error for AllocError {}
 
+/// Why no address could be reserved for a booting guest: the host network could not be discovered, or it holds nothing free. Either way the guest never started.
+#[derive(Debug)]
+pub enum ReserveError {
+    Network(std::io::Error),
+    Alloc(AllocError),
+}
+
+impl ReserveError {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Network(_) => "host_network_undiscoverable",
+            Self::Alloc(AllocError::Exhausted { .. }) => "host_addresses_exhausted",
+            Self::Alloc(_) => "host_address_state_unreadable",
+        }
+    }
+
+    /// The cause plus what the user can do about it, for the host's own error render.
+    pub fn explain(&self) -> String {
+        format!(
+            "{self}\n  remedy: let every run exit, then start again, or unset {ENABLE_ENV} to boot on the host DHCP server"
+        )
+    }
+}
+
+impl std::fmt::Display for ReserveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Network(e) => write!(f, "the host shared network could not be discovered: {e}"),
+            Self::Alloc(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReserveError {}
+
+/// The one reservation path both boot paths take: discover the network the guest will be attached to, then reserve on it.
+pub async fn reserve_on(
+    allocator: &Allocator,
+    source: &dyn crate::vm::host_net::HostNetworkSource,
+    files: &dyn HostFiles,
+    owner: &str,
+    mac: &str,
+    attempts: usize,
+    retry: Duration,
+) -> Result<GuestNet, ReserveError> {
+    let network = crate::vm::host_net::host_network_for_boot(source, files, attempts, retry)
+        .await
+        .map_err(ReserveError::Network)?;
+    allocator.set_network(network);
+    allocator.reserve(owner, mac).map_err(ReserveError::Alloc)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum SelectError {
     UnknownOwner,
@@ -265,7 +317,7 @@ impl ConflictSource for Allocator {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::vm::host_net::{BOOTPD_PLIST_PATH, LEASES_PATH, tests::FakeHostFiles};
+    use crate::vm::host_net::{LEASES_PATH, tests::FakeHostFiles};
 
     struct FixedClock(u64);
     impl Clock for FixedClock {
@@ -365,6 +417,98 @@ pub(crate) mod tests {
         assert_eq!(allocator.reserved().len(), 2);
     }
 
+    #[tokio::test]
+    async fn a_workload_and_a_provisioner_both_boot_first_on_a_host_with_no_bridge_yet() {
+        use crate::vm::host_net::{HostNetworkSource, VMNET_PLIST_PATH};
+
+        struct AbsentBridge;
+        impl HostNetworkSource for AbsentBridge {
+            fn observe(&self) -> std::io::Result<String> {
+                Err(std::io::Error::other("ifconfig bridge100 exited with 1"))
+            }
+        }
+
+        let declared = "<plist><dict>
+            <key>Shared_Net_Address</key><string>192.168.66.1</string>
+            <key>Shared_Net_Mask</key><string>255.255.255.0</string>
+            </dict></plist>";
+        let allocator = allocator_with(
+            FakeHostFiles::new().with(LEASES_PATH, ""),
+            Vec::new(),
+            1_000,
+        );
+        let files = FakeHostFiles::new().with(VMNET_PLIST_PATH, declared);
+
+        let workload = reserve_on(
+            &allocator,
+            &AbsentBridge,
+            &files,
+            "run-a",
+            "52:54:00:00:00:01",
+            20,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("the very first guest is the one that creates bridge100");
+        let provisioner = reserve_on(
+            &allocator,
+            &AbsentBridge,
+            &files,
+            "run-a/tools",
+            "52:54:00:00:00:11",
+            20,
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("a sessionless provisioner boots the same way");
+
+        assert_eq!(
+            workload.candidates,
+            vec![
+                Ipv4Addr::new(192, 168, 66, 254),
+                Ipv4Addr::new(192, 168, 66, 253),
+                Ipv4Addr::new(192, 168, 66, 252)
+            ]
+        );
+        assert_eq!(workload.gateway, Ipv4Addr::new(192, 168, 66, 1));
+        assert!(
+            provisioner
+                .candidates
+                .iter()
+                .all(|a| !workload.candidates.contains(a)),
+            "{provisioner:?} vs {workload:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reservation_on_an_undiscoverable_network_refuses_by_name() {
+        use crate::vm::host_net::HostNetworkSource;
+
+        struct AbsentBridge;
+        impl HostNetworkSource for AbsentBridge {
+            fn observe(&self) -> std::io::Result<String> {
+                Err(std::io::Error::other("ifconfig bridge100 exited with 1"))
+            }
+        }
+
+        let error = reserve_on(
+            &empty_host(),
+            &AbsentBridge,
+            &FakeHostFiles::new(),
+            "run-a",
+            "52:54:00:00:00:01",
+            2,
+            Duration::from_millis(250),
+        )
+        .await
+        .expect_err("an unknown network is not the default network");
+        assert!(matches!(error, ReserveError::Network(_)), "{error:?}");
+        assert!(
+            error.to_string().contains("shared network"),
+            "the user is told which host state was missing: {error}"
+        );
+    }
+
     #[test]
     fn an_unexpired_lease_occupies_its_address_and_an_expired_one_does_not() {
         let leases = "{\n\tip_address=192.168.64.254\n\thw_address=1,52:54:0:aa:aa:aa\n\tlease=0x7d0\n}\n\
@@ -449,11 +593,8 @@ pub(crate) mod tests {
 
     #[test]
     fn the_gateway_the_network_and_the_broadcast_address_are_never_offered() {
-        let plist = "<key>net_address</key><string>192.168.64.0</string><key>net_mask</key><string>255.255.255.248</string>";
         let allocator = allocator_with(
-            FakeHostFiles::new()
-                .with(LEASES_PATH, "")
-                .with(BOOTPD_PLIST_PATH, plist),
+            FakeHostFiles::new().with(LEASES_PATH, ""),
             Vec::new(),
             1_000,
         );
@@ -490,11 +631,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_full_network_refuses_the_boot_and_names_the_network_it_ran_out_of() {
-        let plist = "<key>net_address</key><string>10.0.0.8</string><key>net_mask</key><string>255.255.255.248</string>";
         let allocator = allocator_with(
-            FakeHostFiles::new()
-                .with(LEASES_PATH, "")
-                .with(BOOTPD_PLIST_PATH, plist),
+            FakeHostFiles::new().with(LEASES_PATH, ""),
             (10..=14)
                 .map(|last| Ipv4Addr::new(10, 0, 0, last))
                 .collect(),

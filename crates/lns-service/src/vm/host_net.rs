@@ -36,7 +36,9 @@ pub fn observe_neighbors(commands: &dyn CommandOutput) -> std::io::Result<Vec<Ip
 
 /// Read, never written: lns assigns addresses beside Apple's DHCP server, it does not configure it.
 pub const LEASES_PATH: &str = "/var/db/dhcpd_leases";
-pub const BOOTPD_PLIST_PATH: &str = "/etc/bootpd.plist";
+
+/// What vmnet builds the shared network from, so it answers before the first guest exists and bridge100 with it.
+pub const VMNET_PLIST_PATH: &str = "/Library/Preferences/SystemConfiguration/com.apple.vmnet.plist";
 
 const DEFAULT_NETWORK: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 0);
 const DEFAULT_PREFIX_LEN: u8 = 24;
@@ -49,7 +51,7 @@ pub struct HostNetwork {
 }
 
 impl Default for HostNetwork {
-    /// What macOS gives a shared network when `/etc/bootpd.plist` says nothing: 192.168.64.0/24 with the host at .1.
+    /// What macOS gives a shared network out of the box: 192.168.64.0/24 with the host at .1.
     fn default() -> Self {
         Self {
             network: DEFAULT_NETWORK,
@@ -197,22 +199,26 @@ fn parse_observed_mask(value: &str) -> Option<Ipv4Addr> {
     value.parse().ok()
 }
 
-/// Apple's plist is XML and lns carries no plist parser, so the two keys it needs are read directly and anything else falls back.
-pub fn parse_bootpd_network(text: &str) -> Option<HostNetwork> {
-    if text.matches("<key>net_address</key>").count() != 1
-        || text.matches("<key>net_mask</key>").count() != 1
+/// Apple's plist is XML and lns carries no plist parser, so the two keys that define the shared network are read directly and anything ambiguous is no answer at all.
+pub fn parse_declared_network(text: &str) -> Option<HostNetwork> {
+    if text.matches("<key>Shared_Net_Address</key>").count() != 1
+        || text.matches("<key>Shared_Net_Mask</key>").count() != 1
     {
         return None;
     }
-    let network: Ipv4Addr = plist_string(text, "net_address")?.parse().ok()?;
-    let prefix_len = plist_string(text, "net_mask")
+    let gateway: Ipv4Addr = plist_string(text, "Shared_Net_Address")?.parse().ok()?;
+    let prefix_len = plist_string(text, "Shared_Net_Mask")
         .and_then(|mask| mask.parse::<Ipv4Addr>().ok())
         .and_then(prefix_len_of)?;
     Some(HostNetwork {
-        network: Ipv4Addr::from(u32::from(network) & mask_bits(prefix_len)),
+        network: Ipv4Addr::from(u32::from(gateway) & mask_bits(prefix_len)),
         prefix_len,
-        gateway: Ipv4Addr::from((u32::from(network) & mask_bits(prefix_len)) + 1),
+        gateway,
     })
+}
+
+pub fn declared_host_network(files: &dyn HostFiles) -> Option<HostNetwork> {
+    parse_declared_network(&files.read(VMNET_PLIST_PATH).ok()?)
 }
 
 fn plist_string(text: &str, key: &str) -> Option<String> {
@@ -275,6 +281,32 @@ pub async fn observe_host_network(
             "the active VZ shared network did not appear",
         )
     }))
+}
+
+/// The network a guest boots onto: the live bridge when one exists, and otherwise the declaration vmnet will create it from — the first static guest is the one that creates the bridge, so waiting for it can only time out.
+pub async fn host_network_for_boot(
+    source: &dyn HostNetworkSource,
+    files: &dyn HostFiles,
+    attempts: usize,
+    retry: std::time::Duration,
+) -> std::io::Result<HostNetwork> {
+    let live = observe_host_network(source, 1, retry).await;
+    if live.is_ok() {
+        return live;
+    }
+    if let Some(declared) = declared_host_network(files) {
+        return Ok(declared);
+    }
+    observe_host_network(source, attempts, retry)
+        .await
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "the shared network is neither active nor declared in {VMNET_PLIST_PATH}: {error}"
+                ),
+            )
+        })
 }
 
 /// An unreadable lease file is not an empty one: with no record to read, every candidate has to come from ARP and the reservation table.
@@ -450,54 +482,109 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn unrelated_plist_subnets_cannot_be_combined_into_an_active_network() {
-        let plist = "<dict><key>net_address</key><string>10.0.0.0</string><key>net_mask</key><string>255.255.255.0</string></dict><dict><key>net_address</key><string>172.16.0.0</string><key>net_mask</key><string>255.255.0.0</string></dict>";
+    struct AbsentBridge;
+    impl HostNetworkSource for AbsentBridge {
+        fn observe(&self) -> std::io::Result<String> {
+            Err(std::io::Error::other("ifconfig bridge100 exited with 1"))
+        }
+    }
+
+    const DECLARED: &str = "<plist><dict>
+            <key>Shared_Net_Address</key><string>192.168.66.1</string>
+            <key>Shared_Net_Mask</key><string>255.255.255.0</string>
+            </dict></plist>";
+
+    #[tokio::test]
+    async fn the_first_static_boot_reads_the_declared_network_the_bridge_has_not_been_created_from_yet()
+     {
+        let files = FakeHostFiles::new().with(VMNET_PLIST_PATH, DECLARED);
+        let started = std::time::Instant::now();
+        let network = host_network_for_boot(
+            &AbsentBridge,
+            &files,
+            20,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("the shared network is declared even before vmnet creates bridge100");
         assert_eq!(
-            parse_bootpd_network(plist),
-            None,
-            "global key splitting cannot identify which Internet Sharing subnet belongs to VZ"
+            network,
+            HostNetwork {
+                network: Ipv4Addr::new(192, 168, 66, 0),
+                prefix_len: 24,
+                gateway: Ipv4Addr::new(192, 168, 66, 1),
+            },
+            "the declared host address is the gateway, and it is read, not inferred"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "the first guest is the one that creates bridge100, so waiting for it can only time out"
         );
     }
 
-    #[test]
-    fn the_plist_moves_the_network_when_the_host_has_one_of_its_own() {
-        let plist = "<plist><dict><key>Subnets</key><array><dict>
-            <key>net_address</key><string>10.37.129.0</string>
-            <key>net_mask</key><string>255.255.255.0</string>
-            </dict></array></dict></plist>";
+    #[tokio::test]
+    async fn a_live_bridge_outranks_the_declaration_it_was_created_from() {
+        struct Live;
+        impl HostNetworkSource for Live {
+            fn observe(&self) -> std::io::Result<String> {
+                Ok("bridge100: flags=8863\n\tinet 10.37.129.7 netmask 0xffffff00\n".into())
+            }
+        }
+        let files = FakeHostFiles::new().with(VMNET_PLIST_PATH, DECLARED);
         assert_eq!(
-            parse_bootpd_network(plist).expect("valid plist fixture"),
+            host_network_for_boot(&Live, &files, 1, std::time::Duration::ZERO)
+                .await
+                .expect("an active network is observable")
+                .gateway,
+            Ipv4Addr::new(10, 37, 129, 7),
+            "a declaration edited after the network came up is not what the guest would reach"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_that_neither_runs_nor_declares_a_shared_network_says_so() {
+        let error = host_network_for_boot(
+            &AbsentBridge,
+            &FakeHostFiles::new(),
+            2,
+            std::time::Duration::from_millis(250),
+        )
+        .await
+        .expect_err("no network is not the default network");
+        let rendered = error.to_string();
+        assert!(rendered.contains(VMNET_PLIST_PATH), "{rendered}");
+        assert!(rendered.contains("ifconfig bridge100"), "{rendered}");
+    }
+
+    #[test]
+    fn a_declaration_that_cannot_be_read_whole_names_no_network() {
+        for text in [
+            "<plist><dict></dict></plist>",
+            "<plist><key>Shared_Net_Address</key><string>nonsense</string><key>Shared_Net_Mask</key><string>255.255.255.0</string></plist>",
+            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string></plist>",
+            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key><string>255.0.255.0</string></plist>",
+            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key><string>255.255.255.254</string></plist>",
+            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key>",
+            "<plist><key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key><string>255.255.255.0",
+            "<key>Shared_Net_Address</key><string>10.0.0.1</string><key>Shared_Net_Mask</key><string>255.255.255.0</string><key>Shared_Net_Address</key><string>172.16.0.1</string><key>Shared_Net_Mask</key><string>255.255.0.0</string>",
+        ] {
+            assert_eq!(parse_declared_network(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_declared_network_moves_when_the_host_moves_its_shared_subnet() {
+        let plist = "<plist><dict>
+            <key>Shared_Net_Address</key><string>10.37.129.1</string>
+            <key>Shared_Net_Mask</key><string>255.255.255.0</string>
+            </dict></plist>";
+        assert_eq!(
+            parse_declared_network(plist).expect("valid declaration"),
             HostNetwork {
                 network: Ipv4Addr::new(10, 37, 129, 0),
                 prefix_len: 24,
                 gateway: Ipv4Addr::new(10, 37, 129, 1),
             }
-        );
-    }
-
-    #[test]
-    fn malformed_plist_does_not_invent_a_network() {
-        for text in [
-            "<plist><dict></dict></plist>",
-            "<plist><key>net_address</key><string>nonsense</string><key>net_mask</key><string>255.255.255.0</string></plist>",
-            "<plist><key>net_address</key><string>10.0.0.0</string></plist>",
-            "<plist><key>net_address</key><string>10.0.0.0</string><key>net_mask</key><string>255.0.255.0</string></plist>",
-            "<plist><key>net_address</key><string>10.0.0.0</string><key>net_mask</key><string>255.255.255.254</string></plist>",
-            "<plist><key>net_address</key><string>10.0.0.0</string><key>net_mask</key>",
-            "<plist><key>net_address</key><string>10.0.0.0</string><key>net_mask</key><string>255.255.255.0",
-        ] {
-            assert_eq!(parse_bootpd_network(text), None, "{text}");
-        }
-    }
-
-    #[test]
-    fn a_host_address_inside_the_subnet_still_names_the_subnet_it_belongs_to() {
-        let plist = "<key>net_address</key><string>192.168.64.1</string><key>net_mask</key><string>255.255.255.0</string>";
-        assert_eq!(
-            parse_bootpd_network(plist),
-            Some(HostNetwork::default()),
-            "bootpd names the router's own address in some configurations"
         );
     }
 
