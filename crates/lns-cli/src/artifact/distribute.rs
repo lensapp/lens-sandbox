@@ -30,12 +30,12 @@ pub trait Producer {
         tag: &'a str,
     ) -> LocalBoxFuture<'a, Result<Option<lns_artifact::image_index::IndexEntry>>>;
 
-    /// The digest of the index this reference's document names today, so a push that adds no entry still repairs an index another push left behind (§6.2).
+    /// The index this reference's document names today, so a push adds its entry to what that index holds and still repairs one another push left behind (§6.2).
     fn index_at<'a>(
         &'a self,
         repository: &'a str,
         tag: &'a str,
-    ) -> LocalBoxFuture<'a, Result<Option<String>>>;
+    ) -> LocalBoxFuture<'a, Result<Option<lns_artifact::image_index::HeldIndex>>>;
 
     /// Upload the assembled image index, which is what the published document names by digest.
     fn push_index<'a>(
@@ -461,16 +461,19 @@ fn entry_of(image: &lns_ipc::PushableImage) -> lns_artifact::image_index::IndexE
     }
 }
 
-/// What this reference already publishes, read one architecture at a time: the per-architecture tags are the record the index is derived from, so no push has to trust an index another push wrote (§6).
+/// What this reference already publishes: the entries the index tag holds today, then the per-architecture tags, which are the record this lns keeps and so decide their own platforms. An entry for a platform this lns does not build survives, because a newer lns published it and an older one must not drop it (§6.2).
 async fn held_entries<P>(
     producer: &P,
     repository: &str,
     artifact_tag: &str,
+    published: Option<&lns_artifact::image_index::HeldIndex>,
 ) -> Result<Vec<lns_artifact::image_index::IndexEntry>>
 where
     P: Producer + ?Sized,
 {
-    let mut held = Vec::new();
+    let mut held = published
+        .map(|index| index.entries.clone())
+        .unwrap_or_default();
     for architecture in lns_artifact::image_index::ARCHITECTURES {
         let tag = lns_artifact::image_index::architecture_tag(
             artifact_tag,
@@ -481,7 +484,9 @@ where
             .image_at(repository, &tag)
             .await
             .with_context(|| format!("reading what {repository}:{tag} holds"))?;
-        held.extend(entry);
+        if let Some(entry) = entry {
+            held = lns_artifact::image_index::with_entry(&held, entry);
+        }
     }
     Ok(lns_artifact::image_index::in_index_order(held))
 }
@@ -521,12 +526,13 @@ where
     refuse_an_image_over(limit, &image)?;
     let repository = super::mixin_plan::repository_of(reference);
     let artifact_tag = lns_artifact::image_index::tag_of(reference);
-    let held = held_entries(producer, repository, artifact_tag).await?;
+    let index_tag = lns_artifact::image_index::index_tag(artifact_tag);
+    let names_today = producer.index_at(repository, &index_tag).await?;
+    let held = held_entries(producer, repository, artifact_tag, names_today.as_ref()).await?;
     let mine = entry_of(&image);
     let entries = lns_artifact::image_index::with_entry(&held, mine.clone());
     let index = lns_artifact::image_index::assemble(&entries)?;
     let published = format!("{repository}@{}", index.digest);
-    let index_tag = lns_artifact::image_index::index_tag(artifact_tag);
     if held == entries {
         writeln!(
             out,
@@ -548,7 +554,7 @@ where
         )?;
     }
     // The entries are the record and the index is derived from them, so an index that is not the one they assemble to is republished even where this push added no entry.
-    if producer.index_at(repository, &index_tag).await? != Some(index.digest.clone()) {
+    if names_today.map(|held| held.digest).as_ref() != Some(&index.digest) {
         producer
             .push_index(repository, &index_tag, &index.bytes)
             .await
@@ -616,7 +622,9 @@ where
     writeln!(out, "key {}", planned.key)?;
     let repository = super::mixin_plan::repository_of(reference);
     let artifact_tag = lns_artifact::image_index::tag_of(reference);
-    let held = held_entries(producer, repository, artifact_tag).await?;
+    let index_tag = lns_artifact::image_index::index_tag(artifact_tag);
+    let names_today = producer.index_at(repository, &index_tag).await?;
+    let held = held_entries(producer, repository, artifact_tag, names_today.as_ref()).await?;
     writeln!(
         out,
         "the index holds {}",
@@ -1090,8 +1098,8 @@ mod tests {
         /// What the registry holds under each per-architecture image tag, which is what a push assembles its index over.
         held: RefCell<std::collections::HashMap<String, lns_artifact::image_index::IndexEntry>>,
         indexes: RefCell<Vec<(String, Vec<u8>)>>,
-        /// The digest the index tag names today, which decides whether a push that adds no entry still has an index to repair.
-        published_indexes: RefCell<std::collections::HashMap<String, String>>,
+        /// The index bytes each index tag names today: what a push seeds its entries from, and what decides whether a push that adds no entry still has an index to repair.
+        published_indexes: RefCell<std::collections::HashMap<String, Vec<u8>>>,
         index_failure: Option<String>,
         read_failure: Option<String>,
     }
@@ -1127,16 +1135,32 @@ mod tests {
                 "ghcr.io/team/hermes:1.4.0-image".to_string(),
                 lns_artifact::image_index::assemble(&entries)
                     .expect("assembling")
-                    .digest,
+                    .bytes,
             );
             self
         }
 
         /// A repository whose index tag was left behind by a push that could not see every entry — the race §6.2 names.
         fn with_a_stale_index(self) -> Self {
+            self.publishing_an_index_over(&[lns_artifact::image_index::IndexEntry {
+                digest: format!("sha256:{}", "1a".repeat(32)),
+                size: 2,
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                os: lns_artifact::image_index::OS.to_string(),
+                architecture: "amd64".to_string(),
+            }])
+        }
+
+        /// A repository whose index tag names exactly these entries, whoever wrote them — which is how an entry no tag of this lns owns is found.
+        fn publishing_an_index_over(
+            self,
+            entries: &[lns_artifact::image_index::IndexEntry],
+        ) -> Self {
             self.published_indexes.borrow_mut().insert(
                 "ghcr.io/team/hermes:1.4.0-image".to_string(),
-                "sha256:stale".to_string(),
+                lns_artifact::image_index::assemble(entries)
+                    .expect("assembling")
+                    .bytes,
             );
             self
         }
@@ -1229,13 +1253,18 @@ mod tests {
             &'a self,
             repository: &'a str,
             tag: &'a str,
-        ) -> LocalBoxFuture<'a, Result<Option<String>>> {
-            let held = self
+        ) -> LocalBoxFuture<'a, Result<Option<lns_artifact::image_index::HeldIndex>>> {
+            let bytes = self
                 .published_indexes
                 .borrow()
                 .get(&format!("{repository}:{tag}"))
                 .cloned();
-            Box::pin(async move { Ok(held) })
+            Box::pin(async move {
+                match bytes {
+                    Some(bytes) => lns_artifact::image_index::held(&bytes),
+                    None => Ok(None),
+                }
+            })
         }
 
         fn push_index<'a>(
@@ -1250,14 +1279,9 @@ mod tests {
             self.indexes
                 .borrow_mut()
                 .push((format!("{repository}:{tag}"), index.to_vec()));
-            self.published_indexes.borrow_mut().insert(
-                format!("{repository}:{tag}"),
-                lns_artifact::image_index::assemble(
-                    &lns_artifact::image_index::parse(index).expect("an index this push assembled"),
-                )
-                .expect("assembling")
-                .digest,
-            );
+            self.published_indexes
+                .borrow_mut()
+                .insert(format!("{repository}:{tag}"), index.to_vec());
             Box::pin(async move { Ok(()) })
         }
     }
@@ -2224,6 +2248,42 @@ mod tests {
             producer.published()["spec"]["image"],
             format!("ghcr.io/team/hermes@{}", index.digest),
             "a document must never name an index the registry does not hold"
+        );
+    }
+
+    /// §6.2: a newer lns can publish an architecture this one does not build, and the tags this one reads say nothing about it, so the index it holds is where the entry survives.
+    #[tokio::test]
+    async fn an_entry_for_a_platform_this_lns_does_not_build_survives_the_next_push() {
+        let foreign = lns_artifact::image_index::IndexEntry {
+            digest: format!("sha256:{}", "1f".repeat(32)),
+            size: 2,
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            os: lns_artifact::image_index::OS.to_string(),
+            architecture: "riscv64".to_string(),
+        };
+        let producer = FakeProducer::ok().publishing_an_index_over(std::slice::from_ref(&foreign));
+        let mut out = Vec::new();
+        push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:base", 10)]),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let published = producer.published_index();
+        assert!(
+            published.contains(&foreign),
+            "an older lns must not drop what a newer one published: {published:?}"
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("linux/riscv64") && text.contains("linux/arm64"),
+            "the publisher sees every architecture the index now holds: {text}"
         );
     }
 

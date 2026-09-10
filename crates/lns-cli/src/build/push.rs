@@ -172,8 +172,11 @@ pub(crate) async fn image_at(
     }))
 }
 
-/// The digest of the index one reference's document names today, or nothing where no push has written one yet.
-pub(crate) async fn index_at(repository: &str, tag: &str) -> Result<Option<String>> {
+/// The index one reference's document names today, as the registry served it, or nothing where no push has written one yet.
+pub(crate) async fn index_at(
+    repository: &str,
+    tag: &str,
+) -> Result<Option<lns_artifact::image_index::HeldIndex>> {
     let target = format!("{repository}:{tag}");
     let reference: Reference = target
         .parse()
@@ -191,7 +194,8 @@ pub(crate) async fn index_at(repository: &str, tag: &str) -> Result<Option<Strin
         )
         .await
     {
-        Ok((_, digest)) => Ok(Some(digest)),
+        Ok((bytes, _)) => lns_artifact::image_index::held(&bytes)
+            .with_context(|| format!("reading the image index at {target}")),
         Err(error) => nothing_or_error(&target, error),
     }
 }
