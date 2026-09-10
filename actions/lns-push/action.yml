@@ -1,0 +1,111 @@
+# lns-actions 0.1.0 # x-release-please-version
+name: lns push
+description: >-
+  Validates an lns document, dry-runs the push into the job summary, and
+  publishes it under every tag given. A tag without a namespace is refused —
+  nothing here assumes one.
+
+inputs:
+  file:
+    description: Document to publish, e.g. mixins/gh/gh.yaml.
+    required: true
+  tags:
+    description: >-
+      References to publish, one per line (commas also separate). Each is
+      `<namespace>/<name>:<tag>` or `<host>/<namespace>/<name>:<tag>`, and all
+      of them name the same repository, differing only in the tag.
+    required: true
+  push:
+    description: Publish, or stop after the dry run. `true` or `false`.
+    required: false
+    default: "true"
+  kind:
+    description: >-
+      Kind the document must be (`sandbox` or `mixin`). Empty accepts either.
+    required: false
+    default: ""
+  require-exact-tool-versions:
+    description: >-
+      Fail when the dry run reports tool versions that resolve at push time,
+      so a published document pins what a consumer will install.
+    required: false
+    default: "true"
+
+outputs:
+  digest:
+    description: Manifest digest published, e.g. sha256:… (empty on a dry run).
+    value: ${{ steps.push.outputs.digest }}
+  refs:
+    description: Every reference pushed, one per line (empty on a dry run).
+    value: ${{ steps.push.outputs.refs }}
+  first-push:
+    description: >-
+      `true` when the repository did not exist before this push.
+    value: ${{ steps.push.outputs.first-push }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read the inputs
+      id: tags
+      shell: bash
+      env:
+        INPUT_TAGS: ${{ inputs.tags }}
+        INPUT_EXACT_TOOLS: ${{ inputs.require-exact-tool-versions }}
+        INPUT_PUSH: ${{ inputs.push }}
+      run: bash "$GITHUB_ACTION_PATH/../lib/push-inputs.sh"
+
+    - name: Validate the document
+      shell: bash
+      env:
+        INPUT_FILE: ${{ inputs.file }}
+        INPUT_KIND: ${{ inputs.kind }}
+      run: |
+        set -euo pipefail
+        if [ -n "$INPUT_KIND" ]; then
+          lns artifact validate -f "$INPUT_FILE" --kind "$INPUT_KIND"
+        else
+          lns artifact validate -f "$INPUT_FILE"
+        fi
+
+    - name: Dry run
+      shell: bash
+      env:
+        INPUT_FILE: ${{ inputs.file }}
+        INPUT_EXACT_TOOLS: ${{ steps.tags.outputs.exact-tools }}
+        FIRST_TAG: ${{ steps.tags.outputs.first }}
+      run: |
+        set -euo pipefail
+
+        set +e
+        output=$(lns artifact push "$FIRST_TAG" -f "$INPUT_FILE" --dry-run --yes 2>&1)
+        status=$?
+        set -e
+        printf '%s\n' "$output"
+        {
+          echo "### lns-push dry run — \`$FIRST_TAG\`"
+          echo
+          echo '```'
+          printf '%s\n' "$output"
+          echo '```'
+        } >>"$GITHUB_STEP_SUMMARY"
+        if [ "$status" -ne 0 ]; then
+          echo "::error::the dry run refused this document; nothing was pushed."
+          exit "$status"
+        fi
+        if [ "$INPUT_EXACT_TOOLS" = true ] &&
+          printf '%s\n' "$output" | grep -q 'resolve at push time'; then
+          echo "::error::the dry run reports tool versions that resolve at push time; pin them in the document, or set require-exact-tool-versions: false."
+          exit 1
+        fi
+
+    - name: Push
+      id: push
+      if: steps.tags.outputs.push == 'true'
+      shell: bash
+      env:
+        INPUT_FILE: ${{ inputs.file }}
+        TAGS_FILE: ${{ steps.tags.outputs.file }}
+        REGISTRY_HOST: ${{ steps.tags.outputs.host }}
+        REPOSITORY: ${{ steps.tags.outputs.repository }}
+      run: bash "$GITHUB_ACTION_PATH/../lib/push-publish.sh"

@@ -1,0 +1,37 @@
+# lns-actions 0.1.0 # x-release-please-version
+name: lns login
+description: >-
+  Stores a hub credential for `lns artifact push` and `lns run`. Calls
+  `lns login --password-stdin`, and writes ~/.lns/registry-auth.json itself
+  only when the runner has no lns-service. Other hosts are left untouched.
+
+inputs:
+  registry:
+    description: Registry host to log in to, a bare host[:port].
+    required: false
+    default: hub.lns.run
+  username:
+    description: Username the token belongs to.
+    required: true
+  password:
+    description: >-
+      Password or token. Pass a secret, never a literal — it is masked before
+      it is used and reaches the script through the environment, never argv.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Mask the token
+      shell: bash
+      env:
+        LNS_ACTION_SECRET: ${{ inputs.password }}
+      run: bash "$GITHUB_ACTION_PATH/../lib/mask-secret.sh"
+
+    - name: Log in
+      shell: bash
+      env:
+        LNS_ACTION_REGISTRY: ${{ inputs.registry }}
+        LNS_ACTION_USERNAME: ${{ inputs.username }}
+        LNS_ACTION_PASSWORD: ${{ inputs.password }}
+      run: bash "$GITHUB_ACTION_PATH/../lib/registry-auth.sh" add

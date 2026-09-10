@@ -1,0 +1,107 @@
+# lns-actions 0.1.0 # x-release-please-version
+name: Set up lns
+description: >-
+  Installs the lns CLI from this repository's releases: downloads the tarball
+  for the runner's platform, verifies the .sha256 published beside it, extracts
+  only `lns` into the runner tool cache and appends it to PATH. It never runs
+  the get.lns.run installer and never installs lns-service.
+
+inputs:
+  version:
+    description: >-
+      lns release to install, e.g. 0.25.0 (a leading `v` is accepted).
+      `latest`, the default, resolves the newest published lns release.
+    required: false
+    default: latest
+  token:
+    description: >-
+      Token used to read the release and download its assets.
+    required: false
+    default: ${{ github.token }}
+  binary:
+    description: >-
+      Path to an already built `lns`. When set, nothing is downloaded and this
+      binary is installed instead — for testing a pull request's own build.
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: The lns version on PATH after this action ran.
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install lns
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_BINARY: ${{ inputs.binary }}
+        GH_TOKEN: ${{ inputs.token }}
+        RELEASE_REPO: ${{ github.action_repository || 'lensapp/lens-sandbox' }}
+      run: |
+        set -euo pipefail
+
+        case "$(uname -s)" in
+          Linux)  os=linux ;;
+          Darwin) os=darwin ;;
+          *) echo "::error::setup-lns supports Linux and macOS runners, not $(uname -s)."; exit 1 ;;
+        esac
+        case "$(uname -m)" in
+          x86_64|amd64)  arch=x86_64 ;;
+          aarch64|arm64) arch=aarch64 ;;
+          *) echo "::error::setup-lns supports x86_64 and aarch64, not $(uname -m)."; exit 1 ;;
+        esac
+        if [ "$os" = darwin ] && [ "$arch" != aarch64 ]; then
+          echo "::error::lns publishes macOS builds for arm64 only."
+          exit 1
+        fi
+
+        if [ -n "$INPUT_BINARY" ]; then
+          if [ ! -x "$INPUT_BINARY" ]; then
+            echo "::error::binary input '$INPUT_BINARY' is not an executable file."
+            exit 1
+          fi
+          version=$("$INPUT_BINARY" --version | awk '{print $NF}')
+          dest="$RUNNER_TOOL_CACHE/lns/$version-local/$arch"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          install -m 0755 "$INPUT_BINARY" "$dest/lns"
+        else
+          requested="${INPUT_VERSION:-latest}"
+          if [ "$requested" = latest ]; then
+            releases=$(gh api "repos/$RELEASE_REPO/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+            tag=$(printf '%s\n' "$releases" | grep -m1 '^lns-v[0-9]' || true)
+            if [ -z "$tag" ]; then
+              echo "::error::no published lns release found in $RELEASE_REPO."
+              exit 1
+            fi
+          else
+            tag="lns-v${requested#v}"
+          fi
+          version="${tag#lns-v}"
+
+          dest="$RUNNER_TOOL_CACHE/lns/$version/$arch"
+          if [ ! -x "$dest/lns" ]; then
+            asset="lns-$version-$os-$arch.tar.gz"
+            tmp=$(mktemp -d)
+            gh release download "$tag" --repo "$RELEASE_REPO" --dir "$tmp" \
+              --pattern "$asset" --pattern "$asset.sha256"
+            if [ "$os" = linux ]; then
+              (cd "$tmp" && sha256sum -c "$asset.sha256")
+            else
+              (cd "$tmp" && shasum -a 256 -c "$asset.sha256")
+            fi
+            mkdir -p "$dest"
+            tar xzf "$tmp/$asset" -C "$dest" lns
+            chmod +x "$dest/lns"
+            rm -rf "$tmp"
+          fi
+        fi
+
+        echo "$dest" >> "$GITHUB_PATH"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "lns $version installed at $dest/lns"
