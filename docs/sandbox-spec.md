@@ -2279,7 +2279,7 @@ runs exactly what the author tested:
 | Surface | Transform |
 |---|---|
 | `filesets[].path` | The directory is packed into a layer of this artifact. The entry keeps its `path` and `guestPath`; the content is now part of the artifact's digest. |
-| `image` naming a Containerfile | The Containerfile and its context are built, the built image publishes beside this artifact — the same repository, so one grant and one visibility setting cover both — and `image` is rewritten to that image's digest reference. `imageSource` keeps the path the author wrote, and the Containerfile with its context packs into a layer ([§7.3](#73-the-build-source-layer)), so what the guest starts from is disclosed with the rest of the document. A built image over the machine's limit — 4 GiB unless the machine says otherwise — fails the push, naming the layer that grew it and the instruction that wrote it, the way a fileset over its limit fails validate. |
+| `image` naming a Containerfile | The Containerfile and its context are built, the built image publishes beside this artifact — the same repository, so one grant and one visibility setting cover both — and `image` is rewritten to the digest of the image index that holds it ([§6.2](#62-one-image-index-per-published-document)). `imageSource` keeps the path the author wrote, and the Containerfile with its context packs into a layer ([§7.3](#73-the-build-source-layer)), so what the guest starts from is disclosed with the rest of the document. A built image over the machine's limit — 4 GiB unless the machine says otherwise — fails the push, naming the layer that grew it and the instruction that wrote it, the way a fileset over its limit fails validate. |
 | `tools[]` | A fuzzy version (`node@22`, `python@latest`) is resolved against the tool's public version index and rewritten exact. |
 | `mixins[]` local entry | The document it names publishes first, as its own artifact, and the entry is rewritten to that artifact's digest ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)). A digest-pinned entry publishes untouched. |
 | `README.md` | A `README.md` beside the document is packed into a `text/markdown` layer of this artifact ([§7.2](#72-the-readme-layer)). No file, no layer; the document itself never carries it. |
@@ -2356,6 +2356,50 @@ there is impossible.
 The author keeps a working directory they can edit, and the consumer gets a graph
 they can resolve. Startup resolution is unaffected: the consumer's run pulls each
 pinned mixin and merges it exactly as [§1.5](#15-one-disclosure) describes.
+
+---
+
+### 6.2 One image index per published document
+
+A build runs on the architecture of the host that runs it ([§3.1.1](#311-image)).
+A team on mixed hardware therefore publishes one document from more than one
+host, and the second push MUST add to what the first published rather than take
+its place.
+
+Three names decide it, all derived from the `<REF>` the author typed:
+
+| What | Tag | Written by |
+|---|---|---|
+| One architecture's image manifest | `<TAG>-image-<OS>-<ARCH>` | Only a push running on that architecture. |
+| The image index over every architecture | `<TAG>-image` | Every push. |
+| The document itself | `<TAG>` | Every push. |
+
+A push reads the per-architecture tags, adds or replaces the entry for the
+architecture it built, assembles an OCI image index
+(`application/vnd.oci.image.index.v1+json`) over every entry it found plus its
+own, publishes it, and rewrites `image` to that index's digest. The
+per-architecture tags are the record; the index is derived from them, so an
+index a push never sees costs nothing and a later push from either architecture
+re-derives the whole set. Assembly is by platform order, so the same set of
+entries is always the same bytes and the same digest.
+
+A push whose architecture the index already holds with the same manifest digest
+publishes nothing and says so.
+
+**What the registry guarantees, and what it does not.** A manifest `PUT` is
+atomic and a tag names one manifest at a time, so no architecture can corrupt
+another's tag. The distribution API offers no compare-and-swap on a tag, so two
+pushes from different architectures that overlap may each assemble an index
+without the other's entry, and the document published last may name an index
+missing one. Nothing is lost: each architecture's manifest stays under the tag
+it owns, and the next push from either host publishes an index holding both.
+
+**A pull selects by platform.** A consumer pulls the index the document names
+and boots the entry whose platform is the host's, by digest. An index holding no
+entry for the host is refused before anything boots, naming the architectures the
+index does hold and the command that would add this one — `lns push` for that
+document, run on a host of this architecture, because the build happens where the
+push runs.
 
 ---
 
