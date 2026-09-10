@@ -77,7 +77,7 @@ struct MenuContent: View {
 
 @MainActor
 final class ApprovalPanel: NSPanel {
-    private var presented: Set<String> = []
+    private var presentation = ApprovalPresentation()
 
     init(model: AppModel) {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
@@ -96,10 +96,11 @@ final class ApprovalPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     func update(_ snapshot: ApprovalSnapshot) {
-        let current = Set(snapshot.approvals.map(\.id))
-        defer { presented = current }
-        if current.isEmpty { orderOut(nil); return }
-        guard !current.subtracting(presented).isEmpty else { return }
+        switch presentation.update(snapshot) {
+        case .hide: orderOut(nil); return
+        case .unchanged: return
+        case .show: break
+        }
         let pointer = NSEvent.mouseLocation
         if let screen = NSScreen.screens.first(where: { NSMouseInRect(pointer, $0.frame, false) }) ?? NSScreen.main {
             let bounds = screen.visibleFrame
