@@ -268,6 +268,26 @@ pub fn workload_exit(ctx: &Context, exit_code: i32, killed: bool) -> Value {
     .build()
 }
 
+/// A guest that refused to start its workload: the kind and message come from the broker's own typed reason.
+pub fn broker_refusal(ctx: &Context, kind: &str, message: &str, exit_code: i32) -> Value {
+    Event::new(
+        kind,
+        class::PROCESS_ACTIVITY,
+        category::SYSTEM,
+        activity::PROCESS_TERMINATE,
+        severity::MEDIUM,
+        ctx,
+    )
+    .set("message", message.into())
+    .set("process", json!({"uid": ctx.run, "name": "session-broker"}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .set_status(status::FAILURE)
+    .note("lns_origin", "guest".into())
+    .note("lns_exit_code", exit_code.into())
+    .build()
+}
+
 pub fn workload_restart(ctx: &Context, image: &str) -> Value {
     Event::new(
         "restart",
@@ -799,6 +819,40 @@ mod tests {
         assert_eq!(ev["unmapped"]["lns_killed"], true);
         let graceful = workload_exit(&ctx(), 0, false);
         assert_eq!(graceful["message"], "workload exited with code 0");
+    }
+
+    #[test]
+    fn a_broker_refusal_records_a_failed_boot_instead_of_a_workload_exit() {
+        let ev = broker_refusal(
+            &ctx(),
+            "no_dhcp_lease",
+            "the guest got no address from the host DHCP server",
+            125,
+        );
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1007);
+        assert_eq!(ev["activity_id"], 2);
+        assert_eq!(ev["status_id"], 2);
+        assert_eq!(ev["unmapped"]["lns_kind"], "no_dhcp_lease");
+        assert_eq!(ev["unmapped"]["lns_exit_code"], 125);
+    }
+
+    #[test]
+    fn a_refusal_keeps_the_underlying_error_in_the_message() {
+        let ev = broker_refusal(
+            &ctx(),
+            "network_setup_failed",
+            "the guest could not set up its network: `ip link set eth0 up` exited with 1",
+            1,
+        );
+        assert_schema_valid(&ev);
+        assert_eq!(ev["class_uid"], 1007);
+        assert_eq!(ev["status_id"], 2);
+        assert_eq!(ev["unmapped"]["lns_kind"], "network_setup_failed");
+        assert_eq!(
+            ev["message"],
+            "the guest could not set up its network: `ip link set eth0 up` exited with 1"
+        );
     }
 
     #[test]

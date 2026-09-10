@@ -1048,6 +1048,78 @@ every run publishes it — no flag opts in:
 - Explicit `-p` entries combine with the declared set; on a container-port
   conflict the explicit `-p` wins.
 
+### How a guest gets its address (macOS)
+
+By default a guest asks the shared macOS network for an address over DHCP, and
+nothing about that has changed. If no address arrives, the run now stops with a
+named reason instead of starting a workload that cannot reach anything:
+
+```
+the guest got no address from the host DHCP server
+  remedy: let every run exit, which tears the shared network down, then start again
+```
+
+There is a second, **opt-in** path. With `LNS_STATIC_GUEST_NET=1` set in the
+environment `lns-service` starts in, the host picks the address itself and tells
+the guest over the microVM's own control channel, before anything the run asked
+for is started:
+
+```sh
+LNS_STATIC_GUEST_NET=1 lns service start
+```
+
+The guest boots with no address and no DHCP client — its kernel command line
+carries a marker and never an address — and waits. The host then, per booting
+guest:
+
+- reads the shared network's own parameters from the live `bridge100` interface.
+  That interface exists because this guest booted and attached to it, which is
+  why the host asks now rather than before starting the VM: nothing readable
+  describes the network earlier, and lns never assumes a subnet. A guest still
+  bringing the bridge up is waited for; a bridge that never appears stops the
+  run with that named;
+- excludes the network and broadcast addresses, the gateway, every unexpired
+  lease in `/var/db/dhcpd_leases`, every address answering ARP, and every
+  address already reserved for another guest. The lease file and the neighbour
+  table are read from the host first; the reservations of other guests are read
+  and the new one written under one lock, so two guests booting together cannot
+  pick the same address;
+- reserves three candidates from the top of the range, having given the guest a
+  stable hardware address derived from its run id;
+- sends those candidates, the prefix, the gateway and the resolver to the guest
+  and waits for it to report the one it took. Only then does the run's workload
+  start.
+
+This works on a cold host. Nothing is remembered between runs, no prior DHCP
+boot is needed, and no file of Apple's is read or written.
+
+If the host cannot address the guest at all — no shared network, an unreadable
+lease or neighbour table, a range with nothing free, a guest that never answers,
+or a guest that answers with an address the host does not hold for it — the run
+stops before the workload starts, prints the cause and a remedy, records one
+named failure in the audit log, and exits 125.
+
+The address the guest ends up using is printed by `lns run` as
+`Address guest assigned 192.168.64.254`, and the host then holds only that one.
+
+In the guest, the broker takes the first candidate that is silent to an ARP
+probe, announces it, and checks the gateway answers. If every candidate is
+taken, or the gateway does not answer, it reports that named reason back and the
+run stops — it never falls back to DHCP, so a guest is never quietly addressed
+by someone else.
+
+**The limitation you are opting into.** macOS 15 offers no way to tell Apple's
+DHCP server that an address is spoken for. lns picks from the top of the range
+and Apple allocates from the bottom, which keeps them apart in practice, but a
+long-lived static guest can still be handed the same address later by Apple's
+own server. lns *detects* this — every reservation is re-read against the live
+lease file and a mismatch is logged naming the address and the other holder —
+but it cannot *prevent* it. That is why this path is off by default and why the
+default remains DHCP.
+
+Linux hosts are unaffected: their guests have no network interface at all, and
+the setting is ignored.
+
 ### Interactive, TTY, and detached sessions
 
 | Flag                  | Default | Meaning                                                              |

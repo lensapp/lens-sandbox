@@ -84,11 +84,13 @@ pub async fn handle(
     )
     .instrument(tracing::Span::current())
     .await;
+    let refusal = super::refusal_of(&result);
     let code = emit_completion(&frame_tx, result).await;
-    if let Err(e) = crate::audit::record_run_exited(
+    if let Err(e) = crate::audit::record_run_exited_with_reason(
         &finished_run_id,
         &microvm_label,
         code,
+        refusal,
         &crate::clock::RealClock,
     ) {
         log::warn!("run exit not audited: {e:#}");
@@ -498,13 +500,15 @@ async fn orchestrate(
             .and_then(|c| c.config.as_ref())
             .and_then(|c| c.user.as_deref()),
     );
+    let planned_mac = vm::guest_addr::real::planned_mac(&run_id);
     let exec = vm::ExecSpec::for_run(
         &run_as,
         args.entrypoint.as_deref(),
         &cmd,
         image.config.as_ref(),
         Some(&session),
-    );
+    )
+    .with_guest_net_bootstrap(planned_mac.is_some());
 
     #[cfg(target_os = "macos")]
     let console_fd = {
@@ -545,6 +549,7 @@ async fn orchestrate(
         console_fd,
         debug: args.debug,
         exec,
+        mac: planned_mac.clone(),
     };
 
     let initial_winsize = args
@@ -610,9 +615,10 @@ async fn orchestrate(
     let frame_tx_for_session = frame_tx.clone();
     log::progress("Booting", "microVM", 0, 0);
     let boot_start = std::time::Instant::now();
+    let (address_tx, address_rx) = tokio::sync::oneshot::channel();
     let mut vm_task = tokio::spawn(async move {
         let _volume_leases = volume_leases;
-        vm::boot(spec, None).await
+        vm::boot_with_owner(spec, None, address_rx).await
     });
 
     let connector = tokio::select! {
@@ -647,6 +653,12 @@ async fn orchestrate(
         exec_environment,
     );
     let _vm_stop_guard = vm::VmStopGuard::new(connector.clone());
+
+    if let Some(mac) = &planned_mac {
+        let lease = vm::guest_addr::real::address_guest(connector.as_ref(), &run_id, mac).await?;
+        let monitor = lease.monitor();
+        let _ = address_tx.send((lease, monitor));
+    }
 
     log::progress("Connecting", "session", 0, 0);
     let connect_started = std::time::Instant::now();

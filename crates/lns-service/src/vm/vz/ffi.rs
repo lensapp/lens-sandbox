@@ -209,6 +209,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
     let upper_disk = spec.upper_disk.clone();
     let volumes = spec.volumes.clone();
     let binds = spec.binds.clone();
+    let mac = spec.mac.clone();
     let vsock = spec.vsock;
     let connector_tx = spec.connector_tx;
     let console_fd = spec.console_fd;
@@ -230,6 +231,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
             vsock: vsock.as_ref(),
             console_fd,
             cmdline: &cmdline,
+            mac: mac.as_deref(),
             cpus,
             mem_mib,
         };
@@ -269,8 +271,19 @@ struct BuildInputs<'a> {
     vsock: Option<&'a crate::vm::VsockChannel>,
     console_fd: std::os::fd::RawFd,
     cmdline: &'a str,
+    mac: Option<&'a str>,
     cpus: u8,
     mem_mib: usize,
+}
+
+/// A guest the host has reserved an address for must keep the hardware address that reservation names.
+unsafe fn guest_mac(mac: Option<&str>) -> Retained<VZMACAddress> {
+    unsafe {
+        mac.and_then(|mac| {
+            VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(mac))
+        })
+        .unwrap_or_else(|| VZMACAddress::randomLocallyAdministeredAddress())
+    }
 }
 
 fn build_and_start(
@@ -398,7 +411,7 @@ unsafe fn build_config(
         let nat = VZNATNetworkDeviceAttachment::new();
         let net = VZVirtioNetworkDeviceConfiguration::new();
         net.setAttachment(Some(&nat));
-        net.setMACAddress(&VZMACAddress::randomLocallyAdministeredAddress());
+        net.setMACAddress(&guest_mac(inputs.mac));
         let networks: Retained<NSArray<VZNetworkDeviceConfiguration>> =
             NSArray::from_retained_slice(&[Retained::cast_unchecked(net)]);
 

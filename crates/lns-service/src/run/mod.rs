@@ -11,6 +11,43 @@ mod shutdown;
 pub use orchestrator::{PreparedRun, handle, prepare};
 pub use scratch::{RealRemoveDir, RemoveDir, reclaim_run_dir};
 
+/// A run that never reached its workload, named: the broker refused the guest's network, or the host could not address the guest in the first place.
+pub struct Refusal {
+    pub reason: String,
+    pub summary: String,
+}
+
+impl Refusal {
+    fn of(error: &anyhow::Error) -> Option<Self> {
+        if let Some(refusal) = error.downcast_ref::<crate::vm::session_client::BrokerRefusal>() {
+            return Some(Self {
+                reason: refusal.reason.as_str().to_string(),
+                summary: refusal.reason.summary(),
+            });
+        }
+        if let Some(failure) = error.downcast_ref::<crate::vm::guest_addr::ReserveError>() {
+            return Some(Self {
+                reason: failure.as_str().to_string(),
+                summary: failure.to_string(),
+            });
+        }
+        match error.downcast_ref::<crate::vm::guest_addr::AddressError>()? {
+            crate::vm::guest_addr::AddressError::Reserve(failure) => Some(Self {
+                reason: failure.as_str().to_string(),
+                summary: failure.to_string(),
+            }),
+            crate::vm::guest_addr::AddressError::Refused(reason) => Some(Self {
+                reason: reason.as_str().to_string(),
+                summary: reason.summary(),
+            }),
+        }
+    }
+}
+
+pub fn refusal_of(result: &Result<i32>) -> Option<Refusal> {
+    result.as_ref().err().and_then(Refusal::of)
+}
+
 /// How a run ended: the code its workload left, whether --rm takes its state, and when.
 pub struct RunEnd {
     pub code: i32,
@@ -109,6 +146,21 @@ fn assembling_progress(span: tracing::Span) -> impl Fn(u64, u64) {
     }
 }
 
+/// A refusal is rendered from its typed reason, not from the guest's own bytes or the host's call stack: this render is CRLF-corrected and reaches a detached run's log.
+fn failure_message(error: &anyhow::Error) -> String {
+    if let Some(refusal) = error.downcast_ref::<crate::vm::session_client::BrokerRefusal>() {
+        return refusal.reason.explain();
+    }
+    if let Some(failure) = error.downcast_ref::<crate::vm::guest_addr::ReserveError>() {
+        return failure.explain();
+    }
+    match error.downcast_ref::<crate::vm::guest_addr::AddressError>() {
+        Some(crate::vm::guest_addr::AddressError::Reserve(failure)) => failure.explain(),
+        Some(crate::vm::guest_addr::AddressError::Refused(reason)) => reason.explain(),
+        None => format!("{error:#}"),
+    }
+}
+
 pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result<i32>) -> i32 {
     let code = match result {
         Ok(code) => {
@@ -124,14 +176,15 @@ pub(super) async fn emit_completion(frame_tx: &Sender<WireFrame>, result: Result
             code
         }
         Err(e) => {
+            let code = if Refusal::of(&e).is_some() { 125 } else { 1 };
             let _ = frame_tx
                 .send(WireFrame::Json(Response::RunLog {
                     level: lns_ipc::LogLevel::Error,
                     verb: None,
-                    message: format!("{e:#}"),
+                    message: failure_message(&e),
                 }))
                 .await;
-            1
+            code
         }
     };
     let _ = frame_tx
@@ -583,6 +636,130 @@ mod tests {
             Some(WireFrame::Json(Response::RunExit { code: 1 })) => {}
             other => panic!("expected RunExit{{1}}, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_host_that_cannot_address_the_guest_fails_before_the_workload_not_as_one() {
+        use crate::vm::guest_addr::{AllocError, ReserveError};
+
+        let exhausted = Err(
+            anyhow::Error::new(ReserveError::Alloc(AllocError::Exhausted {
+                network: crate::vm::host_net::HostNetwork::default(),
+            }))
+            .context("reserving an address on the host network for this guest"),
+        );
+        assert_eq!(
+            refusal_of(&exhausted)
+                .expect("the run never reached a workload")
+                .reason,
+            "host_addresses_exhausted",
+            "the audit gets a named host failure, not a workload exit"
+        );
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        let code = emit_completion(&tx, exhausted).await;
+        assert_eq!(code, 125, "lns failed before the workload started");
+        let refusal = format!("{:?}", rx.recv().await);
+        assert!(refusal.contains("level: Error"), "{refusal}");
+        assert!(refusal.contains("192.168.64.0/24"), "{refusal}");
+        assert!(refusal.contains("remedy:"), "{refusal}");
+        assert!(!refusal.contains("reserving an address"), "{refusal}");
+
+        let undiscoverable = Err(
+            anyhow::Error::new(ReserveError::Network(std::io::Error::other(
+                "the shared network is neither active nor declared",
+            )))
+            .context("reserving an address on the host network for the tool provisioner"),
+        );
+        assert_eq!(
+            refusal_of(&undiscoverable).expect("no guest booted").reason,
+            "host_network_undiscoverable"
+        );
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        assert_eq!(emit_completion(&tx, undiscoverable).await, 125);
+        let undiscoverable = format!("{:?}", rx.recv().await);
+        let said = undiscoverable.contains("neither active nor declared");
+        assert!(said, "{undiscoverable}");
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_refuses_its_plan_ends_the_run_with_its_own_reason_not_a_workload_code() {
+        use crate::vm::guest_addr::AddressError;
+
+        let refused = Err(anyhow::Error::new(AddressError::Refused(
+            lns_session::BrokerExitReason::NoStaticAddress {
+                offered: vec!["192.168.64.254".into()],
+            },
+        )));
+        assert_eq!(
+            refusal_of(&refused).expect("no workload ran").reason,
+            "no_static_address",
+            "the guest named the failure, so the audit records the guest's name for it"
+        );
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        assert_eq!(emit_completion(&tx, refused).await, 125);
+        let rendered = format!("{:?}", rx.recv().await);
+        assert!(rendered.contains("level: Error"), "{rendered}");
+
+        let unanswered = Err(anyhow::Error::new(AddressError::Reserve(
+            crate::vm::guest_addr::ReserveError::Bootstrap(
+                crate::vm::net_bootstrap::BootstrapError::Disconnected,
+            ),
+        )));
+        assert_eq!(
+            refusal_of(&unanswered).expect("no workload ran").reason,
+            "guest_address_not_applied"
+        );
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        assert_eq!(emit_completion(&tx, unanswered).await, 125);
+        let rendered = format!("{:?}", rx.recv().await);
+        assert!(rendered.contains("remedy:"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_dhcp_refusal_is_rendered_by_the_host_and_not_as_a_workload_exit() {
+        let (tx, mut rx) = mpsc::channel::<WireFrame>(2);
+        let result = Err(
+            anyhow::Error::new(crate::vm::session_client::BrokerRefusal {
+                reason: lns_session::BrokerExitReason::NoDhcpLease,
+            })
+            .context("reading broker session frames"),
+        );
+        assert_eq!(
+            refusal_of(&result)
+                .expect("a refusal is not a workload exit")
+                .reason,
+            lns_session::BrokerExitReason::NoDhcpLease.as_str(),
+            "the service owns the stable reason shown in the audit"
+        );
+        let code = emit_completion(&tx, result).await;
+        assert_eq!(code, 125);
+        match rx.recv().await {
+            Some(WireFrame::Json(Response::RunLog { level, message, .. })) => {
+                assert!(matches!(level, lns_ipc::LogLevel::Error));
+                assert_eq!(
+                    message,
+                    lns_session::BrokerExitReason::NoDhcpLease.explain()
+                );
+                assert!(
+                    !message.contains("reading broker session frames"),
+                    "the user reads the cause and the remedy, not the host's call stack: {message}"
+                );
+            }
+            other => panic!("expected the host-rendered refusal, got {other:?}"),
+        }
+        match rx.recv().await {
+            Some(WireFrame::Json(Response::RunExit { code: reported })) => {
+                assert_eq!(reported, code)
+            }
+            other => panic!("expected the typed RunExit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_run_failure_keeps_its_whole_error_chain() {
+        let error = anyhow::anyhow!("connection refused").context("booting the microVM");
+        let message = failure_message(&error);
+        assert_eq!(message, "booting the microVM: connection refused");
     }
 
     #[test]

@@ -170,7 +170,10 @@ async fn run_provisioner(
 
     let run_as = vm::resolve_run_as(Some("0"), Some(0), None, None);
     let argv = vec!["/bin/sh".to_string(), DRIVER.to_string()];
-    let exec = vm::ExecSpec::for_run(&run_as, None, &argv, rootfs.config.as_ref(), None);
+    let provisioner_owner = format!("{scratch_id}/tools");
+    let planned_mac = vm::guest_addr::real::planned_mac(&provisioner_owner);
+    let exec = vm::ExecSpec::for_run(&run_as, None, &argv, rootfs.config.as_ref(), None)
+        .with_guest_net_bootstrap(planned_mac.is_some());
 
     #[cfg(target_os = "macos")]
     let console_fd = vm::diag_console::spawn(
@@ -212,9 +215,11 @@ async fn run_provisioner(
         console_fd,
         debug: false,
         exec,
+        mac: planned_mac.clone(),
     };
 
-    let mut vm_task = tokio::spawn(vm::boot(spec, None));
+    let (address_tx, address_rx) = tokio::sync::oneshot::channel();
+    let mut vm_task = tokio::spawn(vm::boot_with_owner(spec, None, address_rx));
     let mut connector_rx = connector_rx;
     let connector = tokio::select! {
         biased;
@@ -228,6 +233,14 @@ async fn run_provisioner(
         }
     };
     let _stop_guard = vm::VmStopGuard::new(connector.clone());
+
+    if let Some(mac) = &planned_mac {
+        let lease =
+            vm::guest_addr::real::address_guest(connector.as_ref(), &provisioner_owner, mac)
+                .await?;
+        let monitor = lease.monitor();
+        let _ = address_tx.send((lease, monitor));
+    }
 
     let env: Vec<String> = mise::provision_env()
         .into_iter()

@@ -6,6 +6,9 @@ mod cloud_hypervisor;
 mod connect;
 #[cfg(target_os = "macos")]
 pub mod diag_console;
+pub mod guest_addr;
+pub mod host_net;
+pub mod net_bootstrap;
 pub mod session_client;
 mod transport;
 #[cfg(target_os = "macos")]
@@ -37,6 +40,8 @@ pub struct VmSpec {
     pub console_fd: std::os::fd::RawFd,
     pub debug: bool,
     pub exec: ExecSpec,
+    /// Set only when the host reserved an address for this guest: a lease follows the hardware address, so it must not change under the guest.
+    pub mac: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +118,21 @@ pub struct ExecSpec {
 }
 
 impl ExecSpec {
+    /// Only a marker travels on the kernel command line: no address is known before the guest that creates the shared bridge is running, so the plan itself arrives later over the control channel.
+    pub fn with_guest_net_bootstrap(mut self, bootstrap: bool) -> Self {
+        if bootstrap {
+            self.kernel_env
+                .push((lns_session::GUEST_NET_BOOTSTRAP_ENV.into(), "1".into()));
+        }
+        self
+    }
+
+    fn egress_marker(allowed: bool) -> (String, String) {
+        (
+            lns_session::EGRESS_ALLOWED_ENV.into(),
+            u8::from(allowed).to_string(),
+        )
+    }
     pub fn server(
         image_config: Option<&oci_client::config::ConfigFile>,
         run_as: &RunAs,
@@ -120,6 +140,7 @@ impl ExecSpec {
         token: &str,
         entrypoint: Option<&str>,
         cmd: &[String],
+        egress_allowed: bool,
     ) -> Self {
         let agent_command = match image_config {
             Some(cfg) => crate::workload_argv::from_image_config(cfg, entrypoint, cmd),
@@ -142,6 +163,7 @@ impl ExecSpec {
             "AGENT_COMMAND_B64".into(),
             crate::base64::encode(agent_command.as_bytes()),
         ));
+        kernel_env.push(Self::egress_marker(egress_allowed));
         kernel_env.push((
             "PATH".into(),
             crate::workload_env::GUEST_DEFAULT_PATH.into(),
@@ -166,6 +188,8 @@ impl ExecSpec {
                     "AGENT_COMMAND_B64".into(),
                     crate::base64::encode(argv.as_bytes()),
                 ),
+                // The tool provisioner boots without a session and fetches over the network, so it refuses without a lease too.
+                Self::egress_marker(true),
                 (
                     "PATH".into(),
                     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
@@ -189,6 +213,7 @@ impl ExecSpec {
                 &s.relay.token,
                 entrypoint,
                 cmd,
+                s.egress_allowed,
             ),
             None => Self::from_image_config(image_config, entrypoint, cmd),
         }
@@ -358,9 +383,20 @@ pub fn detect_backend() -> Box<dyn VmmBackend> {
 }
 
 pub async fn boot(spec: VmSpec, backend: Option<Box<dyn VmmBackend>>) -> Result<()> {
+    boot_with_owner(spec, backend, ()).await
+}
+
+pub async fn boot_with_owner<T: Send + 'static>(
+    spec: VmSpec,
+    backend: Option<Box<dyn VmmBackend>>,
+    owner: T,
+) -> Result<()> {
     let backend = backend.unwrap_or_else(detect_backend);
     log::debug!("starting microVM via {} backend", backend.name());
-    let handle = tokio::task::spawn_blocking(move || backend.run(spec));
+    let handle = tokio::task::spawn_blocking(move || {
+        let _owner = owner;
+        backend.run(spec)
+    });
     handle.await??;
     Ok(())
 }
@@ -368,6 +404,146 @@ pub async fn boot(spec: VmSpec, backend: Option<Box<dyn VmmBackend>>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BlockingBackend {
+        started: std::sync::mpsc::Sender<()>,
+        finish: std::sync::mpsc::Receiver<Result<()>>,
+    }
+
+    impl VmmBackend for BlockingBackend {
+        fn run(&self, _spec: VmSpec) -> Result<()> {
+            self.started.send(()).expect("test listening");
+            self.finish.recv().expect("test result")
+        }
+        fn name(&self) -> &'static str {
+            "blocking"
+        }
+    }
+
+    struct DropSignal(std::sync::mpsc::Sender<()>);
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.send(()).expect("test listening");
+        }
+    }
+
+    #[tokio::test]
+    async fn vm_owner_lives_until_delayed_vmm_teardown_is_confirmed() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(boot_with_owner(
+            dummy_vmspec(),
+            Some(Box::new(BlockingBackend {
+                started: started_tx,
+                finish: finish_rx,
+            })),
+            DropSignal(dropped_tx),
+        ));
+        tokio::task::yield_now().await;
+        started_rx.recv().expect("VMM started");
+        assert!(
+            dropped_rx.try_recv().is_err(),
+            "a stop request is not confirmed network detach"
+        );
+        finish_tx.send(Ok(())).expect("finish VMM");
+        task.await.expect("boot task").expect("VMM result");
+        dropped_rx.recv().expect("owner released after teardown");
+    }
+
+    #[tokio::test]
+    async fn what_the_run_acquires_after_the_vmm_started_is_still_released_with_it() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let (owner_tx, owner_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(boot_with_owner(
+            dummy_vmspec(),
+            Some(Box::new(BlockingBackend {
+                started: started_tx,
+                finish: finish_rx,
+            })),
+            owner_rx,
+        ));
+        tokio::task::yield_now().await;
+        started_rx.recv().expect("VMM started");
+        owner_tx
+            .send(DropSignal(dropped_tx))
+            .map_err(|_| ())
+            .expect("the running VMM still owns its slot");
+        tokio::task::yield_now().await;
+        assert!(
+            dropped_rx.try_recv().is_err(),
+            "an address is held for as long as the guest holding it runs"
+        );
+        finish_tx.send(Ok(())).expect("finish VMM");
+        task.await.expect("boot task").expect("VMM result");
+        dropped_rx
+            .recv()
+            .expect("what the run acquired after boot is released with the VMM, not before");
+    }
+
+    #[tokio::test]
+    async fn vm_owner_is_released_after_a_failed_launch() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(boot_with_owner(
+            dummy_vmspec(),
+            Some(Box::new(BlockingBackend {
+                started: started_tx,
+                finish: finish_rx,
+            })),
+            DropSignal(dropped_tx),
+        ));
+        tokio::task::yield_now().await;
+        started_rx.recv().expect("VMM started");
+        finish_tx
+            .send(Err(anyhow::anyhow!("launch failed")))
+            .expect("fail VMM");
+        assert!(task.await.expect("boot task").is_err());
+        dropped_rx.recv().expect("failed launch releases owner");
+    }
+
+    #[test]
+    fn the_kernel_environment_tells_the_broker_if_egress_is_allowed() {
+        assert_eq!(
+            ExecSpec::egress_marker(true),
+            (lns_session::EGRESS_ALLOWED_ENV.into(), "1".into())
+        );
+        assert_eq!(
+            ExecSpec::egress_marker(false),
+            (lns_session::EGRESS_ALLOWED_ENV.into(), "0".into())
+        );
+    }
+
+    #[test]
+    fn a_static_boot_carries_a_marker_and_never_an_address() {
+        let spec = ExecSpec::from_image_config(None, None, &["true".into()])
+            .with_guest_net_bootstrap(true);
+        let value = spec
+            .kernel_env
+            .iter()
+            .find(|(k, _)| k == lns_session::GUEST_NET_BOOTSTRAP_ENV)
+            .map(|(_, v)| v.clone())
+            .expect("the guest is told to wait for a plan rather than to configure itself");
+        assert_eq!(value, "1");
+        assert!(
+            !spec.kernel_env.iter().any(|(_, v)| v.contains('.')),
+            "no address is known this early: {:?}",
+            spec.kernel_env
+        );
+
+        let dhcp = ExecSpec::from_image_config(None, None, &["true".into()])
+            .with_guest_net_bootstrap(false);
+        assert!(
+            !dhcp
+                .kernel_env
+                .iter()
+                .any(|(k, _)| k == lns_session::GUEST_NET_BOOTSTRAP_ENV),
+            "a run with no reservation boots exactly as it did before"
+        );
+    }
 
     #[test]
     fn base64_encode_output_has_no_whitespace() {
@@ -384,6 +560,23 @@ mod tests {
         let keys: Vec<&str> = spec.kernel_env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"AGENT_COMMAND_B64"));
         assert!(!keys.contains(&"AGENT_COMMAND"));
+    }
+
+    #[test]
+    fn a_session_less_boot_declares_that_it_needs_egress() {
+        let spec = ExecSpec::for_run(
+            &resolve_run_as(Some("0"), Some(0), None, None),
+            None,
+            &["/bin/sh".into()],
+            None,
+            None,
+        );
+        let env: std::collections::HashMap<_, _> = spec.kernel_env.iter().cloned().collect();
+        assert_eq!(
+            env.get(lns_session::EGRESS_ALLOWED_ENV).map(String::as_str),
+            Some("1"),
+            "the tool provisioner fetches tools over the network, so a missing lease is fatal for it too"
+        );
     }
 
     #[test]
@@ -723,6 +916,7 @@ mod tests {
             "token",
             None,
             &["echo".into(), "hello".into()],
+            true,
         );
         let keys: Vec<&str> = exec.kernel_env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"AGENT_COMMAND_B64"));
@@ -785,6 +979,7 @@ mod tests {
                 fd_tx,
             },
             watcher: None,
+            egress_allowed: true,
         }
     }
 
@@ -945,6 +1140,7 @@ mod tests {
             "token-xyz",
             None,
             &[],
+            true,
         );
         let b64 = spec
             .kernel_env
@@ -1000,6 +1196,7 @@ mod tests {
             console_fd: -1,
             debug: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
+            mac: None,
         }
     }
 
@@ -1206,6 +1403,7 @@ mod tests {
             "token",
             None,
             &["true".into()],
+            true,
         );
         let env: HashMap<_, _> = named.kernel_env.iter().cloned().collect();
         assert_eq!(
@@ -1224,6 +1422,7 @@ mod tests {
             "token",
             None,
             &["true".into()],
+            true,
         );
         let env: HashMap<_, _> = numeric.kernel_env.iter().cloned().collect();
         assert_eq!(env.get("SANDBOX_UID").map(String::as_str), Some("1000"));
@@ -1243,6 +1442,7 @@ mod tests {
             "token",
             None,
             &["true".into()],
+            true,
         );
         let env: HashMap<_, _> = with_group.kernel_env.iter().cloned().collect();
         assert_eq!(
@@ -1258,6 +1458,7 @@ mod tests {
             "token",
             None,
             &["true".into()],
+            true,
         );
         let env: HashMap<_, _> = without_group.kernel_env.iter().cloned().collect();
         assert!(

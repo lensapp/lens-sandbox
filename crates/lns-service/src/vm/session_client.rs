@@ -6,13 +6,14 @@ use std::io;
 use anyhow::{Context, Result};
 use lns_ipc::WireFrame;
 use lns_session::{
-    ClientFrame, ServerFrame, SignalKind, Winsize, decode_frame as protocol_decode_frame,
-    decode_length_prefix,
+    BrokerExitReason, ClientFrame, ServerFrame, SignalKind, Winsize,
+    decode_frame as protocol_decode_frame, decode_length_prefix,
 };
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
-mod real;
+pub(crate) mod real;
 pub use real::capture_session_exec;
 pub use real::capture_session_output;
 pub use real::run_session_on_fd;
@@ -23,6 +24,19 @@ pub struct CapturedStreams {
     pub stdout: String,
     pub stderr: String,
 }
+
+#[derive(Debug)]
+pub struct BrokerRefusal {
+    pub reason: BrokerExitReason,
+}
+
+impl std::fmt::Display for BrokerRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the broker refused the run: {}", self.reason.summary())
+    }
+}
+
+impl std::error::Error for BrokerRefusal {}
 
 pub(super) struct CaptureBuffers {
     stdout: Vec<u8>,
@@ -103,7 +117,7 @@ pub(super) fn input_to_frame(input: SessionInput) -> ClientFrame {
     }
 }
 
-async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
+pub(super) async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<Option<ServerFrame>> {
     let mut len_buf = [0u8; 4];
@@ -124,12 +138,34 @@ async fn read_one_frame<R: tokio::io::AsyncRead + Unpin>(
     Ok(Some(frame))
 }
 
+/// The reader runs as its own task, so it is given the run's span explicitly: what the guest says belongs to the run that owns it, not to the service's own log.
+pub(super) fn spawn_server_frame_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    reader: R,
+    frame_tx: mpsc::Sender<WireFrame>,
+    stop: tokio::sync::broadcast::Sender<()>,
+) -> tokio::task::JoinHandle<Result<Option<i32>>> {
+    tokio::spawn(
+        async move {
+            let outcome = read_server_frames(reader, frame_tx).await;
+            // Without an explicit wake-up, detached-run input loops hang because nobody else closes input_rx.
+            let _ = stop.send(());
+            outcome
+        }
+        .instrument(tracing::Span::current()),
+    )
+}
+
 pub(super) async fn read_server_frames<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     frame_tx: mpsc::Sender<WireFrame>,
 ) -> Result<Option<i32>> {
     while let Some(frame) = read_one_frame(&mut reader).await? {
         match frame {
+            ServerFrame::NetworkApplied { address } => {
+                anyhow::bail!(
+                    "the guest reported address {address} on a workload session; addressing is settled on its own channel before any workload starts"
+                );
+            }
             ServerFrame::StdoutBytes(bytes) => {
                 if frame_tx.send(WireFrame::Stdout(bytes)).await.is_err() {
                     return Ok(None);
@@ -143,6 +179,9 @@ pub(super) async fn read_server_frames<R: tokio::io::AsyncRead + Unpin>(
             ServerFrame::ExitStatus(code) => {
                 log::debug!(code, "broker reported workload ExitStatus");
                 return Ok(Some(code));
+            }
+            ServerFrame::Refused(reason) => {
+                return Err(BrokerRefusal { reason }.into());
             }
         }
     }
@@ -329,6 +368,57 @@ mod tests {
             code,
             Some(42),
             "an explicit ExitStatus is reported as Some(code)"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_address_report_on_a_workload_session_is_refused_rather_than_believed() {
+        let (tx, _rx) = mpsc::channel(2);
+        let error = read_server_frames(
+            io::Cursor::new(framed(&ServerFrame::NetworkApplied {
+                address: "192.168.64.254".into(),
+            })),
+            tx,
+        )
+        .await
+        .expect_err("a session is not where a guest is addressed");
+        assert!(
+            error.to_string().contains("before any workload starts"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_spawned_reader_wakes_the_session_input_loop_when_the_guest_stops_talking() {
+        let (tx, _rx) = mpsc::channel(2);
+        let (stop, mut stopped) = tokio::sync::broadcast::channel::<()>(1);
+        let reader = spawn_server_frame_reader(
+            io::Cursor::new(framed(&ServerFrame::ExitStatus(3))),
+            tx,
+            stop,
+        );
+        assert_eq!(reader.await.expect("reader task").expect("frames"), Some(3));
+        stopped
+            .recv()
+            .await
+            .expect("nobody else closes the input loop, so the reader must");
+    }
+
+    #[tokio::test]
+    async fn a_typed_broker_refusal_surfaces_without_borrowing_a_workload_code() {
+        let bytes = framed(&ServerFrame::Refused(BrokerExitReason::NoDhcpLease));
+        let (tx, _rx) = mpsc::channel(1);
+        let error = read_server_frames(io::Cursor::new(bytes), tx)
+            .await
+            .expect_err("a refusal is not a workload exit");
+        let refusal = error
+            .downcast_ref::<BrokerRefusal>()
+            .expect("the service preserves the typed broker reason");
+        assert_eq!(refusal.reason, BrokerExitReason::NoDhcpLease);
+        assert_eq!(
+            refusal.to_string(),
+            "the broker refused the run: the guest got no address from the host DHCP server",
+            "a surface that only prints an error chain still names the cause"
         );
     }
 

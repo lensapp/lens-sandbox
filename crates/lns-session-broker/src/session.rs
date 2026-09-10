@@ -11,7 +11,7 @@ use lns_session::{ClientFrame, Winsize, decode_frame, decode_length_prefix};
 #[cfg(target_os = "linux")]
 mod real;
 #[cfg(target_os = "linux")]
-pub use real::handle_session;
+pub use real::{answer_bootstrap, handle_session, refuse_session};
 
 pub(crate) fn close(fd: RawFd) {
     // SAFETY: caller owns fd.
@@ -217,7 +217,7 @@ pub(crate) fn dispatch_frame(frame: ClientFrame) -> LoopAction {
         ClientFrame::Resize(ws) => LoopAction::Resize(ws),
         ClientFrame::Signal(kind) => LoopAction::Signal(kind.as_libc()),
         ClientFrame::Detach => LoopAction::Detach,
-        ClientFrame::OpenSession { .. } => LoopAction::Stop,
+        ClientFrame::ConfigureNetwork(_) | ClientFrame::OpenSession { .. } => LoopAction::Stop,
     }
 }
 

@@ -1,3 +1,4 @@
+mod bootstrap;
 mod exit;
 mod forker;
 mod forward;
@@ -42,11 +43,12 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "linux")]
 fn run() -> Result<i32, String> {
-    if let Err(e) = network::bring_up_eth0() {
-        eprintln!("lns-session-broker: best-effort network setup failed: {e}");
-    }
-    // Must run after bring_up_eth0: it consumes the DNS the udhcpc hook stashed.
-    if let Err(e) = network::configure_dns() {
+    let network = network::narrate(network::set_up());
+    eprintln!("lns-session-broker: {}", network.line);
+    // Only a lease stashes DNS servers for the broker to read back; a host-assigned address carries its own.
+    if network.dhcp_dns
+        && let Err(e) = network::configure_dns()
+    {
         eprintln!("lns-session-broker: best-effort DNS setup failed: {e}");
     }
 
@@ -64,7 +66,24 @@ fn run() -> Result<i32, String> {
 
     let listen_fd = vsock::listen(BROKER_PORT).map_err(|e| format!("listen: {e}"))?;
 
+    if network.awaiting_bootstrap {
+        let conn = vsock::accept(listen_fd).map_err(|e| format!("accept(bootstrap): {e}"))?;
+        let outcome = bootstrap::respond(session::read_client_frame(conn), network::apply);
+        eprintln!("lns-session-broker: {}", bootstrap::narrate(&outcome));
+        let refused = matches!(outcome, bootstrap::Bootstrap::Refused(_));
+        session::answer_bootstrap(conn, &bootstrap::reply(&outcome));
+        if refused {
+            return Ok(1);
+        }
+    }
+
     let primary_conn = vsock::accept(listen_fd).map_err(|e| format!("accept(primary): {e}"))?;
+
+    if let Some(reason) = network.refusal {
+        let outcome = session::refuse_session(primary_conn, &reason)
+            .map_err(|e| format!("refuse primary session: {e}"))?;
+        return Ok(outcome.exit_code);
+    }
 
     let exec_sessions: Arc<Mutex<Vec<session::ExecSession>>> = Arc::new(Mutex::new(Vec::new()));
 
