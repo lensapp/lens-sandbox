@@ -222,7 +222,10 @@ async fn read_denied<T>(
 ) -> Result<Option<Option<T>>> {
     match client.auth(reference, auth, RegistryOperation::Pull).await {
         Ok(_) => Ok(None),
-        Err(error) => nothing_or_error(target, error).map(Some),
+        Err(error) if names_nothing_yet(&error) => Ok(Some(None)),
+        Err(error) => {
+            Err(auth_error(reference, auth, error).context(format!("reading what {target} holds")))
+        }
     }
 }
 
