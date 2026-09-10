@@ -5,8 +5,9 @@ use crate::world::{BehaviourWorld, StagedBuild, StagedRequest, StagedResolution}
 /// The image config a staged build answers with: two history entries, so the size refusal has an instruction to name.
 const STAGED_CONFIG: &str = r#"{"history":[{"created_by":"FROM docker.io/library/node:24-bookworm"},{"created_by":"RUN npm install -g @anthropic-ai/claude-code"}]}"#;
 
-fn staged_image(layer_bytes: &[u64]) -> lns_ipc::PushableImage {
+fn staged_image(layer_bytes: &[u64], built_outside_the_gate: bool) -> lns_ipc::PushableImage {
     lns_ipc::PushableImage {
+        built_outside_the_gate,
         os: lns_artifact::image_index::OS.to_string(),
         architecture: "arm64".to_string(),
         reference: format!("lns-build.local/built@sha256:{}", "cc".repeat(32)),
@@ -40,17 +41,54 @@ fn stage(w: &mut BehaviourWorld, reused: bool, image: Option<lns_ipc::PushableIm
 
 #[given(regex = r"^the build answers with an image of (\d+) layers$")]
 fn build_answers_with_an_image(w: &mut BehaviourWorld, layers: usize) {
-    stage(w, false, Some(staged_image(&vec![64; layers])));
+    let outside = w.built_outside_the_gate;
+    stage(w, false, Some(staged_image(&vec![64; layers], outside)));
 }
 
 #[given(regex = r"^the build answers with an image of (\d+) layers it did not have to build$")]
 fn build_answers_with_a_reused_image(w: &mut BehaviourWorld, layers: usize) {
-    stage(w, true, Some(staged_image(&vec![64; layers])));
+    let outside = w.built_outside_the_gate;
+    stage(w, true, Some(staged_image(&vec![64; layers], outside)));
 }
 
 #[given("the build answers with a key and no image")]
 fn build_answers_with_no_image(w: &mut BehaviourWorld) {
     stage(w, false, None);
+}
+
+/// The switch this machine builds with, which decides whether the gate applied to what it built (`docs/sandbox-spec.md` §3.1.1).
+#[given("this machine builds on the host Docker daemon")]
+fn the_build_runs_on_the_host_daemon(w: &mut BehaviourWorld) {
+    w.built_outside_the_gate = true;
+}
+
+#[then(regex = r#"^the index entry for "([^"]+)" says it was built outside the gate$"#)]
+fn the_entry_says_it_was_built_outside_the_gate(w: &mut BehaviourWorld, architecture: String) {
+    assert!(
+        entry_for(w, &architecture).built_outside_the_gate,
+        "the index the document names must carry the record: {:?}",
+        w.pushed_indexes,
+    );
+}
+
+#[then(regex = r#"^the index entry for "([^"]+)" says nothing about the gate$"#)]
+fn the_entry_says_nothing_about_the_gate(w: &mut BehaviourWorld, architecture: String) {
+    assert!(
+        !entry_for(w, &architecture).built_outside_the_gate,
+        "a build the gate did apply to records nothing: {:?}",
+        w.pushed_indexes,
+    );
+}
+
+fn entry_for(w: &BehaviourWorld, architecture: &str) -> lns_artifact::image_index::IndexEntry {
+    w.pushed_indexes
+        .last()
+        .expect("this push published an index")
+        .1
+        .iter()
+        .find(|entry| entry.architecture == architecture)
+        .expect("the index holds this architecture")
+        .clone()
 }
 
 #[given(regex = r"^this machine lets a built image weigh (\d+) bytes$")]
@@ -60,7 +98,7 @@ fn the_image_limit_is(w: &mut BehaviourWorld, bytes: u64) {
 
 #[given(regex = r"^the build answers with an image whose second layer is (\d+) bytes$")]
 fn build_answers_with_a_heavy_layer(w: &mut BehaviourWorld, bytes: u64) {
-    stage(w, false, Some(staged_image(&[64, bytes])));
+    stage(w, false, Some(staged_image(&[64, bytes], false)));
 }
 
 #[then(regex = r#"^the image was published into "([^"]+)"$"#)]
@@ -118,6 +156,7 @@ fn hold(w: &mut BehaviourWorld, reference: &str, architecture: &str, digest: &st
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
             os: lns_artifact::image_index::OS.to_string(),
             architecture: architecture.to_string(),
+            built_outside_the_gate: false,
         },
     );
 }

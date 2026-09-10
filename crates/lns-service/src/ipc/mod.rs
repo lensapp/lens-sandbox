@@ -604,6 +604,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             definition,
             definition_dir,
             rebuild,
+            build_engine,
             authored_egress,
             packed_filesets,
         } => image_response(
@@ -611,6 +612,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                 definition,
                 definition_dir,
                 rebuild: *rebuild,
+                build_engine: build_engine.clone(),
                 authored_egress: authored_egress.as_deref(),
                 packed_filesets,
             })
@@ -621,6 +623,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             definition_dir,
             rebuild,
             plan_only,
+            build_engine,
             authored_egress,
             packed_filesets,
         } => image_response(
@@ -630,6 +633,7 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
                     definition_dir,
                     rebuild: *rebuild,
                     plan_only: *plan_only,
+                    build_engine: build_engine.clone(),
                     authored_egress: authored_egress.as_deref(),
                     packed_filesets,
                 },
@@ -1345,6 +1349,7 @@ mod tests {
     async fn run_image_via_handle_request_panics() {
         let _ = handle_request(
             &Request::RunImage(Box::new(lns_ipc::RunImageArgs {
+                build_engine: lns_ipc::BuildEngine::default(),
                 image: None,
                 resolved_image: None,
                 mixins: Vec::new(),
@@ -3281,6 +3286,7 @@ mod tests {
                 definition: serde_json::json!({"spec": {"image": "alpine:3.20"}}).to_string(),
                 definition_dir: "/work".into(),
                 rebuild: false,
+                build_engine: lns_ipc::BuildEngine::default(),
                 authored_egress: None,
                 packed_filesets: Vec::new(),
             },
@@ -3306,6 +3312,7 @@ mod tests {
                 definition_dir: "/work".into(),
                 rebuild: false,
                 plan_only: true,
+                build_engine: lns_ipc::BuildEngine::default(),
                 authored_egress: None,
                 packed_filesets: Vec::new(),
             },

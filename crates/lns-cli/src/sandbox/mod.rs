@@ -414,6 +414,7 @@ async fn build<W: std::io::Write>(
             definition: resolved.definition,
             definition_dir,
             rebuild: args.rebuild,
+            build_engine: svc.build_engine()?,
             authored_egress: resolved.authored_egress,
             packed_filesets: resolved.packed_filesets,
         })

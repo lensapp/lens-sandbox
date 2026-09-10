@@ -13,6 +13,9 @@ pub const ARCHITECTURES: [&str; 2] = ["amd64", "arm64"];
 /// The annotation an entry carries when a host Docker daemon built it rather than a build guest, so the digest a consumer verifies covers the record (`docs/sandbox-spec.md` §6.2).
 pub const BUILT_OUTSIDE_THE_GATE_ANNOTATION: &str = "run.lns.built-outside-the-gate";
 
+/// What every line about such an image says, so an approver never has to ask which engine ran the build (`docs/sandbox-spec.md` §3.1.1).
+pub const BUILT_OUTSIDE_THE_GATE: &str = "built outside the gate by the host Docker daemon";
+
 /// One architecture's image, as the index addresses it (`docs/sandbox-spec.md` §6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEntry {
@@ -148,8 +151,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<IndexEntry>> {
                 media_type: manifest["mediaType"].as_str()?.to_string(),
                 os: manifest["platform"]["os"].as_str()?.to_string(),
                 architecture: manifest["platform"]["architecture"].as_str()?.to_string(),
-                built_outside_the_gate: manifest["annotations"]
-                    [BUILT_OUTSIDE_THE_GATE_ANNOTATION]
+                built_outside_the_gate: manifest["annotations"][BUILT_OUTSIDE_THE_GATE_ANNOTATION]
                     == "true",
             })
         })
@@ -215,8 +217,7 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&assembled.bytes).expect("the index is json");
         assert_eq!(
-            value["manifests"][0]["annotations"][BUILT_OUTSIDE_THE_GATE_ANNOTATION],
-            "true",
+            value["manifests"][0]["annotations"][BUILT_OUTSIDE_THE_GATE_ANNOTATION], "true",
             "the record rides on the entry, so the digest a consumer verifies covers it"
         );
     }

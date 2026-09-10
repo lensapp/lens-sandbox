@@ -3,6 +3,7 @@
 
 pub(crate) mod cache;
 pub(crate) mod context;
+pub(crate) mod docker;
 pub(crate) mod exclude;
 pub(crate) mod executor;
 pub(crate) mod ext4_upper;
@@ -84,7 +85,7 @@ pub(crate) async fn commit_step<F: Fs>(
         store,
         BUILT_IMAGE_REPOSITORY,
         &built,
-        layer.as_ref(),
+        layer.as_slice(),
         now_unix_secs,
     )
     .await?;

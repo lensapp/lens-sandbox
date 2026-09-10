@@ -49,15 +49,22 @@ pub(crate) fn args_for(
 }
 
 /// What was built, for which architecture, and the digest it became.
-pub(crate) fn built_line(label: &str, reference: &str) -> String {
-    format!(
+pub(crate) fn built_line(label: &str, reference: &str, outside_the_gate: bool) -> String {
+    let line = format!(
         "built from {label}, {}, {}",
         crate::image::want_arch(),
         reference
             .split_once('@')
             .map(|(_, digest)| digest)
             .unwrap_or(reference),
-    )
+    );
+    match outside_the_gate {
+        true => format!(
+            "{line} — {}",
+            lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE
+        ),
+        false => line,
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +94,7 @@ mod tests {
 
     fn base() -> RunImageArgs {
         RunImageArgs {
+            build_engine: lns_ipc::BuildEngine::default(),
             image: Some("./image".into()),
             resolved_image: Some("./image".into()),
             mixins: vec!["./mixins/tools".into()],
@@ -252,6 +260,7 @@ mod tests {
         let line = built_line(
             "./image/Dockerfile",
             "lns-build.local/built@sha256:abcdef0123456789",
+            false,
         );
         assert!(
             line.starts_with("built from ./image/Dockerfile, "),
@@ -266,6 +275,16 @@ mod tests {
 
     #[test]
     fn a_reference_with_no_digest_is_named_whole() {
-        assert!(built_line("./Dockerfile", "alpine:3.20").ends_with("alpine:3.20"));
+        assert!(built_line("./Dockerfile", "alpine:3.20", false).ends_with("alpine:3.20"));
+    }
+
+    /// An approver reading a run summary has to be told the document's own rules decided nothing about this build.
+    #[test]
+    fn an_image_the_host_daemon_built_says_so_in_the_line_the_run_summary_prints() {
+        let line = built_line("./image/Containerfile", "built@sha256:aa", true);
+        assert!(
+            line.ends_with("— built outside the gate by the host Docker daemon"),
+            "{line}"
+        );
     }
 }

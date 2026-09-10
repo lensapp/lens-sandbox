@@ -510,9 +510,42 @@ lns config list
 | `run.mem`     | `--mem`       | RAM in MiB.                                                |
 | `run.registry`| `--registry`  | Default registry host for bare published-sandbox references (e.g. `ghcr.io`); unset means the LNS hub, `hub.lns.run`. |
 | `push.imageLimit` | —         | What `lns push` lets a built image weigh, in MiB. Unset means 4096. |
+| `build.engine` | —          | Which engine builds a Containerfile your `spec.image` names: `lns`, a build guest, which is the default; or `docker`, this machine's own Docker daemon over the Docker Engine API. |
+| `build.dockerSocket` | —    | The Unix socket the `docker` engine is reached at. Unset means `$DOCKER_HOST` when it names a `unix://` socket, else `/var/run/docker.sock`. |
 
-The settable defaults are `run.cpus`, `run.mem`, `run.registry`, and
-`push.imageLimit`. Environment
+**What `build.engine docker` changes.** The Containerfile and its context go to
+your Docker daemon, and the image it builds is imported into lns's own layer
+store, so `lns push`, the build cache and the image index work exactly as
+before. What changes is the gate: a `RUN` inside the daemon reaches whatever
+your host lets the daemon reach, your document's `egress` decides nothing there,
+no approval card is raised, and the document's `credentials` are not in force.
+lns says so wherever it names that image:
+
+```bash
+$ lns config set build.engine docker
+Set build.engine to docker in /home/you/.lns/config.yaml
+
+$ lns run .
+   Image  built from ./image/Containerfile, arm64, sha256:761743bb… — built outside the gate by the host Docker daemon
+
+$ lns inspect ghcr.io/team/agent:1.4.0
+image: built from ./image/Containerfile (2 lines, context 2 files), arm64 sha256:761743bb… (built outside the gate by the host Docker daemon)
+```
+
+The record travels with the image: it is an annotation on the entry inside the
+published image index, so a consumer verifying the digest the document pins
+verifies it too. A machine whose switch says `docker` and whose daemon does not
+answer refuses rather than building in a guest behind your back:
+
+```bash
+$ lns push ghcr.io/team/agent:1.4.0
+error: this machine's build.engine is docker, and no Docker daemon answered at
+/var/run/docker.sock; start the daemon, point build.dockerSocket at the socket
+it listens on, or run `lns config set build.engine lns` to build in a guest instead
+```
+
+The settable defaults are `run.cpus`, `run.mem`, `run.registry`,
+`push.imageLimit`, `build.engine`, and `build.dockerSocket`. Environment
 variables, volumes, and ports are properties of a sandbox, not persistent config —
 set them per run (`-e`, `-v`, `-p`) or in the sandbox definition's `spec`.
 

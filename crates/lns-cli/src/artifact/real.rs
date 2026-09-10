@@ -206,6 +206,9 @@ impl super::distribute::ImageBuilder for ServiceImageBuilder {
                     definition_dir: request.project_dir.to_string_lossy().into_owned(),
                     rebuild: request.rebuild,
                     plan_only: request.plan_only,
+                    build_engine: crate::config::load_build_engine(
+                        &crate::config::default_config_path()?,
+                    )?,
                     authored_egress: request.authored_egress.clone(),
                     packed_filesets: request.packed_filesets.clone(),
                 },

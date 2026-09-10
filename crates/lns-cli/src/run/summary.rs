@@ -713,6 +713,7 @@ mod tests {
 
     fn run_args(image: Option<&str>) -> RunArgs {
         RunArgs {
+            build_engine: lns_ipc::BuildEngine::default(),
             scripts: Vec::new(),
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),

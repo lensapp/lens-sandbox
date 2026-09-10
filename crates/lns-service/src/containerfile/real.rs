@@ -14,13 +14,15 @@ use crate::oci_layer_cache::LayerCache;
 
 use super::cache::{BuildCache, CacheFs, Entry, Kind};
 use super::context::{ContextFs, EntryKind, Meta};
+use super::docker::{self, Daemon, DaemonBuild, DockerHost};
 use super::executor::{self, Base, BuildHost, Commit, CopyStep, RunOutcome, RunStep};
 use super::ext4_upper::Ext4Upper;
 use super::image::ParentImage;
-use super::import::LocalStore;
+use super::import::{self, LocalStore};
 use super::key;
 use super::locate;
 use super::step;
+use super::tar_layer::LayerBlob;
 use super::upper::{self, ChangeSet};
 
 /// Where the reference of the image a run built lands, in the run's own directory: two runs ending together would overwrite one pointer, and removing the run removes what it built from.
@@ -44,6 +46,8 @@ pub(crate) struct BuiltForRun {
     /// True when the key answered outright, so this build ran nothing.
     pub reused: bool,
     pub reused_steps: usize,
+    /// True when the host Docker daemon built it, so the document's egress and credentials decided nothing (§3.1.1).
+    pub built_outside_the_gate: bool,
 }
 
 pub(crate) fn names_a_containerfile(image: &str) -> bool {
@@ -72,7 +76,7 @@ pub(crate) async fn build_for_run(
     log::info!(
         "Image",
         "{}",
-        step::built_line(&built.label, &built.reference)
+        step::built_line(&built.label, &built.reference, built.built_outside_the_gate)
     );
     Ok(built)
 }
@@ -156,17 +160,36 @@ pub(crate) async fn build(
     let located = prepared.located.clone();
     let started = std::time::Instant::now();
     let host = build_host(request, &prepared, frame_tx);
-    let built = executor::build(&host, &prepared.plan(request.rebuild))
-        .await
-        .with_context(|| format!("building {}", located.label))?;
+    let outside_the_gate = request.args.build_engine.is_outside_the_gate();
+    let built = match &request.args.build_engine {
+        lns_ipc::BuildEngine::Lns => executor::build(&host, &prepared.plan(request.rebuild)).await,
+        lns_ipc::BuildEngine::Docker { socket } => {
+            docker::build_image(
+                &host,
+                &RealDaemon::at(socket.as_deref()),
+                &RealContextFs,
+                &prepared.plan(request.rebuild),
+                &DaemonBuild {
+                    context: &prepared.located.context,
+                    containerfile: prepared.located.in_context(),
+                },
+            )
+            .await
+        }
+    }
+    .with_context(|| format!("building {}", located.label))?;
     if !built.reused {
         log::info!(
             "Built",
-            "{} in {:.2?} ({} layer{})",
+            "{} in {:.2?} ({} layer{}){}",
             built.reference,
             started.elapsed(),
             built.layers,
             if built.layers == 1 { "" } else { "s" },
+            match outside_the_gate {
+                true => format!(" — {}", lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
+                false => String::new(),
+            },
         );
     }
     Ok(BuiltForRun {
@@ -176,7 +199,37 @@ pub(crate) async fn build(
         key: built.key,
         reused: built.reused,
         reused_steps: built.reused_steps,
+        built_outside_the_gate: outside_the_gate,
     })
+}
+
+/// The host Docker daemon over its Unix socket: one request written whole, then everything the daemon answers before it closes.
+struct RealDaemon {
+    socket: String,
+}
+
+impl RealDaemon {
+    fn at(configured: Option<&str>) -> Self {
+        Self {
+            socket: docker::socket_of(configured, std::env::var("DOCKER_HOST").ok().as_deref()),
+        }
+    }
+}
+
+impl Daemon for RealDaemon {
+    fn socket(&self) -> &str {
+        &self.socket
+    }
+
+    async fn round_trip(&self, request: &[u8]) -> Result<Vec<u8>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::UnixStream::connect(&self.socket).await?;
+        stream.write_all(request).await?;
+        stream.shutdown().await?;
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).await?;
+        Ok(answer)
+    }
 }
 
 /// What `lns sandbox build` was asked to build: the resolved document, and the policy a step is held to.
@@ -184,6 +237,7 @@ pub struct SandboxBuild<'a> {
     pub definition: &'a str,
     pub definition_dir: &'a str,
     pub rebuild: bool,
+    pub build_engine: lns_ipc::BuildEngine,
     pub authored_egress: Option<&'a str>,
     pub packed_filesets: &'a [lns_ipc::PackedFilesetSource],
 }
@@ -197,6 +251,7 @@ pub async fn build_sandbox(request: &SandboxBuild<'_>) -> Result<lns_ipc::Respon
     tokio::spawn(async move { while frames.recv().await.is_some() {} });
     let mut args = args_for_a_build(definition, request.definition_dir);
     args.image = Some(image.clone());
+    args.build_engine = request.build_engine.clone();
     args.authored_egress = request.authored_egress.map(str::to_string);
     args.packed_filesets = request.packed_filesets.to_vec();
     let built = build(
@@ -224,6 +279,7 @@ pub struct PushBuild<'a> {
     pub definition_dir: &'a str,
     pub rebuild: bool,
     pub plan_only: bool,
+    pub build_engine: lns_ipc::BuildEngine,
     pub authored_egress: Option<&'a str>,
     pub packed_filesets: &'a [lns_ipc::PackedFilesetSource],
 }
@@ -236,8 +292,10 @@ pub async fn build_image_for_push(request: &PushBuild<'_>) -> Result<lns_ipc::Re
     tokio::spawn(async move { while frames.recv().await.is_some() {} });
     let mut args = args_for_a_build(definition, request.definition_dir);
     args.image = Some(image.clone());
+    args.build_engine = request.build_engine.clone();
     args.authored_egress = request.authored_egress.map(str::to_string);
     args.packed_filesets = request.packed_filesets.to_vec();
+    let outside_the_gate = request.build_engine.is_outside_the_gate();
     let plan_only = request.plan_only;
     let request = BuildRequest {
         args: &args,
@@ -261,7 +319,7 @@ pub async fn build_image_for_push(request: &PushBuild<'_>) -> Result<lns_ipc::Re
         }
     };
     let image = match reference {
-        Some(reference) => Some(Box::new(pushable(&reference)?)),
+        Some(reference) => Some(Box::new(pushable(&reference, outside_the_gate)?)),
         None => None,
     };
     Ok(lns_ipc::Response::ImageBuiltForPush {
@@ -273,7 +331,7 @@ pub async fn build_image_for_push(request: &PushBuild<'_>) -> Result<lns_ipc::Re
 }
 
 /// The image as an uploader needs it: the manifest bytes its digest was taken over, its config, and the file this machine holds each layer in.
-fn pushable(reference: &str) -> Result<lns_ipc::PushableImage> {
+fn pushable(reference: &str, built_outside_the_gate: bool) -> Result<lns_ipc::PushableImage> {
     let cache_dir = crate::cache::root()?;
     let manifests = cache_dir.join("manifests");
     let normalized = crate::image_store::normalize_reference(reference)?;
@@ -283,7 +341,7 @@ fn pushable(reference: &str) -> Result<lns_ipc::PushableImage> {
             format!("the built image {normalized} is not in this machine's manifest cache")
         })?;
     let layers = LayerCache::new(cache_dir.join("layers"));
-    super::image::pushable(normalized, &cached, |digest| {
+    super::image::pushable(normalized, &cached, built_outside_the_gate, |digest| {
         Ok(layers.path_for(digest)?.to_string_lossy().into_owned())
     })
 }
@@ -321,6 +379,7 @@ fn image_of(definition: &str) -> Result<String> {
 fn args_for_a_build(definition: &str, definition_dir: &str) -> RunImageArgs {
     RunImageArgs {
         image: None,
+        build_engine: lns_ipc::BuildEngine::default(),
         resolved_image: None,
         mixins: Vec::new(),
         composed_mixins: Vec::new(),
@@ -555,6 +614,41 @@ impl BuildHost for RealBuildHost {
             );
         }
         Ok(built.reference)
+    }
+}
+
+impl DockerHost for RealBuildHost {
+    async fn peek_base(&self, image: &str) -> Result<Base> {
+        BuildHost::peek_base(self, image).await
+    }
+
+    async fn cached(&self, kind: Kind, key: &str) -> Option<String> {
+        BuildHost::cached(self, kind, key).await
+    }
+
+    async fn remember(&self, kind: Kind, key: &str, reference: &str) {
+        BuildHost::remember(self, kind, key, reference).await
+    }
+
+    async fn adopt(
+        &self,
+        built: &super::image::BuiltImage,
+        layers: &[LayerBlob],
+    ) -> Result<String> {
+        let cache = LayerCache::new(self.cache_dir.join("layers"));
+        import::import(
+            &crate::image_store::RealFs,
+            &LocalStore {
+                layers: &cache,
+                manifests: self.cache_dir.join("manifests"),
+                images: self.cache_dir.join("images"),
+            },
+            super::BUILT_IMAGE_REPOSITORY,
+            built,
+            layers,
+            now_unix_secs(),
+        )
+        .await
     }
 }
 

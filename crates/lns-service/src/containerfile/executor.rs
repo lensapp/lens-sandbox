@@ -171,16 +171,20 @@ pub(crate) enum BaseNeed {
     PeekedOnly,
 }
 
-/// Read the file up to and including its `FROM`, resolve that base, and ask the key — everything a build and a plan agree on before they part.
-pub(crate) async fn open<H: BuildHost>(
-    host: &H,
-    plan: &BuildPlan<'_>,
-    need: BaseNeed,
-) -> Result<Opening> {
+/// What the file says before anything is resolved: the `ARG`s declared before `FROM`, the line that `FROM` sits on, the image it names with those args expanded, and where the loop resumes.
+pub(crate) struct Preamble {
+    pub global_args: Vec<(String, String)>,
+    pub line: usize,
+    pub image: String,
+    pub after_from: usize,
+}
+
+/// Read the file up to and including its `FROM`; every engine starts here, because the base is what a build stands on and what its key is taken over.
+pub(crate) fn preamble(file: &Containerfile) -> Result<Preamble> {
     let mut global_args = Vec::new();
     let mut after_from = 0;
-    let from = loop {
-        let Some(instruction) = plan.file.instructions.get(after_from) else {
+    let (line, image) = loop {
+        let Some(instruction) = file.instructions.get(after_from) else {
             bail!(
                 "a Containerfile must name what it builds on with FROM, and this one names nothing"
             );
@@ -201,8 +205,43 @@ pub(crate) async fn open<H: BuildHost>(
             ),
         }
     };
-    let (line, image) = from;
     let image = expand(image, &global_args)?;
+    Ok(Preamble {
+        global_args,
+        line,
+        image,
+        after_from,
+    })
+}
+
+/// Every `ARG` the file gives a default, in the order it declares them: the build arguments another engine is handed, because lns states them and does not let a daemon guess.
+pub(crate) fn arg_defaults(file: &Containerfile) -> Result<Vec<(String, String)>> {
+    let mut args: Vec<(String, String)> = Vec::new();
+    for instruction in &file.instructions {
+        if let InstructionKind::Arg {
+            name,
+            default: Some(default),
+        } = &instruction.kind
+        {
+            let value = expand(default, &args)?;
+            set(&mut args, name, &value);
+        }
+    }
+    Ok(args)
+}
+
+/// Read the file up to and including its `FROM`, resolve that base, and ask the key — everything a build and a plan agree on before they part.
+pub(crate) async fn open<H: BuildHost>(
+    host: &H,
+    plan: &BuildPlan<'_>,
+    need: BaseNeed,
+) -> Result<Opening> {
+    let Preamble {
+        global_args,
+        line,
+        image,
+        after_from,
+    } = preamble(plan.file)?;
     let base = match need {
         BaseNeed::Ingested => host.resolve_base(&image).await,
         BaseNeed::PeekedOnly => host.peek_base(&image).await,
@@ -582,7 +621,7 @@ fn value_of<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
 }
 
 /// `$NAME`, `${NAME}`, `${NAME:-default}` and `${NAME:+alt}`, the spellings Docker expands in an instruction's arguments; a name nothing declared expands to nothing.
-fn expand(value: &str, scope: &[(String, String)]) -> Result<String> {
+pub(crate) fn expand(value: &str, scope: &[(String, String)]) -> Result<String> {
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(dollar) = rest.find('$') {
@@ -2125,6 +2164,23 @@ mod tests {
         assert_eq!(
             host.cached(Kind::Image, &key).await.as_deref(),
             Some("lns-build.local/built@sha256:step1"),
+        );
+    }
+    /// Another engine is handed what the file declares, not what it happens to default to, and a later default may stand on an earlier one.
+    #[test]
+    fn every_arg_with_a_default_is_a_build_argument_expanded_against_the_ones_before_it() {
+        let file = lns_artifact::containerfile::parse(
+            "ARG MAJOR=24\nARG TAG=${MAJOR}-bookworm\nFROM node:$TAG\nARG BARE\nARG V=2.1.263\n",
+        )
+        .expect("a Containerfile lns builds");
+        assert_eq!(
+            arg_defaults(&file).expect("reading the defaults"),
+            vec![
+                ("MAJOR".to_string(), "24".to_string()),
+                ("TAG".to_string(), "24-bookworm".to_string()),
+                ("V".to_string(), "2.1.263".to_string()),
+            ],
+            "an ARG with no default states nothing",
         );
     }
 }

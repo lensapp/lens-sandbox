@@ -29,6 +29,10 @@ pub trait SandboxService: Send + Sync {
     fn write_document(&self, path: &std::path::Path, contents: &str) -> std::io::Result<()>;
     /// The document `-f` selects, resolved against this machine's working directory and read from it.
     fn document(&self, file: Option<&std::path::Path>) -> Result<(PathBuf, String)>;
+    /// Which engine this machine builds a Containerfile with, off its own `build.engine` (`docs/sandbox-spec.md` §3.1.1); a machine that has said nothing builds in a guest.
+    fn build_engine(&self) -> Result<lns_ipc::BuildEngine> {
+        Ok(lns_ipc::BuildEngine::default())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

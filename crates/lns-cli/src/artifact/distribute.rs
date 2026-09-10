@@ -453,6 +453,7 @@ where
 /// The entry this push contributes to the index: the manifest it just built, as an index addresses it.
 fn entry_of(image: &lns_ipc::PushableImage) -> lns_artifact::image_index::IndexEntry {
     lns_artifact::image_index::IndexEntry {
+        built_outside_the_gate: image.built_outside_the_gate,
         digest: image.digest.clone(),
         size: image.manifest.len() as u64,
         media_type: image.manifest_media_type.clone(),
@@ -484,11 +485,25 @@ where
             .image_at(repository, &tag)
             .await
             .with_context(|| format!("reading what {repository}:{tag} holds"))?;
-        if let Some(entry) = entry {
+        if let Some(mut entry) = entry {
+            entry.built_outside_the_gate = was_built_outside_the_gate(&held, &entry);
             held = lns_artifact::image_index::with_entry(&held, entry);
         }
     }
     Ok(lns_artifact::image_index::in_index_order(held))
+}
+
+/// A manifest read back off a tag says who built it and never how, so the record the index already carries is kept — but only for the very manifest it was written about (§6.2).
+fn was_built_outside_the_gate(
+    held: &[lns_artifact::image_index::IndexEntry],
+    entry: &lns_artifact::image_index::IndexEntry,
+) -> bool {
+    held.iter().any(|earlier| {
+        earlier.os == entry.os
+            && earlier.architecture == entry.architecture
+            && earlier.digest == entry.digest
+            && earlier.built_outside_the_gate
+    })
 }
 
 /// How every line that lists an index names what it holds.
@@ -1012,6 +1027,7 @@ mod tests {
     fn image_of(layers: &[(&str, u64)], config: &str) -> lns_ipc::PushableImage {
         lns_ipc::PushableImage {
             reference: format!("lns-build.local/built@sha256:{}", "cc".repeat(32)),
+            built_outside_the_gate: false,
             digest: format!("sha256:{}", "cc".repeat(32)),
             manifest: "{}".into(),
             manifest_media_type: "application/vnd.oci.image.manifest.v1+json".into(),
@@ -1087,6 +1103,7 @@ mod tests {
 
     use super::*;
     use std::cell::RefCell;
+    use std::ops::Not;
 
     #[derive(Default)]
     struct FakeProducer {
@@ -1122,6 +1139,7 @@ mod tests {
                 format!("ghcr.io/team/hermes:{tag}"),
                 lns_artifact::image_index::IndexEntry {
                     digest: digest.to_string(),
+                    built_outside_the_gate: false,
                     size: 2,
                     media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
                     os: lns_artifact::image_index::OS.to_string(),
@@ -1140,10 +1158,33 @@ mod tests {
             self
         }
 
+        /// A repository whose index records that a host Docker daemon built one architecture, which a push from another host must not erase (§6.2).
+        fn whose_index_records_a_daemon_build(self, architecture: &str) -> Self {
+            let entries = lns_artifact::image_index::in_index_order(
+                self.held
+                    .borrow()
+                    .values()
+                    .cloned()
+                    .map(|mut entry| {
+                        entry.built_outside_the_gate = entry.architecture == architecture;
+                        entry
+                    })
+                    .collect(),
+            );
+            self.published_indexes.borrow_mut().insert(
+                "ghcr.io/team/hermes:1.4.0-image".to_string(),
+                lns_artifact::image_index::assemble(&entries)
+                    .expect("assembling")
+                    .bytes,
+            );
+            self
+        }
+
         /// A repository whose index tag was left behind by a push that could not see every entry — the race §6.2 names.
         fn with_a_stale_index(self) -> Self {
             self.publishing_an_index_over(&[lns_artifact::image_index::IndexEntry {
                 digest: format!("sha256:{}", "1a".repeat(32)),
+                built_outside_the_gate: false,
                 size: 2,
                 media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
                 os: lns_artifact::image_index::OS.to_string(),
@@ -2256,6 +2297,7 @@ mod tests {
     async fn an_entry_for_a_platform_this_lns_does_not_build_survives_the_next_push() {
         let foreign = lns_artifact::image_index::IndexEntry {
             digest: format!("sha256:{}", "1f".repeat(32)),
+            built_outside_the_gate: false,
             size: 2,
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
             os: lns_artifact::image_index::OS.to_string(),
@@ -2284,6 +2326,46 @@ mod tests {
         assert!(
             text.contains("linux/riscv64") && text.contains("linux/arm64"),
             "the publisher sees every architecture the index now holds: {text}"
+        );
+    }
+
+    /// A per-architecture tag says who wrote a manifest and never which engine did, so the record has to be carried forward off the index the repository already holds.
+    #[tokio::test]
+    async fn a_daemon_build_another_host_recorded_survives_a_push_from_this_one() {
+        let producer = FakeProducer::ok()
+            .holding("1.4.0-image-linux-amd64", "amd64", AMD64_DIGEST)
+            .whose_index_records_a_daemon_build("amd64");
+        let mut out = Vec::new();
+        push_with_builder(
+            &fs_with_a_context(),
+            cwd(),
+            &producer,
+            &unconsultable(),
+            &FakeBuilder::built(&[("sha256:base", 10)]),
+            WITH_A_CONTAINERFILE,
+            "ghcr.io/team/hermes:1.4.0",
+            &mut out,
+        )
+        .await
+        .unwrap();
+
+        let published = producer.published_index();
+        let amd64 = published
+            .iter()
+            .find(|entry| entry.architecture == "amd64")
+            .expect("the index still holds the other architecture");
+        assert!(
+            amd64.built_outside_the_gate,
+            "an approver must not lose the record because another host pushed: {published:?}",
+        );
+        assert!(
+            published
+                .iter()
+                .find(|entry| entry.architecture == "arm64")
+                .expect("this push added its own entry")
+                .built_outside_the_gate
+                .not(),
+            "and this build, which the gate did apply to, records nothing",
         );
     }
 

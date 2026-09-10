@@ -78,6 +78,9 @@ pub enum Request {
     BuildSandbox {
         /// The document as canonical JSON, the same shape a local run sends.
         definition: String,
+        /// Which engine builds it, as this machine's `build.engine` says.
+        #[serde(default)]
+        build_engine: BuildEngine,
         /// The document's absolute directory, which roots the Containerfile path `spec.image` names.
         definition_dir: String,
         /// Ignore every key this build would otherwise answer from, and write the ones it produces.
@@ -93,6 +96,9 @@ pub enum Request {
     BuildImageForPush {
         /// The document as canonical JSON, the same shape a local run sends.
         definition: String,
+        /// Which engine builds it, as this machine's `build.engine` says.
+        #[serde(default)]
+        build_engine: BuildEngine,
         /// The document's absolute directory, which roots the Containerfile path `spec.image` names.
         definition_dir: String,
         /// Ignore every key this build would otherwise answer from, and write the ones it produces.
@@ -609,6 +615,9 @@ pub struct PushableImage {
     /// The platform the image config declares, which is the entry the index publishes it under (`docs/sandbox-spec.md` §6).
     pub os: String,
     pub architecture: String,
+    /// True when a host Docker daemon built it, which the index entry records and every line about the image says (`docs/sandbox-spec.md` §6.2).
+    #[serde(default)]
+    pub built_outside_the_gate: bool,
     pub layers: Vec<PushableLayer>,
 }
 
@@ -635,6 +644,9 @@ pub struct BuildSourceView {
 pub struct BuiltArchitecture {
     pub architecture: String,
     pub digest: String,
+    /// True when the index entry says a host Docker daemon built this architecture (`docs/sandbox-spec.md` §6.2).
+    #[serde(default)]
+    pub built_outside_the_gate: bool,
 }
 
 /// One file of the packed build context, as an approver reads it.
@@ -878,9 +890,32 @@ pub struct PortPublish {
     pub protocol: Protocol,
 }
 
+/// Which engine builds a Containerfile a `spec.image` names: lns's own build guest, where the document's egress and credentials decide what a `RUN` reaches, or the host's Docker daemon, where they decide nothing (`docs/sandbox-spec.md` §3.1.1). It is a property of the machine, read off `build.engine`, never of the document.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BuildEngine {
+    #[default]
+    Lns,
+    Docker {
+        /// The Unix socket the daemon answers on; absent lets the machine that connects find its own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        socket: Option<String>,
+    },
+}
+
+impl BuildEngine {
+    /// Whether a build through this engine happens where the document's egress and credentials decide nothing.
+    pub fn is_outside_the_gate(&self) -> bool {
+        matches!(self, BuildEngine::Docker { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunImageArgs {
     pub image: Option<String>,
+    /// Which engine builds a path-form `image`, as this machine's `build.engine` says.
+    #[serde(default)]
+    pub build_engine: BuildEngine,
     #[serde(default)]
     pub resolved_image: Option<String>,
     /// The mixins the preflight pinned, in the order the user named them; the run merges these, never a reference it has not resolved itself.
@@ -1497,6 +1532,7 @@ mod tests {
             protocol: Protocol::Tcp,
         };
         let req = Request::RunImage(Box::new(RunImageArgs {
+            build_engine: BuildEngine::default(),
             image: Some("prism".into()),
             resolved_image: None,
             mixins: Vec::new(),
@@ -1539,6 +1575,7 @@ mod tests {
     #[test]
     fn run_image_args_declarative_launch_settings_survive_postcard_round_trip() {
         let args = RunImageArgs {
+            build_engine: BuildEngine::default(),
             image: Some("ubuntu".into()),
             resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
             mixins: Vec::new(),
@@ -1685,6 +1722,7 @@ mod tests {
 
     fn sample_run_args() -> RunImageArgs {
         RunImageArgs {
+            build_engine: BuildEngine::default(),
             image: Some("some-image:1".into()),
             resolved_image: None,
             mixins: Vec::new(),
@@ -1949,6 +1987,7 @@ mod tests {
     #[test]
     fn a_sandbox_build_survives_a_request_and_response_round_trip() {
         let req = Request::BuildSandbox {
+            build_engine: BuildEngine::default(),
             definition: r#"{"spec":{"image":"./image"}}"#.into(),
             definition_dir: "/work".into(),
             rebuild: true,
@@ -1980,6 +2019,7 @@ mod tests {
     #[test]
     fn a_build_for_a_push_survives_a_request_and_response_round_trip() {
         let req = Request::BuildImageForPush {
+            build_engine: BuildEngine::default(),
             definition: r#"{"spec":{"image":"./image"}}"#.into(),
             definition_dir: "/work".into(),
             rebuild: false,
@@ -2001,6 +2041,7 @@ mod tests {
             label: "./image/Containerfile".into(),
             reused: true,
             image: Some(Box::new(PushableImage {
+                built_outside_the_gate: false,
                 reference: format!("lns-build.local/built@sha256:{}", "c".repeat(64)),
                 digest: format!("sha256:{}", "c".repeat(64)),
                 manifest: "{}".into(),
@@ -2224,6 +2265,7 @@ mod tests {
     fn sandbox_view_round_trips_declarative_launch_settings() {
         let view = SandboxView {
             image_architectures: vec![BuiltArchitecture {
+                built_outside_the_gate: false,
                 architecture: "arm64".into(),
                 digest: format!("sha256:{}", "f".repeat(64)),
             }],
