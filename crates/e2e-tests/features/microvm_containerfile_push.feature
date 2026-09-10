@@ -2,9 +2,9 @@
 Feature: a document built from a Containerfile publishes its image and pulls back whole
   Slice 5 of lensapp/lens-sandbox#393. `lns push` of a document whose `spec.image`
   is a path builds the Containerfile, publishes the built image into the artifact's
-  own repository — so one grant covers both — and uploads a document that names that
-  image by digest, keeps the path in `imageSource`, and carries the Containerfile
-  with its context as a layer.
+  own repository — so one grant covers both — and uploads a document that names the
+  image index by digest, keeps the path the author wrote, and carries the
+  Containerfile with its context as a layer.
 
   What that is worth is only visible on a second machine: a home that has never
   built anything pulls the artifact, inspects it and reads the instructions off it
@@ -31,6 +31,7 @@ Feature: a document built from a Containerfile publishes its image and pulls bac
     And the output contains "packed ./image/Dockerfile -> sha256:"
     And the output contains "built and pushed"
     And the image was published into the artifact's own repository
+    And the push names the image index it published in the artifact's own repository
 
     When the user pulls the pushed sandbox onto a machine that has never built it
     Then the exit code is 0
@@ -38,8 +39,8 @@ Feature: a document built from a Containerfile publishes its image and pulls bac
 
     When the user inspects the pushed sandbox
     Then the exit code is 0
-    And the published document names its image by digest in the artifact's own repository
-    And the output contains "imageSource: built from ./image/Dockerfile"
+    And the output contains "image: built from ./image/Dockerfile"
+    And inspect prints the built digest for this host's architecture
     And the output contains "context: app/index.js"
     And the output contains "RUN /bin/sh -c 'echo built-by-lns > /built-marker'"
     And the inspect booted no guest

@@ -2079,19 +2079,41 @@ fn inspect_the_pushed_sandbox(world: &mut E2eWorld) -> Result<(), String> {
     Ok(())
 }
 
-#[then("the published document names its image by digest in the artifact's own repository")]
-fn the_published_image_is_a_digest(world: &mut E2eWorld) -> Result<(), String> {
+/// §6.2: the document a push publishes names the index by digest, and the index publishes beside the artifact, so one grant covers both.
+#[then("the push names the image index it published in the artifact's own repository")]
+fn the_push_names_the_index_it_published(world: &mut E2eWorld) -> Result<(), String> {
     let repository = pushed_repository(world)?;
     let run = world.result.as_ref().ok_or("no CLI run captured")?;
     let line = run
         .stdout
         .lines()
-        .find(|line| line.starts_with("image: "))
-        .ok_or_else(|| format!("inspect must name the image:\n{}", run.stdout))?;
+        .find(|line| line.starts_with("index "))
+        .ok_or_else(|| format!("the push must name the index:\n{}", run.stdout))?;
     match line.contains(&format!("{repository}@sha256:")) {
         true => Ok(()),
         false => Err(format!(
             "a consumer must never receive a document it would have to build; got {line}"
+        )),
+    }
+}
+
+#[then("inspect prints the built digest for this host's architecture")]
+fn inspect_prints_this_hosts_digest(world: &mut E2eWorld) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("image: built from "))
+        .ok_or_else(|| {
+            format!(
+                "inspect must name what the image was built from:\n{}",
+                run.stdout
+            )
+        })?;
+    match line.contains(&format!("{} sha256:", host_architecture())) {
+        true => Ok(()),
+        false => Err(format!(
+            "§6.2: the line names one digest per architecture the index holds; got {line}"
         )),
     }
 }

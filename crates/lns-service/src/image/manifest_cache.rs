@@ -64,7 +64,7 @@ impl<R: Registry> Registry for CachingRegistry<R> {
     async fn pull_index(
         &self,
         reference: &Reference,
-    ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
+    ) -> Result<Option<lns_artifact::image_index::HeldIndex>> {
         self.inner.pull_index(reference).await
     }
 
@@ -231,9 +231,9 @@ mod tests {
         async fn pull_index(
             &self,
             _reference: &Reference,
-        ) -> Result<Vec<lns_artifact::image_index::IndexEntry>> {
+        ) -> Result<Option<lns_artifact::image_index::HeldIndex>> {
             *self.index_calls.lock().unwrap() += 1;
-            Ok(Vec::new())
+            Ok(None)
         }
 
         async fn pull_manifest_and_config(
@@ -286,8 +286,8 @@ mod tests {
             ManifestCache::new(d.path()),
         );
         let reference: Reference = PINNED.parse().unwrap();
-        assert!(caching.pull_index(&reference).await.unwrap().is_empty());
-        assert!(caching.pull_index(&reference).await.unwrap().is_empty());
+        assert!(caching.pull_index(&reference).await.unwrap().is_none());
+        assert!(caching.pull_index(&reference).await.unwrap().is_none());
         assert_eq!(*caching.inner.index_calls.lock().unwrap(), 2);
     }
 

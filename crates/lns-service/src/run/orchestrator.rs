@@ -369,6 +369,7 @@ pub(super) async fn orchestrate(
             image::pull,
         )
         .await?;
+        super::report_the_booted_image(image_ref.as_deref(), image.config.as_ref());
         log::debug!("image layers ready at +{:.2?}", prepare_started.elapsed());
         Ok::<_, anyhow::Error>(image)
     };

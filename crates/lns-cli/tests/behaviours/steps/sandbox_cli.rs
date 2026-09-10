@@ -464,9 +464,9 @@ impl lns_artifact::walk::SnapshotFs for StepFs {
 }
 
 /// A repository whose per-architecture tags a scenario staged holds the index those tags assemble to, as the push that wrote them left it.
-fn staged_index_digests(
+fn staged_indexes(
     held: &std::collections::HashMap<String, lns_artifact::image_index::IndexEntry>,
-) -> std::collections::HashMap<String, String> {
+) -> std::collections::HashMap<String, lns_artifact::image_index::HeldIndex> {
     let mut by_repository: std::collections::HashMap<String, Vec<_>> =
         std::collections::HashMap::new();
     for (at, entry) in held {
@@ -488,10 +488,8 @@ fn staged_index_digests(
         .into_iter()
         .filter_map(|(at, entries)| {
             let entries = lns_artifact::image_index::in_index_order(entries);
-            Some((
-                at,
-                lns_artifact::image_index::assemble(&entries).ok()?.digest,
-            ))
+            let digest = lns_artifact::image_index::assemble(&entries).ok()?.digest;
+            Some((at, lns_artifact::image_index::HeldIndex { digest, entries }))
         })
         .collect()
 }
@@ -507,8 +505,8 @@ struct StepProducer {
     held: RefCell<std::collections::HashMap<String, lns_artifact::image_index::IndexEntry>>,
     /// Every index the push uploaded, with the tag it landed under.
     indexes: RefCell<Vec<(String, Vec<u8>)>>,
-    /// The index digest each tag named before this push, assembled from what the scenario staged.
-    published_index_digest: std::collections::HashMap<String, String>,
+    /// The index each tag named before this push, assembled from what the scenario staged.
+    published_index: std::collections::HashMap<String, lns_artifact::image_index::HeldIndex>,
 }
 
 impl distribute::Producer for StepProducer {
@@ -567,18 +565,17 @@ impl distribute::Producer for StepProducer {
         &'a self,
         repository: &'a str,
         tag: &'a str,
-    ) -> LocalBoxFuture<'a, anyhow::Result<Option<String>>> {
+    ) -> LocalBoxFuture<'a, anyhow::Result<Option<lns_artifact::image_index::HeldIndex>>> {
         let held = self
             .indexes
             .borrow()
             .iter()
             .rev()
             .find(|(at, _)| at == &format!("{repository}:{tag}"))
-            .and_then(|(_, bytes)| lns_artifact::image_index::parse(bytes).ok())
-            .and_then(|entries| lns_artifact::image_index::assemble(&entries).ok())
-            .map(|index| index.digest)
+            .and_then(|(_, bytes)| lns_artifact::image_index::held(bytes).ok())
+            .flatten()
             .or_else(|| {
-                self.published_index_digest
+                self.published_index
                     .get(&format!("{repository}:{tag}"))
                     .cloned()
             });
@@ -906,7 +903,7 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
         images: RefCell::new(Vec::new()),
         held: RefCell::new(w.published_images.clone()),
         indexes: RefCell::new(Vec::new()),
-        published_index_digest: staged_index_digests(&w.published_images),
+        published_index: staged_indexes(&w.published_images),
     };
     let mut out: Vec<u8> = Vec::new();
     let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
