@@ -35,7 +35,7 @@ summary, then push it under every tag given.
 
 | Output | Description |
 | --- | --- |
-| `digest` | The manifest digest published, `sha256:…`. Empty when `push` is `false`. |
+| `digest` | The manifest digest published, `sha256:…` — one value, and every reference in `refs` carries it. Empty when `push` is `false`. |
 | `refs` | Every reference pushed, one per line. Empty when `push` is `false`. |
 | `first-push` | `true` when the repository did not exist before this push. Empty when `push` is `false`. |
 
@@ -69,12 +69,29 @@ Publishing the same document to a second repository is a second step.
 The host may be left implicit on some tags and written out on others:
 `acme/gh:v1` and `hub.lns.run/acme/gh:latest` are the same repository.
 
+## Every tag carries the same manifest
+
+Each tag is pushed by its own `lns artifact push`, which rebuilds the document
+every time. With `require-exact-tool-versions: false` a fuzzy tool version is
+resolved per push, so two tags can receive two different manifests — and one
+`digest` output describes neither. Every push's digest is compared against the
+first, and a second manifest fails the step naming both references and both
+digests:
+
+> `::error::'hub.lns.run/acme/gh:v1' published sha256:aaa… but 'hub.lns.run/acme/gh:latest' published sha256:bbb…`
+
+Both are in the registry by then — the job summary lists each reference with
+the digest it received — so the fix is upstream: pin the document's tool
+versions, or leave `require-exact-tool-versions` at `true`, and re-run. With
+exact versions the rebuild is deterministic and every tag lands on one
+manifest, which is what `digest` claims.
+
 ## What the job summary carries
 
 The dry run's output verbatim — the filesets and README layer it packed, the
 digest it would publish, and any mixin it would publish alongside — then, for
-a real push, the digest and every reference pushed. When the repository did
-not exist before, one more line:
+a real push, every reference pushed with the digest it received. When the
+repository did not exist before, one more line:
 
 > `acme/gh` is new and private. Publish it at <https://hub.lns.run/acme/gh/settings>
 
