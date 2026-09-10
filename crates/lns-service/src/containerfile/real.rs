@@ -15,7 +15,7 @@ use crate::oci_layer_cache::LayerCache;
 use super::cache::{BuildCache, CacheFs, Entry, Kind};
 use super::context::{ContextFs, EntryKind, Meta};
 use super::docker::{self, Daemon, DaemonBuild, DockerHost};
-use super::executor::{self, Base, BuildHost, Commit, CopyStep, RunOutcome, RunStep};
+use super::executor::{self, Base, BuildHost, Cached, Commit, CopyStep, RunOutcome, RunStep};
 use super::ext4_upper::Ext4Upper;
 use super::image::ParentImage;
 use super::import::{self, LocalStore};
@@ -160,7 +160,6 @@ pub(crate) async fn build(
     let located = prepared.located.clone();
     let started = std::time::Instant::now();
     let host = build_host(request, &prepared, frame_tx);
-    let outside_the_gate = request.args.build_engine.is_outside_the_gate();
     let built = match &request.args.build_engine {
         lns_ipc::BuildEngine::Lns => executor::build(&host, &prepared.plan(request.rebuild)).await,
         lns_ipc::BuildEngine::Docker { socket } => {
@@ -186,7 +185,7 @@ pub(crate) async fn build(
             started.elapsed(),
             built.layers,
             if built.layers == 1 { "" } else { "s" },
-            match outside_the_gate {
+            match built.built_outside_the_gate {
                 true => format!(" — {}", lns_artifact::image_index::BUILT_OUTSIDE_THE_GATE),
                 false => String::new(),
             },
@@ -199,7 +198,7 @@ pub(crate) async fn build(
         key: built.key,
         reused: built.reused,
         reused_steps: built.reused_steps,
-        built_outside_the_gate: outside_the_gate,
+        built_outside_the_gate: built.built_outside_the_gate,
     })
 }
 
@@ -295,7 +294,6 @@ pub async fn build_image_for_push(request: &PushBuild<'_>) -> Result<lns_ipc::Re
     args.build_engine = request.build_engine.clone();
     args.authored_egress = request.authored_egress.map(str::to_string);
     args.packed_filesets = request.packed_filesets.to_vec();
-    let outside_the_gate = request.build_engine.is_outside_the_gate();
     let plan_only = request.plan_only;
     let request = BuildRequest {
         args: &args,
@@ -303,7 +301,7 @@ pub async fn build_image_for_push(request: &PushBuild<'_>) -> Result<lns_ipc::Re
         image: &image,
         rebuild: request.rebuild,
     };
-    let (key, label, reused, reference) = match plan_only {
+    let (key, label, reused, reference, outside_the_gate) = match plan_only {
         true => {
             let (planned, label) = plan(&request, frame_tx).await?;
             (
@@ -311,11 +309,18 @@ pub async fn build_image_for_push(request: &PushBuild<'_>) -> Result<lns_ipc::Re
                 label,
                 planned.reference.is_some(),
                 planned.reference,
+                planned.built_outside_the_gate,
             )
         }
         false => {
             let built = build(&request, frame_tx).await?;
-            (built.key, built.label, built.reused, Some(built.reference))
+            (
+                built.key,
+                built.label,
+                built.reused,
+                Some(built.reference),
+                built.built_outside_the_gate,
+            )
         }
     };
     let image = match reference {
@@ -569,17 +574,20 @@ impl BuildHost for RealBuildHost {
         super::context::stage(&RealContextFs, &self.context, step)
     }
 
-    async fn cached(&self, kind: Kind, key: &str) -> Option<String> {
+    async fn cached(&self, kind: Kind, key: &str) -> Option<Cached> {
         BuildCache::new(&RealCacheFs, &self.cache_dir)
             .get(kind, key, &self.source, &|reference| self.holds(reference))
-            .map(|entry| entry.reference)
+            .map(|entry| Cached {
+                reference: entry.reference,
+                built_outside_the_gate: entry.built_outside_the_gate,
+            })
     }
 
-    async fn remember(&self, kind: Kind, key: &str, reference: &str) {
+    async fn remember(&self, kind: Kind, key: &str, built: &Cached) {
         if let Err(e) = BuildCache::new(&RealCacheFs, &self.cache_dir).remember(
             kind,
             key,
-            &Entry::built_from(reference, &self.source),
+            &Entry::built_from(&built.reference, &self.source, built.built_outside_the_gate),
         ) {
             log::warn!("this build will not be reused; its key was not written: {e:#}");
         }
@@ -622,12 +630,12 @@ impl DockerHost for RealBuildHost {
         BuildHost::peek_base(self, image).await
     }
 
-    async fn cached(&self, kind: Kind, key: &str) -> Option<String> {
+    async fn cached(&self, kind: Kind, key: &str) -> Option<Cached> {
         BuildHost::cached(self, kind, key).await
     }
 
-    async fn remember(&self, kind: Kind, key: &str, reference: &str) {
-        BuildHost::remember(self, kind, key, reference).await
+    async fn remember(&self, kind: Kind, key: &str, built: &Cached) {
+        BuildHost::remember(self, kind, key, built).await
     }
 
     async fn adopt(

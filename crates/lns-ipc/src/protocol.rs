@@ -903,13 +903,6 @@ pub enum BuildEngine {
     },
 }
 
-impl BuildEngine {
-    /// Whether a build through this engine happens where the document's egress and credentials decide nothing.
-    pub fn is_outside_the_gate(&self) -> bool {
-        matches!(self, BuildEngine::Docker { .. })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunImageArgs {
     pub image: Option<String>,
@@ -1292,20 +1285,6 @@ mod tests {
             help: None,
             overrides: None,
         }
-    }
-
-    /// Only a daemon build happens where the document's own rules decide nothing, and one string decides every line that says so.
-    #[test]
-    fn only_a_daemon_build_is_one_the_gate_did_not_apply_to() {
-        assert!(!BuildEngine::default().is_outside_the_gate());
-        assert!(!BuildEngine::Lns.is_outside_the_gate());
-        assert!(BuildEngine::Docker { socket: None }.is_outside_the_gate());
-        assert!(
-            BuildEngine::Docker {
-                socket: Some("/var/run/docker.sock".into())
-            }
-            .is_outside_the_gate()
-        );
     }
 
     #[test]

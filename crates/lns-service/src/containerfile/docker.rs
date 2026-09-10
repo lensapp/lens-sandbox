@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use super::cache::Kind;
 use super::context::{ContextFs, EntryKind};
-use super::executor::{self, Base, BuildPlan, Built};
+use super::executor::{self, Base, BuildPlan, Built, Cached};
 use super::image::BuiltImage;
 use super::tar_layer::LayerBlob;
 
@@ -460,8 +460,8 @@ fn layer_media_type(bytes: &[u8]) -> &'static str {
 pub(crate) trait DockerHost {
     /// The digest-pinned reference the `FROM` resolves to, read off the registry with no layer fetched — the daemon pulls its own base.
     async fn peek_base(&self, image: &str) -> Result<Base>;
-    async fn cached(&self, kind: Kind, key: &str) -> Option<String>;
-    async fn remember(&self, kind: Kind, key: &str, reference: &str);
+    async fn cached(&self, kind: Kind, key: &str) -> Option<Cached>;
+    async fn remember(&self, kind: Kind, key: &str, built: &Cached);
     /// Take an image another engine built into the local store, with every layer it carries, and answer with the reference the store holds it under.
     async fn adopt(&self, built: &BuiltImage, layers: &[LayerBlob]) -> Result<String>;
 }
@@ -488,14 +488,15 @@ pub(crate) async fn build_image<H: DockerHost, D: Daemon, F: ContextFs>(
         .with_context(|| format!("line {}: FROM {}", preamble.line, preamble.image))?;
     let key = super::key::image_key(&base.reference, plan.text, plan.context_hash, plan.arch);
     if !plan.rebuild
-        && let Some(reference) = host.cached(Kind::Image, &key).await
+        && let Some(cached) = host.cached(Kind::Image, &key).await
     {
         return Ok(Built {
-            reference,
+            reference: cached.reference,
             layers: 0,
             key,
             reused: true,
             reused_steps: plan.file.instructions.len(),
+            built_outside_the_gate: cached.built_outside_the_gate,
         });
     }
     ping(daemon).await?;
@@ -515,13 +516,18 @@ pub(crate) async fn build_image<H: DockerHost, D: Daemon, F: ContextFs>(
     let saved = read_saved_image(&export(daemon, &tag).await?)?;
     let built = as_oci_image(&saved)?;
     let reference = host.adopt(&built, &saved.layers).await?;
-    host.remember(Kind::Image, &key, &reference).await;
+    let outside_the_gate = Cached {
+        reference,
+        built_outside_the_gate: true,
+    };
+    host.remember(Kind::Image, &key, &outside_the_gate).await;
     Ok(Built {
         layers: saved.layers.len(),
-        reference,
+        reference: outside_the_gate.reference,
         key,
         reused: false,
         reused_steps: 0,
+        built_outside_the_gate: true,
     })
 }
 
@@ -1027,8 +1033,8 @@ mod tests {
     #[derive(Default)]
     struct FakeDockerHost {
         base: Option<Base>,
-        held: Option<String>,
-        remembered: RefCell<Vec<(String, String)>>,
+        held: Option<Cached>,
+        remembered: RefCell<Vec<(String, Cached)>>,
         adopted: RefCell<Vec<(String, usize)>>,
     }
 
@@ -1039,14 +1045,14 @@ mod tests {
                 .with_context(|| format!("no registry answers for {image}"))
         }
 
-        async fn cached(&self, _kind: Kind, _key: &str) -> Option<String> {
+        async fn cached(&self, _kind: Kind, _key: &str) -> Option<Cached> {
             self.held.clone()
         }
 
-        async fn remember(&self, _kind: Kind, key: &str, reference: &str) {
+        async fn remember(&self, _kind: Kind, key: &str, built: &Cached) {
             self.remembered
                 .borrow_mut()
-                .push((key.to_string(), reference.to_string()));
+                .push((key.to_string(), built.clone()));
         }
 
         async fn adopt(&self, built: &BuiltImage, layers: &[LayerBlob]) -> Result<String> {
@@ -1143,7 +1149,7 @@ mod tests {
             Some(built.key.clone()),
         );
         assert_eq!(host.adopted.borrow().len(), 1);
-        assert_eq!(built.reference, host.remembered.borrow()[0].1);
+        assert_eq!(built.reference, host.remembered.borrow()[0].1.reference);
         assert_eq!(
             daemon.sent.borrow().len(),
             3,
@@ -1159,10 +1165,46 @@ mod tests {
         );
     }
 
+    /// Nothing else on this machine records which engine filled a key, so the entry the reuse answers with is where the disclosure comes from (§3.1.1).
+    #[tokio::test]
+    async fn a_daemon_build_is_remembered_as_one_the_gate_did_not_apply_to() {
+        let host = a_host();
+        let built = built_through(&host, &a_daemon_that_builds(), false)
+            .await
+            .expect("building");
+
+        assert!(built.built_outside_the_gate);
+        assert!(
+            host.remembered.borrow()[0].1.built_outside_the_gate,
+            "the next build to answer this key has to read the daemon off it",
+        );
+    }
+
+    /// The switch says `docker`, but this key was filled in a build guest, so the gate did apply to the image it answers with.
+    #[tokio::test]
+    async fn a_key_a_guest_filled_answers_the_daemon_switch_and_says_the_gate_applied() {
+        let host = FakeDockerHost {
+            held: Some(Cached {
+                reference: "lns-build.local/built@sha256:held".to_string(),
+                built_outside_the_gate: false,
+            }),
+            ..a_host()
+        };
+        let built = built_through(&host, &FakeDaemon::answering(&[]), false)
+            .await
+            .expect("building");
+
+        assert!(built.reused);
+        assert!(!built.built_outside_the_gate);
+    }
+
     #[tokio::test]
     async fn a_key_this_machine_already_answers_runs_no_daemon_at_all() {
         let host = FakeDockerHost {
-            held: Some("lns-build.local/built@sha256:held".to_string()),
+            held: Some(Cached {
+                reference: "lns-build.local/built@sha256:held".to_string(),
+                built_outside_the_gate: false,
+            }),
             ..a_host()
         };
         let daemon = FakeDaemon::answering(&[]);
@@ -1181,7 +1223,10 @@ mod tests {
     #[tokio::test]
     async fn a_rebuild_ignores_the_key_this_machine_holds_and_builds_again() {
         let host = FakeDockerHost {
-            held: Some("lns-build.local/built@sha256:held".to_string()),
+            held: Some(Cached {
+                reference: "lns-build.local/built@sha256:held".to_string(),
+                built_outside_the_gate: false,
+            }),
             ..a_host()
         };
         let built = built_through(&host, &a_daemon_that_builds(), true)
