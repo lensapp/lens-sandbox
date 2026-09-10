@@ -25,14 +25,8 @@ runs:
     - name: Mask the token
       shell: bash
       env:
-        INPUT_PASSWORD: ${{ inputs.password }}
-      run: |
-        set -euo pipefail
-        if [ -z "$INPUT_PASSWORD" ]; then
-          echo "::error::password is required."
-          exit 1
-        fi
-        echo "::add-mask::$INPUT_PASSWORD"
+        LNS_ACTION_SECRET: ${{ inputs.password }}
+      run: bash "$GITHUB_ACTION_PATH/../lib/mask-secret.sh"
 
     - name: Log in
       shell: bash

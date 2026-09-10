@@ -27,7 +27,10 @@ mode 0600, leaving every other host in the file alone.
 
 Pass a secret, never a literal. The action masks it with `::add-mask::` before
 anything else runs, and hands it to the script through the environment — it is
-never an argument to any process, so it cannot appear in `ps` output.
+never an argument to any process, so it cannot appear in `ps` output. `%`,
+carriage returns and newlines are escaped before the mask is emitted, so a
+multi-line token is masked as entered rather than spilling its later lines into
+the log.
 
 Log out at the end of a job that runs untrusted steps afterwards:
 
