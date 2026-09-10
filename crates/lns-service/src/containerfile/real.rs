@@ -223,10 +223,11 @@ impl Daemon for RealDaemon {
         &self.socket
     }
 
-    async fn round_trip(&self, request: &[u8]) -> Result<Vec<u8>> {
+    async fn round_trip(&self, head: &[u8], body: &[u8]) -> Result<Vec<u8>> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut stream = tokio::net::UnixStream::connect(&self.socket).await?;
-        stream.write_all(request).await?;
+        stream.write_all(head).await?;
+        stream.write_all(body).await?;
         stream.shutdown().await?;
         let mut answer = Vec::new();
         stream.read_to_end(&mut answer).await?;

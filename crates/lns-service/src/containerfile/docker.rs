@@ -27,11 +27,11 @@ pub(crate) const BUILD_TAG_REPOSITORY: &str = "lns-build.local/docker";
 pub(crate) const SWITCH_OFF_RECIPE: &str =
     "run `lns config set build.engine lns` to build in a guest instead";
 
-/// One HTTP exchange with the daemon: the caller writes the whole request and reads until the daemon closes, so no framing decision lives in the transport.
+/// One HTTP exchange with the daemon: the caller writes the head and the body and reads until the daemon closes, so no framing decision lives in the transport and a context is never copied into a request buffer.
 pub(crate) trait Daemon {
     /// The socket this daemon was reached at, which every refusal names.
     fn socket(&self) -> &str;
-    async fn round_trip(&self, request: &[u8]) -> Result<Vec<u8>>;
+    async fn round_trip(&self, head: &[u8], body: &[u8]) -> Result<Vec<u8>>;
 }
 
 /// One request to the Engine API, as the daemon reads it off the socket.
@@ -87,8 +87,8 @@ pub(crate) struct ApiResponse {
     pub body: Vec<u8>,
 }
 
-/// The bytes one request is on the wire: `Connection: close` so the whole answer is what the transport reads to EOF.
-pub(crate) fn encode(request: &ApiRequest) -> Vec<u8> {
+/// The head one request is on the wire, its body written after it: `Connection: close` so the whole answer is what the transport reads to EOF.
+pub(crate) fn encode_head(request: &ApiRequest) -> Vec<u8> {
     let query = form_urlencoded::Serializer::new(String::new())
         .extend_pairs(request.query.iter())
         .finish();
@@ -104,9 +104,7 @@ pub(crate) fn encode(request: &ApiRequest) -> Vec<u8> {
         head.push_str(&format!("Content-Type: {content_type}\r\n"));
     }
     head.push_str(&format!("Content-Length: {}\r\n\r\n", request.body.len()));
-    let mut bytes = head.into_bytes();
-    bytes.extend_from_slice(&request.body);
-    bytes
+    head.into_bytes()
 }
 
 /// The status and the body of a whole HTTP/1.1 answer, chunked or not; a daemon that answered nothing at all is not an answer.
@@ -167,7 +165,7 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>> {
 async fn call<D: Daemon>(daemon: &D, request: ApiRequest) -> Result<ApiResponse> {
     let path = request.path.clone();
     let answer = daemon
-        .round_trip(&encode(&request))
+        .round_trip(&encode_head(&request), &request.body)
         .await
         .with_context(|| refuse_an_unreachable_daemon(daemon.socket()))?;
     decode(&answer).with_context(|| format!("reading what the Docker daemon answered to {path}"))
@@ -213,7 +211,7 @@ pub(crate) fn build_tag(key: &str) -> String {
 }
 
 /// `POST /build`: the context goes up as a tar, and the daemon answers a stream of JSON lines whose last word on failure is the build's own.
-pub(crate) async fn build<D: Daemon>(daemon: &D, request: &DockerBuild) -> Result<String> {
+pub(crate) async fn build<D: Daemon>(daemon: &D, request: DockerBuild) -> Result<String> {
     let args = serde_json::to_string(
         &request
             .build_args
@@ -222,10 +220,11 @@ pub(crate) async fn build<D: Daemon>(daemon: &D, request: &DockerBuild) -> Resul
             .collect::<serde_json::Map<String, serde_json::Value>>(),
     )
     .context("serializing the build arguments the Containerfile declares")?;
-    let call_request = ApiRequest::post("/build", "application/x-tar", request.context_tar.clone())
-        .with("dockerfile", request.containerfile.clone())
-        .with("t", request.tag.clone())
-        .with("platform", request.platform.clone())
+    let tag = request.tag;
+    let call_request = ApiRequest::post("/build", "application/x-tar", request.context_tar)
+        .with("dockerfile", request.containerfile)
+        .with("t", tag.clone())
+        .with("platform", request.platform)
         .with("buildargs", args)
         .with("rm", "1")
         .with(
@@ -244,7 +243,7 @@ pub(crate) async fn build<D: Daemon>(daemon: &D, request: &DockerBuild) -> Resul
         );
     }
     refuse_a_failed_build(&answer.body)?;
-    Ok(request.tag.clone())
+    Ok(tag)
 }
 
 /// The daemon answers a build with 200 before it runs it, so a failure is a line of the stream and not a status.
@@ -524,7 +523,7 @@ pub(crate) async fn build_image<H: DockerHost, D: Daemon, F: ContextFs>(
     let tag = build_tag(&key);
     build(
         daemon,
-        &DockerBuild {
+        DockerBuild {
             context_tar: context_tar(
                 fs,
                 where_from.context,
@@ -640,13 +639,15 @@ mod tests {
             &self.socket
         }
 
-        async fn round_trip(&self, request: &[u8]) -> Result<Vec<u8>> {
+        async fn round_trip(&self, head: &[u8], body: &[u8]) -> Result<Vec<u8>> {
             if self.unreachable {
                 bail!("No such file or directory (os error 2)");
             }
-            self.sent
-                .borrow_mut()
-                .push(String::from_utf8_lossy(request).to_string());
+            self.sent.borrow_mut().push(format!(
+                "{}{}",
+                String::from_utf8_lossy(head),
+                String::from_utf8_lossy(body),
+            ));
             self.answers
                 .borrow_mut()
                 .pop()
@@ -664,12 +665,12 @@ mod tests {
 
     #[test]
     fn a_request_carries_its_body_length_and_asks_the_daemon_to_close() {
-        let bytes = encode(&ApiRequest::post(
-            "/build",
-            "application/x-tar",
-            b"tar".to_vec(),
-        ));
-        let text = String::from_utf8(bytes).unwrap();
+        let request = ApiRequest::post("/build", "application/x-tar", b"tar".to_vec());
+        let text = format!(
+            "{}{}",
+            String::from_utf8(encode_head(&request)).unwrap(),
+            String::from_utf8(request.body.clone()).unwrap(),
+        );
         assert!(text.starts_with("POST /v1.43/build HTTP/1.1\r\n"), "{text}");
         assert!(
             text.contains("Content-Type: application/x-tar\r\n"),
@@ -682,7 +683,7 @@ mod tests {
 
     #[test]
     fn every_query_value_is_escaped_so_a_build_argument_cannot_forge_one() {
-        let bytes = encode(
+        let bytes = encode_head(
             &ApiRequest::get("/build")
                 .with("t", "lns-build.local/docker:aa")
                 .with("buildargs", r#"{"V":"1 2&3"}"#),
@@ -765,7 +766,7 @@ mod tests {
     #[tokio::test]
     async fn a_build_sends_the_context_the_file_inside_it_and_the_arg_defaults() {
         let daemon = FakeDaemon::answering(&[&ok(r#"{"stream":"Step 1/2"}"#)]);
-        let tag = build(&daemon, &a_build()).await.expect("building");
+        let tag = build(&daemon, a_build()).await.expect("building");
 
         assert_eq!(tag, "lns-build.local/docker:aabb");
         let sent = daemon.sent.borrow()[0].clone();
@@ -786,7 +787,7 @@ mod tests {
         let daemon = FakeDaemon::answering(&[&ok("{}")]);
         build(
             &daemon,
-            &DockerBuild {
+            DockerBuild {
                 rebuild: true,
                 ..a_build()
             },
@@ -802,7 +803,7 @@ mod tests {
         let daemon = FakeDaemon::answering(&[&ok(
             "not json at all\n{\"stream\":\"Step 1/2\"}\n{\"errorDetail\":{\"code\":1},\"error\":\"The command '/bin/sh -c npm i' returned a non-zero code: 1\"}\n",
         )]);
-        let err = build(&daemon, &a_build()).await.unwrap_err();
+        let err = build(&daemon, a_build()).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("returned a non-zero code: 1"),
             "{err:#}"
@@ -814,7 +815,7 @@ mod tests {
         let daemon = FakeDaemon::answering(&[
             b"HTTP/1.1 400 Bad Request\r\nContent-Length: 22\r\n\r\n{\"message\":\"no build\"}\n",
         ]);
-        let err = build(&daemon, &a_build()).await.unwrap_err();
+        let err = build(&daemon, a_build()).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("refused the build with 400"),
             "{err:#}"
