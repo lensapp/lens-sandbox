@@ -739,6 +739,9 @@ mod tests {
 
     #[test]
     fn a_tag_no_push_has_written_yet_reads_as_holding_nothing() {
+        assert!(names_nothing_yet(
+            &OciDistributionError::ImageManifestNotFoundError("no manifest".into())
+        ));
         assert!(names_nothing_yet(&OciDistributionError::ServerError {
             code: 404,
             url: "https://ghcr.io/v2/acme/app/manifests/1-image-linux-amd64".into(),
