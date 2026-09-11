@@ -4,6 +4,7 @@ bundle_scripts=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 bundle_test_root=$(mktemp -d)
 trap 'rm -rf "$bundle_test_root"' EXIT HUP INT TERM
 export PATH="$bundle_scripts/fixtures:$PATH"
+export SWIFT=swift
 export BUNDLE_SIGN_LOG="$bundle_test_root/sign.log"
 export BUNDLE_SIGN_FAIL=0
 mkdir -p "$bundle_test_root/helpers" "$bundle_test_root/output"
@@ -21,7 +22,8 @@ test -x "$bundle_test_root/output/LNS.app/Contents/Helpers/lns"
 test -x "$bundle_test_root/output/LNS.app/Contents/Helpers/lns-service"
 grep -q '<string>0.25.0</string>' "$bundle_test_root/output/LNS.app/Contents/Info.plist"
 grep -q '<string>42</string>' "$bundle_test_root/output/LNS.app/Contents/Info.plist"
-cmp "$bundle_scripts/../../../crates/lns-service/assets/lnsTemplate@2x.png" "$bundle_test_root/output/LNS.app/Contents/Resources/lnsTemplate@2x.png"
+cmp "$bundle_scripts/../../../crates/lns-service/assets/lnsTemplate@2x.png" "$bundle_test_root/output/LNS.app/Contents/Resources/lnsTemplate.png"
+test -f "$bundle_test_root/output/LNS.app/Contents/Resources/lnsTemplate.png" || { echo 'FAIL: the menu-bar image has no explicit base resource' >&2; exit 1; }
 test -s "$bundle_test_root/output/LNS.app/Contents/Resources/LNS.icns"
 grep -q '<key>CFBundleIconFile</key><string>LNS.icns</string>' "$bundle_test_root/output/LNS.app/Contents/Info.plist"
 grep -q '<key>LSUIElement</key><false/>' "$bundle_test_root/output/LNS.app/Contents/Info.plist"

@@ -57,6 +57,9 @@ Use **Navigate → Audit** (⌘1), **Approvals** (⌘2), or **Live Requests** (�
 menu-bar interface.
 The Dock and menu bar use the original LNS logo. The menu-bar image remains a
 template so macOS adapts its color to the current appearance.
+The Dock image is assigned at startup even when launching the app executable
+directly from a terminal. If an icon cannot load, the menu bar shows **LNS** and
+the app reports the missing or invalid asset.
 ⌘F focuses audit search and ⌘R refreshes the dashboard. Escape clears a focused
 search or closes focused event details. Standard macOS window controls and ⌘W
 close a window without stopping the service; the menu-bar interface stays open.
@@ -204,6 +207,8 @@ stale connector disclosures, duplicate actions, reconnect state, and shared
 Rust/Swift wire fixtures.
 `make -C clients/macos launch-smoke` checks the bundled CLI invocation and drains
 both output streams through real subprocesses, including a failed launch.
+On macOS, `make -C clients/macos icon-smoke` decodes and renders the packaged
+icons from a relocated app bundle and checks missing-resource reporting.
 Those Foundation-only tests also run on Linux with Swift installed. CI runs
 `verify` on macOS when the native client or its service contract changes.
 

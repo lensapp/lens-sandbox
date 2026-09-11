@@ -22,8 +22,11 @@ struct LNSApp: App {
         MenuBarExtra {
             MenuContent(model: delegate.model)
         } label: {
-            Image("lnsTemplate", bundle: .main).renderingMode(.template)
-                .accessibilityLabel("LNS")
+            if case let .success(icons) = delegate.icons {
+                Image(nsImage: icons.menuBar).renderingMode(.template).accessibilityLabel("LNS")
+            } else {
+                Text("LNS")
+            }
         }
     }
 }
@@ -31,9 +34,14 @@ struct LNSApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
+    let icons = Result { try AppIcons(bundle: .main) }
     private var panel: ApprovalPanel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        switch icons {
+        case let .success(icons): NSApplication.shared.applicationIconImage = icons.dock
+        case let .failure(error): model.notice = error.localizedDescription
+        }
         let panel = ApprovalPanel(model: model)
         self.panel = panel
         model.onSnapshot = { [weak panel] in panel?.update($0) }

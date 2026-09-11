@@ -4,7 +4,7 @@ VERSION ?= $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' ../../crates/lns-cli/C
 BUILD_NUMBER ?= $(shell git rev-list --count HEAD)
 HELPER_DIR ?= ../../bin
 
-.PHONY: test build verify package shell-tests smoke transport-smoke launch-smoke
+.PHONY: test build verify package shell-tests smoke transport-smoke launch-smoke icon-smoke
 
 test: shell-tests
 	$(SWIFT) test
@@ -36,4 +36,9 @@ launch-smoke:
 	$(SWIFT) build --product LNSLaunchSmoke
 	python3 Smoke/launch.py .build/debug/LNSLaunchSmoke
 
-verify: test build transport-smoke launch-smoke
+icon-smoke: build
+	python3 scripts/icon.test.py dist/LNS.app/Contents/Resources/LNS.icns
+	$(SWIFT)c Sources/LNSMac/AppIcons.swift Smoke/Icons/main.swift -o .build/LNSIconSmoke
+	python3 Smoke/icons.py .build/LNSIconSmoke dist/LNS.app
+
+verify: test icon-smoke transport-smoke launch-smoke

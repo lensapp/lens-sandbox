@@ -21,7 +21,7 @@ struct SandboxList: View {
                 Spacer()
                 Button { model.creatingSandbox = true } label: { Label("New Sandbox…", systemImage: "plus") }
                     .buttonStyle(.borderedProminent).disabled(!model.canCreateSandbox)
-                    .help(model.creation == nil ? "Creating sandboxes requires the app bundle containing the lns helper." : "Run a local sandbox definition or a published reference")
+                    .help(model.creation == nil ? "This build includes only the interface. For a full demo, run make -C clients/macos package, then reopen dist/LNS.app." : "Run a local sandbox definition or a published reference")
             }.padding(.horizontal, 16).padding(.top, 16)
             HStack(spacing: 16) {
                 TextField("Find a sandbox", text: $search).textFieldStyle(.roundedBorder)
