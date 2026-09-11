@@ -14,10 +14,11 @@ struct DashboardView: View {
         } detail: {
             VStack(spacing: 0) {
                 notices
-                if model.page == .audit {
-                    AuditTimeline(model: model)
-                } else {
-                    ApprovalHistory(model: model)
+                switch model.page {
+                case .sandboxes: SandboxList(model: model)
+                case .connectors: ConnectorCards(model: model)
+                case .audit: AuditTimeline(model: model)
+                case .approvals: ApprovalHistory(model: model)
                 }
             }
             .frame(minWidth: 540, minHeight: 400)
@@ -37,6 +38,9 @@ struct DashboardView: View {
             }
         }
         .task { await model.watch() }
+        .sheet(item: $model.managementSheet) { sheet in
+            ManagementForm(model: model, sheet: sheet).id(sheet.id)
+        }
         .onChange(of: model.page) { _ in model.selectedEvent = nil; model.clearHistory() }
         .onAppear { NSApplication.shared.setActivationPolicy(.regular) }
     }
@@ -49,7 +53,7 @@ struct DashboardView: View {
                         model.page = page
                     } label: {
                         HStack {
-                            Label(page.rawValue, systemImage: page == .audit ? "list.bullet.rectangle" : "checkmark.shield")
+                            Label(page.rawValue, systemImage: page.symbol)
                             Spacer()
                             if page == .approvals, model.waitingCount > 0 {
                                 Text("\(model.waitingCount)").font(.caption.monospacedDigit())
@@ -62,10 +66,12 @@ struct DashboardView: View {
                     .accessibilityValue(model.page == page ? "Selected" : "")
                 }
             }
-            Section("Sandboxes") {
-                sandboxButton(id: nil, name: "All sandboxes", image: "", status: "")
-                ForEach(model.data.sandboxes) { sandbox in
-                    sandboxButton(id: sandbox.id, name: sandbox.name, image: sandbox.image, status: sandbox.status)
+            if model.page == .audit || model.page == .approvals {
+                Section("Sandboxes") {
+                    sandboxButton(id: nil, name: "All sandboxes", image: "", status: "")
+                    ForEach(model.data.sandboxes) { sandbox in
+                        sandboxButton(id: sandbox.id, name: sandbox.name, image: sandbox.image, status: sandbox.status)
+                    }
                 }
             }
         }
@@ -101,6 +107,12 @@ struct DashboardView: View {
     @ViewBuilder private var notices: some View {
         if let message = model.connectionNotice { notice(message) }
         if let message = model.notice { notice(message) }
+        if model.page == .sandboxes || model.page == .connectors {
+            if let message = model.management.error { notice(message) }
+            if let message = model.management.message {
+                Text(message).font(.callout).frame(maxWidth: .infinity, alignment: .leading).padding(10)
+            }
+        }
         if let message = live.notice { notice(message) }
         if !live.connected {
             VStack(alignment: .leading, spacing: 8) {

@@ -3,14 +3,25 @@ import Combine
 import LNSClient
 
 enum DashboardPage: String, CaseIterable, Identifiable {
-    case audit = "Audit", approvals = "Approvals"
+    case sandboxes = "Sandboxes", connectors = "Connectors", audit = "Audit", approvals = "Approvals"
     var id: String { rawValue }
+    var symbol: String {
+        switch self {
+        case .sandboxes: return "shippingbox"
+        case .connectors: return "link"
+        case .audit: return "list.bullet.rectangle"
+        case .approvals: return "checkmark.shield"
+        }
+    }
 }
 
 @MainActor
 final class DashboardModel: ObservableObject {
     @Published private(set) var feed = DashboardFeed()
-    @Published var page = DashboardPage.audit
+    @Published var page = DashboardPage.sandboxes
+    @Published var managementSheet: ManagementSheet?
+    @Published var grantRun = ""
+    let management: ManagementSession
     @Published var filters = DashboardFilters()
     @Published var selectedEvent: String?
     @Published private(set) var selectedHistory: String?
@@ -29,7 +40,9 @@ final class DashboardModel: ObservableObject {
 
     init(service: any ServiceClient) {
         self.service = service
+        management = ManagementSession(service: service)
         refreshes = DashboardRefresh { try await service.dashboard() }
+        management.onChange = { [weak self] in self?.objectWillChange.send() }
     }
 
     var data: DashboardData { feed.data }
@@ -41,8 +54,19 @@ final class DashboardModel: ObservableObject {
     var waitingCount: Int { filters.waitingCount(in: data) }
     var detail: DashboardEvent? { data.events.first { $0.id == selectedEvent } }
     var sandboxName: String {
+        if page == .connectors { return "Installed on this Mac" }
+        if page == .sandboxes { return "\(currentSandboxes.count) sandboxes" }
         guard let id = filters.sandbox else { return "All sandboxes" }
         return data.sandboxes.first { $0.id == id }?.name ?? id
+    }
+
+    var currentSandboxes: [DashboardSandbox] { data.sandboxes.filter(\.controllable) }
+
+    func manage(_ command: ManagementCommand, reviewing offer: ConnectorOffer? = nil) async -> Bool {
+        guard connected else { return false }
+        let success = await management.perform(command, reviewing: offer)
+        if success { await refresh() }
+        return success
     }
 
     func watch() async {
@@ -83,14 +107,18 @@ final class DashboardModel: ObservableObject {
         let snapshot = try await refreshes.refresh()
         try Task.checkCancellation()
         feed.receive(snapshot)
+        management.serviceConnected()
         connectionNotice = nil
         if let id = selectedEvent, !snapshot.events.contains(where: { $0.id == id }) { selectedEvent = nil }
         if let id = selectedHistory, !snapshot.approvals.contains(where: { $0.id == id }) { clearHistory() }
+        await management.refresh()
     }
 
     private func disconnect() {
         refreshes.cancel()
         feed.disconnect()
+        management.disconnect()
+        managementSheet = nil
         selectedEvent = nil
         clearHistory()
     }

@@ -1,7 +1,7 @@
 # Native macOS client
 
-This client provides an audit dashboard, approval history, live network
-approvals, and connector grants using SwiftUI and AppKit. It communicates with
+This client provides sandbox controls, connector management, an audit dashboard,
+approval history, and live network approvals using SwiftUI and AppKit. It communicates with
 `lns-service` through the same local IPC boundary available to other clients.
 It does not read run directories, write policy, or embed the Rust service.
 
@@ -15,7 +15,36 @@ evaluation, not the default shipping macOS interface.
 
 ## Desktop controls
 
+The dashboard opens on **Sandboxes**, a searchable list of running and stopped
+sandboxes. Start or stop a sandbox, open its activity or approvals, or choose
+**Grant Connector Access…** to select a connector for it. Removing a stopped
+sandbox asks first and deletes its writable layer and decisions. Removed
+sandboxes remain available in audit history but are excluded from the controls.
+
+**Connectors** shows installed connectors as cards, including each method's
+readiness and saved connections with their authority. Install a registry
+reference or choose a local connector document. **Connect…** saves a named
+connection using the method's credential fields; it does not grant a sandbox
+access. Connection names must be new, so adding an account cannot replace an
+existing connection by accident.
+
+**Grant Access…** asks for a sandbox, method, and, when needed, a saved connection.
+The form discloses destinations, files, variables, and connection authority before
+you grant. **Add Connection…** returns to the grant form after connecting. A grant
+replaces that sandbox's previous grant for the connector. The app rechecks the
+connector inventory before submitting; if it changed, reopen the form to review
+the current offer. Where the service does not provide sandbox-specific deny-rule
+overrides, the form says they could not be checked.
+
+The card menu offers **Forget Sandbox Decision…**, which makes the sandbox ask
+again on its next start. Disconnecting removes a saved connection; uninstalling
+removes the connector and its connections. Both ask first and leave existing
+sandbox grants in place. Refresh with ⌘R after changing connectors in another
+client.
+
 Use **Navigate → Audit** (⌘1), **Approvals** (⌘2), or **Live Requests** (⌘3).
+**Sandboxes** (⌘4) and **Connectors** (⌘5) are also available from Navigate and the
+menu-bar interface.
 ⌘F focuses audit search and ⌘R refreshes the dashboard. Escape clears a focused
 search or closes focused event details. Standard macOS window controls and ⌘W
 close a window without stopping the service; the menu-bar interface stays open.
@@ -158,7 +187,9 @@ coordinated app/service updates are still required before shipping it.
 ## Verification
 
 `make -C clients/macos test` tests framing, dashboard replacement and filtering,
-history requests, reconnect state, and shared Rust/Swift wire fixtures.
+history requests, management commands and outcomes, explicit grant selection,
+stale connector disclosures, duplicate actions, reconnect state, and shared
+Rust/Swift wire fixtures.
 Those Foundation-only tests also run on Linux with Swift installed. CI runs
 `verify` on macOS when the native client or its service contract changes.
 

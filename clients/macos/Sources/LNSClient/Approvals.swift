@@ -107,6 +107,36 @@ public struct ServiceRequest: Encodable {
     public let digest: String?
     public let notices: [String]?
     public let connection: ConnectionChoice?
+    private var management: ManagementCommand?
+    public var replyTimeout: Double {
+        switch type {
+        case "StartRun", "InstallConnector": return 300
+        case "StopRun": return 30
+        default: return 10
+        }
+    }
+
+    public static func management(_ command: ManagementCommand) -> Self {
+        var request = Self(type: command.type)
+        request.management = command
+        return request
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, token, action, id, answer, method, digest, notices, connection }
+
+    public func encode(to encoder: Encoder) throws {
+        if let management { try management.encode(to: encoder); return }
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(type, forKey: .type)
+        try fields.encodeIfPresent(token, forKey: .token)
+        try fields.encodeIfPresent(action, forKey: .action)
+        try fields.encodeIfPresent(id, forKey: .id)
+        try fields.encodeIfPresent(answer, forKey: .answer)
+        try fields.encodeIfPresent(method, forKey: .method)
+        try fields.encodeIfPresent(digest, forKey: .digest)
+        try fields.encodeIfPresent(notices, forKey: .notices)
+        try fields.encodeIfPresent(connection, forKey: .connection)
+    }
 
     private init(type: String, token: String? = nil, action: ApprovalAction? = nil,
                  id: String? = nil, answer: HistoryAnswer? = nil, method: String? = nil, digest: String? = nil, connection: ConnectionChoice? = nil, notices: [String]? = nil) {
@@ -171,11 +201,13 @@ public struct ServiceRequest: Encodable {
 public enum ServiceReply {
     case snapshot(ApprovalSnapshot), submitted, stale, shuttingDown
     case acknowledged, offer(ConnectorOffer?)
+    case connectors([ConnectorOffer]), completed(String)
 
     public static func decode(_ data: Data) throws -> Self {
         struct Envelope: Decodable { let type: String; let message: String? }
         let decoder = JSONDecoder()
         let envelope = try decoder.decode(Envelope.self, from: data)
+        if let reply = try management(data, type: envelope.type) { return reply }
         switch envelope.type {
         case "LiveApprovals": return .snapshot(try decoder.decode(ApprovalSnapshot.self, from: data))
         case "LiveApprovalSubmitted": return .submitted
