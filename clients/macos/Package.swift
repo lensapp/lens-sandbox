@@ -10,6 +10,7 @@ var targets: [Target] = [
 #if os(macOS)
 products.append(.executable(name: "LNS", targets: ["LNSMac"]))
 targets.append(.executableTarget(name: "LNSMac", dependencies: ["LNSClient"]))
+targets.append(.testTarget(name: "LNSMacTests", dependencies: ["LNSMac", "LNSClient"]))
 targets.append(.executableTarget(name: "LNSClientSmoke", dependencies: ["LNSClient"], path: "Smoke/Client"))
 #endif
 

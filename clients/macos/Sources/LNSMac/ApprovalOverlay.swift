@@ -59,7 +59,9 @@ struct ApprovalOverlay: View {
                 .padding(16).frame(maxWidth: .infinity, alignment: .leading)
                 .background {
                     GeometryReader { geometry in
-                        Color.clear.preference(key: ApprovalContentHeight.self, value: geometry.size.height)
+                        Color.clear
+                            .onAppear { updateHeight(geometry.size.height) }
+                            .onChange(of: geometry.size.height) { updateHeight($0) }
                     }
                 }
             }
@@ -70,13 +72,14 @@ struct ApprovalOverlay: View {
         .overlay {
             RoundedRectangle(cornerRadius: 8).strokeBorder(LNSTheme.border, lineWidth: 1).allowsHitTesting(false)
         }
-        .onPreferenceChange(ApprovalContentHeight.self) { value in
-            guard value > 0 else { return }
-            contentHeight = value
-            resize(min(value + 49, maximumHeight))
-        }
         .onChange(of: maximumHeight) { _ in resize(height) }
         .onExitCommand(perform: hide)
+    }
+
+    private func updateHeight(_ value: CGFloat) {
+        guard value > 0 else { return }
+        contentHeight = value
+        resize(min(value + 49, maximumHeight))
     }
 
     private func noticeView(_ message: String) -> some View {
@@ -86,9 +89,4 @@ struct ApprovalOverlay: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12).background(LNSTheme.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
     }
-}
-
-private struct ApprovalContentHeight: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }

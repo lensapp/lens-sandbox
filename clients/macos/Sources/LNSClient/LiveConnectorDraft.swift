@@ -5,6 +5,11 @@ public struct LiveConnectorDraft {
     public var name = ""
     public var values: [String: String] = [:]
     public init() {}
+    public init(offer: ConnectorOffer) {
+        selection = offer.grantOptions.first?.id
+            ?? offer.methods.first { $0.offerable && $0.auth_label != nil }.map { "new:\($0.name)" }
+            ?? ""
+    }
 
     public mutating func choose(_ id: String) {
         selection = id

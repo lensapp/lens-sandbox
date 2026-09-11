@@ -16,8 +16,8 @@ struct ApprovalCard: View {
                 Spacer()
                 Menu {
                     if approval.offer == nil {
-                        Button("Always Allow") { respond(.allowAlways) }
-                        Button("Always Deny") { respond(.denyAlways) }
+                        Button("Allow Once") { respond(.allowOnce) }
+                        Button("Deny Once") { respond(.denyOnce) }
                     } else {
                         Button("Skip Connector") { respond(.decline) }
                     }
@@ -25,7 +25,7 @@ struct ApprovalCard: View {
                     Button("Dismiss Request") { respond(.dismiss) }
                         .help("Fail this held request without recording a decision")
                 } label: { Image(systemName: "ellipsis") }
-                .menuStyle(.borderlessButton).frame(width: 24)
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 24)
                 .accessibilityLabel("More actions for \(approval.host)")
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -57,8 +57,8 @@ struct ApprovalCard: View {
                 HStack {
                     if let details { Button("View details", action: details).buttonStyle(.borderless) }
                     Spacer(minLength: 8)
-                    Button("Deny Once") { respond(.denyOnce) }.buttonStyle(LNSApprovalActionStyle())
-                    Button("Allow Once") { respond(.allowOnce) }.buttonStyle(LNSApprovalActionStyle(prominent: true))
+                    Button("Always Deny") { respond(.denyAlways) }.buttonStyle(LNSApprovalActionStyle())
+                    Button("Always Allow") { respond(.allowAlways) }.buttonStyle(LNSApprovalActionStyle(prominent: true))
                 }
             }
         }

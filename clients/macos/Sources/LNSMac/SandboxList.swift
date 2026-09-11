@@ -110,7 +110,7 @@ struct SandboxList: View {
                         model.managementSheet = ManagementSheet(kind: .remove, sandbox: sandbox)
                     }.disabled(sandbox.status == "running")
                 } label: { Image(systemName: "ellipsis.circle").accessibilityLabel("Actions for \(sandbox.name)") }
-                .menuStyle(.borderlessButton).frame(width: 26)
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 26)
             }
             .frame(width: 102, alignment: .trailing)
         }

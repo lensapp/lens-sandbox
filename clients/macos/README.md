@@ -13,7 +13,7 @@ shortcuts remain available. Shared colors and presentation components live in
 `Sources/LNSMac/LNSTheme.swift`.
 Page headers, search fields, empty states, and persistent form labels share
 presentation components. The sandbox list uses matching header and row columns;
-connector cards keep routine actions neutral and reserve blue for the page action.
+connector cards highlight Connect until access is available, then Grant Access.
 
 Audit and Approvals each include a sandbox filter in their own view; the sidebar
 contains navigation only. The native dashboard includes event-kind filters, global
@@ -43,8 +43,10 @@ retrying. Creating a sandbox requires the bundle containing CLI/service helpers.
 Use **Sign In to a Registry…** in this form if its definition or base image
 requires authentication; then retry the launch after signing in.
 
-**Connectors** shows installed connectors as cards, including each method's
-readiness and saved connections with their authority. Install a registry
+**Connectors** shows installed connectors as cards with saved connections and
+their authority. An unconnected card leads with **Connect…**; once a connection
+is available, **Grant Access…** becomes primary and **New connection…** remains
+available. Access that needs no account can be granted directly. Install a registry
 reference or choose a local connector document. **Connect…** saves a named
 connection using the method's credential fields; it does not grant a sandbox
 access. Connection names must be new, so adding an account cannot replace an
@@ -175,16 +177,20 @@ scrollable height limit. New requests appear without taking keyboard focus;
 opening Live Requests explicitly focuses the overlay. It works with the dashboard
 closed and across Spaces, including fullscreen apps.
 
-Network cards show **Deny Once** and **Allow Once**. Their action menu contains
-**Always Allow**, **Always Deny**, and **Dismiss Request**. **View details** opens
+Network cards show **Always Deny** and **Always Allow**. Their action menu contains
+**Allow Once**, **Deny Once**, and **Dismiss Request**. **View details** opens
 the request in the main app's Approvals view with its full action and connector
-access details. Connector notifications include a single picker for saved
-connections, access that needs no account, and **New connection…**. Choose a
-saved connection and **Grant Access**, or enter a new name and credentials inline
-and choose **Connect & Grant**. Changing the selection clears unsubmitted
+access details. Connector notifications start with the first available saved
+connection ready for **Grant Access**. The picker also offers other saved
+connections, access that needs no account, and **New connection…**. Without
+available access, the new connection form opens directly: enter a name and
+credentials inline and choose **Connect & Grant**. Changing the selection clears unsubmitted
 credentials. **Skip Connector** stays in the card's action menu.
 Closing the overlay or pressing Escape hides it without answering any requests.
 Reopen it from Live Requests (⌘3).
+
+Audit details have one **Copy event** action for the raw event. Individual values
+remain selectable and offer Copy in their context menus.
 
 Without an override, the app uses
 `~/Library/Application Support/run.lns/service.sock`.
@@ -235,6 +241,10 @@ coordinated app/service updates are still required before shipping it.
   unchanged notices do not repeatedly bring a manually hidden overlay forward.
 
 ## Verification
+
+On macOS, `make -C clients/macos test` also hosts native views to check approval
+resizing, its scrolling limit, Escape/reopen behavior, and audit details at narrow
+widths without contacting a service. These checks complement visual inspection of the app.
 
 `make -C clients/macos test` tests framing, dashboard replacement and filtering,
 history requests, management commands and outcomes, sandbox creation, registry

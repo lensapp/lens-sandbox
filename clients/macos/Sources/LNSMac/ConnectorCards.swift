@@ -63,6 +63,9 @@ private struct ConnectorCard: View {
     @ObservedObject var model: DashboardModel
     let connector: ConnectorOffer
 
+    private var canConnect: Bool { connector.methods.contains { $0.offerable && $0.auth_label != nil } }
+    private var canGrant: Bool { !connector.grantOptions.isEmpty }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 12) {
@@ -80,21 +83,15 @@ private struct ConnectorCard: View {
                     Divider()
                     Button("Uninstall…", role: .destructive) { open(.uninstall) }
                 } label: { Image(systemName: "ellipsis").accessibilityLabel("Actions for \(connector.name)") }
-                .menuStyle(.borderlessButton).frame(width: 24)
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 24)
             }
             Text(connector.serves.joined(separator: ", "))
                 .font(.system(size: 11, design: .monospaced)).foregroundStyle(LNSTheme.muted)
                 .lineLimit(2).help(connector.serves.joined(separator: "\n")).textSelection(.enabled)
                 .frame(maxWidth: .infinity, minHeight: 30, alignment: .topLeading)
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(connector.methods) { method in
-                    HStack(alignment: .top) {
-                        Text(method.label).font(.system(size: 12))
-                        Spacer()
-                        Text(readiness(method)).font(.system(size: 11))
-                            .foregroundStyle(readinessColor(method)).fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+            if !canGrant {
+                Text(canConnect ? "Connect an account to grant sandbox access." : "This connector is unavailable in this version.")
+                    .font(.callout).foregroundStyle(LNSTheme.muted)
             }
             if !connector.connections.isEmpty {
                 Divider()
@@ -102,6 +99,7 @@ private struct ConnectorCard: View {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 4) {
                             Label(connection.label, systemImage: "person.crop.circle").font(.callout)
+                                .lineLimit(1).help(connection.label)
                             Text(connection.authority.isEmpty ? "No authority reported" : connection.authority.joined(separator: ", "))
                                 .font(.caption).foregroundStyle(LNSTheme.muted).textSelection(.enabled)
                         }
@@ -115,32 +113,26 @@ private struct ConnectorCard: View {
             }
             Divider()
             HStack {
-                if connector.methods.contains(where: { $0.offerable && $0.auth_label != nil }) {
-                    Button("Connect…") { open(.connect) }
+                if canGrant && canConnect {
+                    Button("New connection…") { open(.connect) }.buttonStyle(.borderless)
                 }
                 Spacer()
-                Button("Grant Access…") { open(.grant) }
-                    .disabled(model.currentSandboxes.isEmpty || !connector.methods.contains(where: \.offerable))
+                if canGrant {
+                    Button("Grant Access…") { open(.grant) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.currentSandboxes.isEmpty)
+                        .help(model.currentSandboxes.isEmpty ? "Start a sandbox to grant it access." : "Choose a sandbox to grant access.")
+                } else {
+                    Button("Connect…") { open(.connect) }
+                        .buttonStyle(.borderedProminent).disabled(!canConnect)
+                }
             }
             .controlSize(.large)
-            .help(model.currentSandboxes.isEmpty ? "Start a sandbox to grant it access." : "Connect an account or grant sandbox access.")
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .lnsPanel()
         .disabled(!model.connected || !model.management.connected || model.management.busy)
-    }
-
-    private func readiness(_ method: ConnectorMethod) -> String {
-        if !method.offerable { return "Unavailable in this version" }
-        if method.auth_label == nil || connector.connections.contains(where: { $0.method == method.name }) { return "Ready to grant" }
-        return "Connect first"
-    }
-
-    private func readinessColor(_ method: ConnectorMethod) -> Color {
-        if !method.offerable { return LNSTheme.muted }
-        return method.auth_label == nil || connector.connections.contains(where: { $0.method == method.name })
-            ? LNSTheme.success : LNSTheme.warning
     }
 
     private func open(_ kind: ManagementSheet.Kind) {

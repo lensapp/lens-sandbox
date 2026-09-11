@@ -60,7 +60,14 @@ struct ManagementForm: View {
         .controlSize(.large)
         .lnsAppearance()
         .interactiveDismissDisabled(busy)
-        .onAppear { selection.run = sheet.run }
+        .onAppear {
+            selection.run = sheet.run
+            if sheet.kind == .connect {
+                selection.method = offer?.methods.first { $0.offerable && $0.auth_label != nil }?.name ?? ""
+            } else if sheet.kind == .grant {
+                access = offer?.grantOptions.first?.id ?? ""
+            }
+        }
         .onChange(of: selection.method) { _ in
             if sheet.kind == .connect { label = ""; values = [:] }
         }

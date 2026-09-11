@@ -7,7 +7,17 @@ struct ConnectorGrant: View {
     var showsDetails = true
     var details: (() -> Void)?
     let respond: (ApprovalAction) -> Void
-    @State private var draft = LiveConnectorDraft()
+    @State private var draft: LiveConnectorDraft
+
+    init(offer: ConnectorOffer, showsDecline: Bool = true, showsDetails: Bool = true,
+         details: (() -> Void)? = nil, respond: @escaping (ApprovalAction) -> Void) {
+        self.offer = offer
+        self.showsDecline = showsDecline
+        self.showsDetails = showsDetails
+        self.details = details
+        self.respond = respond
+        _draft = State(initialValue: LiveConnectorDraft(offer: offer))
+    }
 
     private var newMethods: [ConnectorMethod] { offer.methods.filter { $0.offerable && $0.auth_label != nil } }
     private var option: ConnectorGrantOption? { offer.grantOptions.first { $0.id == draft.selection } }
@@ -18,16 +28,19 @@ struct ConnectorGrant: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Picker("Connection", selection: Binding(get: { draft.selection }, set: { draft.choose($0) })) {
-                Text("Choose a connection").tag("")
-                ForEach(offer.grantOptions) { option in Text(option.label).tag(option.id) }
-                if !newMethods.isEmpty { Divider() }
-                ForEach(newMethods) { method in
-                    Text(newMethods.count == 1 ? "New connection…" : "New connection · \(method.label)…")
-                        .tag("new:\(method.name)")
+            if !offer.grantOptions.isEmpty || newMethods.count > 1 {
+                Picker("Grant using", selection: Binding(get: { draft.selection }, set: { draft.choose($0) })) {
+                    ForEach(offer.grantOptions) { option in Text(option.label).tag(option.id) }
+                    if !offer.grantOptions.isEmpty && !newMethods.isEmpty { Divider() }
+                    ForEach(newMethods) { method in
+                        Text(newMethods.count == 1 ? "New connection…" : "New connection · \(method.label)…")
+                            .tag("new:\(method.name)")
+                    }
                 }
             }
             if let method = draft.newMethod(in: offer) {
+                Text("Connect an account to grant access.")
+                    .font(.system(size: 12)).foregroundStyle(LNSTheme.muted)
                 LNSFormField(title: "Connection name") {
                     TextField("e.g. work", text: $draft.name)
                 }
@@ -41,6 +54,9 @@ struct ConnectorGrant: View {
                         .font(.system(size: 11)).foregroundStyle(LNSTheme.warning)
                 }
                 Text("Credentials stay outside the sandbox.").font(.system(size: 11)).foregroundStyle(LNSTheme.muted)
+            } else if offer.grantOptions.isEmpty {
+                Text("This connector is unavailable in this version.")
+                    .font(.system(size: 12)).foregroundStyle(LNSTheme.muted)
             }
             if showsDetails {
                 if let selected { disclosure(selected) }

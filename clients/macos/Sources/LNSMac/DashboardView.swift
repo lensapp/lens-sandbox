@@ -184,39 +184,48 @@ struct AuditTimeline: View {
                 }
                 .fixedSize(horizontal: true, vertical: false).controlSize(.large)
                 Spacer()
-                Text("\(model.events.count) events").font(.caption).foregroundStyle(LNSTheme.muted)
+                Text(model.events.count == 1 ? "1 event" : "\(model.events.count) events")
+                    .font(.caption).foregroundStyle(LNSTheme.muted)
             }
             .padding(.horizontal, 24).padding(.bottom, 16)
-            HSplitView {
-                Table(model.events, selection: $model.selectedEvent) {
-                    TableColumn("When") { event in Text(event.when).monospacedDigit() }.width(min: 130, ideal: 155)
-                    TableColumn("Kind", value: \.kind).width(min: 70, ideal: 90)
-                    TableColumn("Event", value: \.detail)
-                }
-                .accessibilityLabel("Audit events")
-                .scrollContentBackground(.hidden)
-                .overlay {
-                    if model.events.isEmpty {
-                        LNSEmptyState(
-                            symbol: "list.bullet.rectangle",
-                            title: model.connected ? "No matching events" : "Waiting for the service…",
-                            message: "Sandbox activity appears here. Try another search or filter."
-                        ).allowsHitTesting(false)
+            ViewThatFits(in: .horizontal) {
+                HSplitView {
+                    Table(model.events, selection: $model.selectedEvent) {
+                        TableColumn("When") { event in Text(event.when).monospacedDigit() }.width(min: 130, ideal: 155)
+                        TableColumn("Kind", value: \.kind).width(min: 70, ideal: 90)
+                        TableColumn("Event", value: \.detail)
+                    }
+                    .accessibilityLabel("Audit events")
+                    .scrollContentBackground(.hidden)
+                    .overlay {
+                        if model.events.isEmpty {
+                            LNSEmptyState(
+                                symbol: "list.bullet.rectangle",
+                                title: model.connected ? "No matching events" : "Waiting for the service…",
+                                message: "Sandbox activity appears here. Try another search or filter."
+                            ).allowsHitTesting(false)
+                        }
+                    }
+                    .frame(minWidth: 280)
+                    if let event = model.detail {
+                        detail(event)
+                            .frame(minWidth: 280, idealWidth: 360, maxWidth: 540)
                     }
                 }
-                .frame(minWidth: 280)
-                if let event = model.detail {
-                    AuditDetail(event: event, sandbox: model.data.sandboxes.first { $0.id == event.run }?.name) {
-                        model.selectedEvent = nil
-                    }
-                    .frame(minWidth: 280, idealWidth: 360, maxWidth: 540)
-                }
+                .frame(minWidth: model.detail == nil ? 280 : 561)
+                if let event = model.detail { detail(event) }
             }
             .clipShape(RoundedRectangle(cornerRadius: 4)).lnsPanel()
             .padding(.horizontal, 24).padding(.bottom, 24)
         }
         .onChange(of: model.filters.search) { _ in model.selectedEvent = nil }
         .onChange(of: model.filters.kinds) { _ in model.selectedEvent = nil }
+    }
+
+    private func detail(_ event: DashboardEvent) -> some View {
+        AuditDetail(event: event, sandbox: model.data.sandboxes.first { $0.id == event.run }?.name) {
+            model.selectedEvent = nil
+        }
     }
 }
 
@@ -232,6 +241,7 @@ struct AuditDetail: View {
                 HStack {
                     Text(event.kind.capitalized).font(.headline)
                     Spacer()
+                    Button("Copy event") { copy(event.raw) }.buttonStyle(.borderless)
                     Button(action: close) { Label("Close details", systemImage: "xmark") }.labelStyle(.iconOnly)
                 }
                 detail("When", event.ts)
@@ -262,17 +272,14 @@ struct AuditDetail: View {
 
     private func detail(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(label).font(.caption).foregroundStyle(LNSTheme.muted)
-                Spacer()
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(value, forType: .string)
-                } label: { Label("Copy \(label)", systemImage: "doc.on.doc") }
-                .labelStyle(.iconOnly).buttonStyle(.borderless)
-            }
+            Text(label).font(.caption).foregroundStyle(LNSTheme.muted)
             Text(value).font(monospaced ? .system(.caption, design: .monospaced) : .body)
                 .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func copy(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 }
