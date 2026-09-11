@@ -148,7 +148,7 @@ struct DashboardView: View {
 
     @ViewBuilder private var actionNotice: some View {
         if let message = model.management.message {
-            HStack(alignment: .top, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 20)).foregroundStyle(LNSTheme.success)
                 Text(message).font(.system(size: 14, weight: .medium))
