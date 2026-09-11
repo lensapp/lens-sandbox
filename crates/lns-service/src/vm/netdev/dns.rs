@@ -143,12 +143,25 @@ pub fn question_name(query: &[u8]) -> Option<String> {
 
 /// The guest's query, asked of each server in turn. Nobody answering is a SERVFAIL, never silence.
 pub async fn relay(query: &[u8], servers: &[SocketAddr], upstream: &dyn Upstream) -> Vec<u8> {
+    let mut refusal = None;
     for server in servers {
-        if let Some(answer) = ask(query, *server, upstream).await {
-            return answer;
+        match ask(query, *server, upstream).await {
+            Some(answer) if answers(&answer) => return answer,
+            Some(refused) => refusal = Some(refused),
+            None => {}
         }
     }
-    servfail(query)
+    refusal.unwrap_or_else(|| servfail(query))
+}
+
+/// SERVFAIL, REFUSED and NOTIMP are a server saying "not me", so the next one is asked; NXDOMAIN is an answer.
+fn answers(reply: &[u8]) -> bool {
+    Message::from_vec(reply).is_ok_and(|message| {
+        !matches!(
+            message.metadata.response_code,
+            ResponseCode::ServFail | ResponseCode::Refused | ResponseCode::NotImp
+        )
+    })
 }
 
 async fn ask(query: &[u8], server: SocketAddr, upstream: &dyn Upstream) -> Option<Vec<u8>> {
@@ -283,10 +296,21 @@ mod tests {
         reply.to_vec().unwrap()
     }
 
+    /// An upstream's own reply carrying a response code, marked authoritative so a test can tell it from the gateway's own.
+    fn says(query: &[u8], code: ResponseCode) -> Vec<u8> {
+        let request = Message::from_vec(query).unwrap();
+        let mut reply = Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+        reply.metadata.response_code = code;
+        reply.metadata.authoritative = true;
+        reply.queries = request.queries;
+        reply.to_vec().unwrap()
+    }
+
     struct FakeUpstream {
         udp: Mutex<Vec<SocketAddr>>,
         tcp: Mutex<Vec<SocketAddr>>,
         answering: Option<SocketAddr>,
+        saying: Vec<(SocketAddr, ResponseCode)>,
         truncate_udp: bool,
     }
 
@@ -296,6 +320,7 @@ mod tests {
                 udp: Mutex::new(Vec::new()),
                 tcp: Mutex::new(Vec::new()),
                 answering: Some(server),
+                saying: Vec::new(),
                 truncate_udp: false,
             }
         }
@@ -305,8 +330,16 @@ mod tests {
                 udp: Mutex::new(Vec::new()),
                 tcp: Mutex::new(Vec::new()),
                 answering: None,
+                saying: Vec::new(),
                 truncate_udp: false,
             }
+        }
+
+        fn reply_of(&self, server: SocketAddr, query: &[u8], truncate: bool) -> Option<Vec<u8>> {
+            if let Some((_, code)) = self.saying.iter().find(|(named, _)| *named == server) {
+                return Some(says(query, *code));
+            }
+            (self.answering == Some(server)).then(|| answer(query, truncate))
         }
     }
 
@@ -317,7 +350,7 @@ mod tests {
             query: Vec<u8>,
         ) -> BoxFuture<'static, std::io::Result<Vec<u8>>> {
             self.udp.lock().unwrap().push(server);
-            let reply = (self.answering == Some(server)).then(|| answer(&query, self.truncate_udp));
+            let reply = self.reply_of(server, &query, self.truncate_udp);
             Box::pin(async move { reply.ok_or_else(|| std::io::Error::other("no answer")) })
         }
 
@@ -327,7 +360,7 @@ mod tests {
             query: Vec<u8>,
         ) -> BoxFuture<'static, std::io::Result<Vec<u8>>> {
             self.tcp.lock().unwrap().push(server);
-            let reply = (self.answering == Some(server)).then(|| answer(&query, false));
+            let reply = self.reply_of(server, &query, false);
             Box::pin(async move { reply.ok_or_else(|| std::io::Error::other("no answer")) })
         }
     }
@@ -559,6 +592,71 @@ mod tests {
             ResponseCode::NoError
         );
         assert_eq!(upstream.udp.lock().unwrap().as_slice(), &servers);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_says_it_cannot_answer_sends_the_query_on_to_the_next() {
+        let mut upstream = FakeUpstream::answering(server("9.9.9.9"));
+        upstream.saying = vec![
+            (server("1.1.1.1"), ResponseCode::ServFail),
+            (server("8.8.8.8"), ResponseCode::Refused),
+        ];
+        let servers = [server("1.1.1.1"), server("8.8.8.8"), server("9.9.9.9")];
+        let query = question("example.com.", RecordType::A);
+
+        let reply = relay(&query, &servers, &upstream).await;
+
+        let reply = Message::from_vec(&reply).unwrap();
+        assert_eq!(
+            reply.metadata.response_code,
+            ResponseCode::NoError,
+            "a healthy server later in the list still answers the guest"
+        );
+        assert!(
+            !reply.metadata.authoritative,
+            "the answer is the third server's own"
+        );
+        assert_eq!(upstream.udp.lock().unwrap().as_slice(), &servers);
+    }
+
+    #[tokio::test]
+    async fn a_name_that_does_not_exist_is_an_answer_and_ends_the_search() {
+        let mut upstream = FakeUpstream::answering(server("9.9.9.9"));
+        upstream.saying = vec![(server("1.1.1.1"), ResponseCode::NXDomain)];
+        let servers = [server("1.1.1.1"), server("9.9.9.9")];
+        let query = question("nothing.example.com.", RecordType::A);
+
+        let reply = relay(&query, &servers, &upstream).await;
+
+        assert_eq!(
+            Message::from_vec(&reply).unwrap().metadata.response_code,
+            ResponseCode::NXDomain
+        );
+        assert_eq!(
+            upstream.udp.lock().unwrap().as_slice(),
+            &[server("1.1.1.1")],
+            "a name nobody has is an answer, not a reason to ask elsewhere"
+        );
+    }
+
+    #[tokio::test]
+    async fn when_every_server_refuses_the_guest_gets_the_last_refusal_itself() {
+        let mut upstream = FakeUpstream::silent();
+        upstream.saying = vec![
+            (server("1.1.1.1"), ResponseCode::ServFail),
+            (server("8.8.8.8"), ResponseCode::NotImp),
+        ];
+        let servers = [server("1.1.1.1"), server("8.8.8.8")];
+        let query = question("example.com.", RecordType::A);
+
+        let reply = relay(&query, &servers, &upstream).await;
+
+        let reply = Message::from_vec(&reply).unwrap();
+        assert_eq!(reply.metadata.response_code, ResponseCode::NotImp);
+        assert!(
+            reply.metadata.authoritative,
+            "the guest gets an upstream's own reply, not one the gateway made up"
+        );
     }
 
     #[tokio::test]
