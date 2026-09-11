@@ -371,6 +371,14 @@ running sandbox: the destination opens and the credential is injected on the
 wire. The variables the method sets reach the next workload of that run, not the
 workload already running, and the grant applies on every later start of it.
 
+A method that signs in through its own code signs in on the card. Press **Sign
+in**, and the card shows the round the connector's code is waiting on — its own
+words, named as the connector's, with the fields it asked for. Answer, and the
+card shows the next round. Some rounds ask for nothing: they show you a URL and
+a code, and **Continue** tells the connector you have entered it. The last round
+finishes the connection and grants it, on the disclosure the card already
+showed. Closing the card mid-sign-in drops what you typed.
+
 A method that packs a directory into a fileset is not offered yet, and neither
 the card nor `grant` will apply one: install keeps the packed fileset beside
 the document, but nothing sends it to a workload yet. A method whose filesets

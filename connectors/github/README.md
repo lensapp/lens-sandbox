@@ -74,6 +74,11 @@ lns connector connect github --method sign-in        # or --method oauth-sign-in
 
 `--method` is required, because this connector offers two.
 
+You can also sign in without running that command. Start a run that reaches
+`api.github.com`, and the approval card offers this connector. Press **Sign in**
+and answer the rounds on the card; the last one connects and grants in the same
+press.
+
 The connect runs in rounds, because lns lends the component no listener and no
 clock:
 

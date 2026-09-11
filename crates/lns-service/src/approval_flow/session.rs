@@ -37,6 +37,21 @@ pub struct PendingPrompt {
     pub run: Option<String>,
     /// The connector that serves this destination, when exactly one does: the card then asks whether to connect it rather than whether to allow the traffic (§3.2.1).
     pub offer: Option<ConnectorView>,
+    /// The sign-in round this card is in the middle of, which it draws in place of the form a mechanism lns implements would get (§3.2.6).
+    pub connect: Option<ConnectAsk>,
+    /// How many rounds of this card's sign-in have come back. The card compares it against the one it last answered, so a round still running is drawn as waiting rather than as a button to press again.
+    pub connect_seq: u64,
+}
+
+/// The round a card is waiting on the person to answer, as it must draw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectAsk {
+    /// Whose words the message and the field labels are, when they came from code nobody can read (§3.2.6).
+    pub connector: String,
+    pub method: String,
+    pub message: String,
+    pub fields: Vec<lns_ipc::ConnectorFieldView>,
+    pub from_code: bool,
 }
 
 impl PendingPrompt {
@@ -115,6 +130,23 @@ pub enum ConnectionChoice {
     },
 }
 
+/// One round of a connect the card is driving, because a mechanism decides what to ask and how many times to ask it (§3.2.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectRound {
+    Asks {
+        session: String,
+        message: String,
+        fields: Vec<lns_ipc::ConnectorFieldView>,
+        /// Whether these words came from code nobody can read, which decides whether the card attributes them (§3.2.6).
+        from_code: bool,
+    },
+    Connected {
+        connection: String,
+        invalidated: Vec<String>,
+    },
+    Failed(String),
+}
+
 /// The connector store's side of a card decision. Every method writes to disk, so the session takes it as a port (§3.2.4).
 pub trait ConnectorPort: Send + Sync {
     /// Stores what an authentication returned, answering with the runs whose grant its authority no longer matches.
@@ -138,6 +170,22 @@ pub trait ConnectorPort: Send + Sync {
     fn decline(&self, name: &str) -> Result<(), String>;
 }
 
+/// Driving one sign-in round by round. It is its own port because only the card drives rounds: the Approvals row grants through a connection this machine already holds (§3.2.6).
+pub trait ConnectRoundPort: Send + Sync {
+    /// Opens an exchange, rather than collecting one form and pressing once.
+    fn begin_connect(&self, name: &str, method: &str, label: &str) -> Result<ConnectRound, String>;
+
+    /// Answers the round the card last drew, which is the only thing that moves the exchange on.
+    fn answer_connect(
+        &self,
+        session: &str,
+        values: lns_ipc::SecretValues,
+    ) -> Result<ConnectRound, String>;
+
+    /// Drops a round nobody will answer, because it holds what was already typed (§3.2.6).
+    fn abandon_connect(&self, session: &str);
+}
+
 pub struct ApprovalSession {
     policy: Mutex<Policy>,
     /// What the developer's own file holds — never the artifact baseline the running `policy` also carries.
@@ -154,12 +202,42 @@ pub struct ApprovalSession {
     /// What has already been said once, so a misconfiguration every request trips does not fill the window.
     said: Mutex<std::collections::HashSet<String>>,
     connectors: OnceLock<Arc<dyn ConnectorPort>>,
+    /// What drives a sign-in for the card, wired beside the store because only the card needs it.
+    connect_rounds: OnceLock<Arc<dyn ConnectRoundPort>>,
     /// The connectors this run has not decided. Mutable, because a grant lifts its own hold and every later frame must be published without it (§3.2.1).
     offers: Mutex<Vec<ConnectorView>>,
     /// What the run keeps of every card raised, so a question outlives the card and stays answerable.
     entries: OnceLock<Arc<dyn EntryStore>>,
     run: Option<String>,
+    /// The sign-in each card is in the middle of. The session holds it because a round outlives the frame that drew it, and because a card that goes must take its round with it (§3.2.6).
+    rounds: Mutex<HashMap<String, OpenRound>>,
+    /// Rounds settled per card, counted so a card can tell a round still running from one it may answer again.
+    settled: Mutex<HashMap<String, u64>>,
+    /// Whether this run has gone away. A round still running when it did has nobody to report to, and the window it would report in has just been cleared.
+    withdrawn: std::sync::atomic::AtomicBool,
 }
+
+/// What one round of a sign-in belongs to, carried from the press that opened it so no later round has to find it again.
+struct Signing {
+    port: Arc<dyn ConnectRoundPort>,
+    /// The offer as the card disclosed it when the sign-in opened. The grant is made against these bytes, which are the ones the person read.
+    offer: ConnectorView,
+    method: String,
+}
+
+/// One card's open sign-in: the handle that moves it on, and what the card draws while it waits.
+#[derive(Clone)]
+struct OpenRound {
+    /// The port this sign-in was opened through, so no later round has to find one again — and none can find a different one.
+    port: Arc<dyn ConnectRoundPort>,
+    offer: ConnectorView,
+    method: String,
+    handle: String,
+    ask: ConnectAsk,
+}
+
+/// What a card says when nothing on this machine could answer for it.
+const NO_CONNECTOR_STORE: &str = "no connector store is wired to this run, so nothing was granted";
 
 /// Why `ask again` decided nothing: only the rule this entry wrote is its to take back.
 pub const NO_RULE_OF_ITS_OWN: &str = "this entry holds no rule of its own to take back";
@@ -259,9 +337,13 @@ impl ApprovalSession {
             granted: Mutex::new(BTreeMap::new()),
             said: Mutex::new(std::collections::HashSet::new()),
             connectors: OnceLock::new(),
+            connect_rounds: OnceLock::new(),
             offers: Mutex::new(Vec::new()),
             entries: OnceLock::new(),
             run: None,
+            rounds: Mutex::new(HashMap::new()),
+            settled: Mutex::new(HashMap::new()),
+            withdrawn: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -355,8 +437,11 @@ impl ApprovalSession {
             .cloned()
     }
 
-    /// Every line the window shows that asks nothing is still something the developer may have missed.
+    /// A withdrawn run is told nothing: its window is cleared and its entries are written `Withdrawn`, so a later message re-pins a window nobody reads and writes a notice into a closed record.
     fn tell(&self, message: &str) {
+        if self.withdrawn.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         self.entries().record(Entry::new(
             self.run.clone(),
             EntryKind::Notice {
@@ -382,6 +467,10 @@ impl ApprovalSession {
         let _ = self.connectors.set(port);
     }
 
+    pub fn set_connect_round_port(&self, port: Arc<dyn ConnectRoundPort>) {
+        let _ = self.connect_rounds.set(port);
+    }
+
     /// Connects an account if the card made one, records the grant, then publishes and releases — in that order, because each step is what makes the next one correct (§3.2.4).
     pub fn grant_offer(
         &self,
@@ -390,9 +479,216 @@ impl ApprovalSession {
         connection: ConnectionChoice,
     ) -> DecisionOutcome {
         match self.offer_of(id) {
-            Some(offer) => self.grant_the(&offer, method, connection),
+            Some(offer) => {
+                // A grant taken through some other connection settles this card, so the sign-in it left open is one nobody will answer.
+                self.abandon_round(id);
+                self.grant_the(&offer, method, connection)
+            }
             None => DecisionOutcome::UnknownId,
         }
+    }
+
+    /// Opens the sign-in this card will drive round by round, because a mechanism decides what to ask and how often (§3.2.6).
+    pub fn begin_connect(&self, id: &str, method: &str, label: &str) -> DecisionOutcome {
+        let Some(offer) = self.offer_of(id) else {
+            return DecisionOutcome::UnknownId;
+        };
+        let Some(port) = self.connect_rounds.get() else {
+            // Counted like any other dead end, so the card stops waiting on a round that will never be opened.
+            self.count_settled(id);
+            self.tell(NO_CONNECTOR_STORE);
+            self.represent(&[id.to_string()]);
+            return DecisionOutcome::Resolved;
+        };
+        // Pressing Connect again starts one sign-in, not two, and the first holds what was already typed.
+        self.abandon_round(id);
+        let opened = port.begin_connect(&offer.name, method, label);
+        self.settle_round(
+            id,
+            Signing {
+                port: port.clone(),
+                offer,
+                method: method.to_string(),
+            },
+            opened,
+        )
+    }
+
+    /// Answers the round this card last drew, which is the only thing that moves the sign-in on.
+    pub fn answer_connect(&self, id: &str, values: lns_ipc::SecretValues) -> DecisionOutcome {
+        let Some(open) = self.forget_round(id) else {
+            // The round went while the card stayed — a decline the store refused drops one. The card must be drawn again, or it waits on a round nothing will answer.
+            if self.prompt_of(id).is_some() {
+                self.count_settled(id);
+                self.represent(&[id.to_string()]);
+            }
+            return DecisionOutcome::UnknownId;
+        };
+        let answered = open.port.answer_connect(&open.handle, values);
+        if answered.is_err() {
+            // lns has let go of the handle, so the state behind it is state nobody will answer — waiting out `sessionSeconds` with it is not the same as dropping it (§3.2.6).
+            open.port.abandon_connect(&open.handle);
+        }
+        self.settle_round(
+            id,
+            Signing {
+                port: open.port,
+                offer: open.offer,
+                method: open.method,
+            },
+            answered,
+        )
+    }
+
+    /// What one round produced: another question, the grant the whole sign-in was for, or a reason the card shows before it resets.
+    fn settle_round(
+        &self,
+        id: &str,
+        signing: Signing,
+        round: Result<ConnectRound, String>,
+    ) -> DecisionOutcome {
+        let Signing {
+            port,
+            offer,
+            method,
+        } = signing;
+        self.count_settled(id);
+        match round {
+            Ok(ConnectRound::Asks {
+                session,
+                message,
+                fields,
+                from_code,
+            }) => {
+                if !self.still_holding(id, &offer.name) {
+                    // Another surface answered this card, or the run went away, while the component was still working. Nobody is left to answer, and the state behind the handle is state §3.2.6 drops rather than waits out.
+                    port.abandon_connect(&session);
+                    return DecisionOutcome::Resolved;
+                }
+                self.hold_round(
+                    id,
+                    OpenRound {
+                        port,
+                        ask: ConnectAsk {
+                            connector: offer.name.clone(),
+                            method: method.clone(),
+                            message,
+                            fields,
+                            from_code,
+                        },
+                        offer,
+                        method,
+                        handle: session,
+                    },
+                );
+                self.represent(&[id.to_string()]);
+            }
+            Ok(ConnectRound::Connected {
+                connection,
+                invalidated,
+            }) => {
+                self.report_invalidated(&invalidated);
+                if !self.still_holding(id, &offer.name) {
+                    // The sign-in finished, so the connection is this machine's to keep; the grant it was opened for belongs to a card nobody is holding any more.
+                    self.tell(&format!(
+                        "the connection {connection} was kept, but this card is gone, so {} was granted to nothing",
+                        offer.name
+                    ));
+                    return DecisionOutcome::Resolved;
+                }
+                // The press that opened the sign-in sat on the whole disclosure, and §3.2.6 makes it the press that authorises every round of it.
+                let outcome = self.grant_the(&offer, &method, ConnectionChoice::Held(connection));
+                // A grant that took drops the offer and the card with it; one the store refused keeps both, and a kept card must be drawn again or it waits forever on a round that already came back.
+                if self.offer_of(id).is_some() {
+                    self.represent(&[id.to_string()]);
+                }
+                return outcome;
+            }
+            Ok(ConnectRound::Failed(reason)) | Err(reason) => {
+                self.tell(&reason);
+                self.represent(&[id.to_string()]);
+            }
+        }
+        DecisionOutcome::Resolved
+    }
+
+    /// Whether this card is still the one that opened the sign-in: it exists, and it still holds the offer that was disclosed. Anything else settled it while the component was working — another surface answering, or the run going away.
+    fn still_holding(&self, id: &str, connector: &str) -> bool {
+        self.offer_of(id).is_some_and(|held| held.name == connector)
+    }
+
+    fn count_settled(&self, id: &str) {
+        *self
+            .settled
+            .lock()
+            .expect("settled mutex poisoned")
+            .entry(id.to_string())
+            .or_default() += 1;
+    }
+
+    fn settled_count(&self, id: &str) -> u64 {
+        self.settled
+            .lock()
+            .expect("settled mutex poisoned")
+            .get(id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn hold_round(&self, id: &str, round: OpenRound) {
+        self.rounds
+            .lock()
+            .expect("rounds mutex poisoned")
+            .insert(id.to_string(), round);
+    }
+
+    fn round_of(&self, id: &str) -> Option<OpenRound> {
+        self.rounds
+            .lock()
+            .expect("rounds mutex poisoned")
+            .get(id)
+            .cloned()
+    }
+
+    fn forget_round(&self, id: &str) -> Option<OpenRound> {
+        self.rounds
+            .lock()
+            .expect("rounds mutex poisoned")
+            .remove(id)
+    }
+
+    /// Drops every round this run still holds, for the same reason one card's does: nobody is left to answer it.
+    fn abandon_every_round(&self) {
+        let open: Vec<OpenRound> = self
+            .rounds
+            .lock()
+            .expect("rounds mutex poisoned")
+            .drain()
+            .map(|(_, round)| round)
+            .collect();
+        for round in open {
+            round.port.abandon_connect(&round.handle);
+        }
+    }
+
+    /// Drops a round nobody will answer. It holds what was already typed, so waiting out `sessionSeconds` with it is not the same as dropping it (§3.2.6).
+    fn abandon_round(&self, id: &str) {
+        let Some(open) = self.forget_round(id) else {
+            return;
+        };
+        open.port.abandon_connect(&open.handle);
+    }
+
+    /// A re-authentication reporting different authority invalidates the grants naming that connection, so the runs that must decide again are named (§3.2.4).
+    fn report_invalidated(&self, invalidated: &[String]) {
+        if invalidated.is_empty() {
+            return;
+        }
+        self.tell(&format!(
+            "this connection no longer covers what {} granted, so {} must decide again",
+            invalidated.join(", "),
+            if invalidated.len() == 1 { "it" } else { "they" }
+        ));
     }
 
     /// The same grant, for the connector an entry names rather than a request the guest holds: the Approvals view answers a card it closed here (cli-spec §7.1).
@@ -415,8 +711,7 @@ impl ApprovalSession {
         connection: ConnectionChoice,
     ) -> DecisionOutcome {
         let Some(port) = self.connectors.get() else {
-            self.notifier
-                .inform("no connector store is wired to this run, so nothing was granted");
+            self.notifier.inform(NO_CONNECTOR_STORE);
             return DecisionOutcome::Resolved;
         };
         let label = match self.resolve_connection(port.as_ref(), &offer.name, method, connection) {
@@ -448,6 +743,7 @@ impl ApprovalSession {
         let Some(offer) = self.offer_of(id) else {
             return DecisionOutcome::UnknownId;
         };
+        self.abandon_round(id);
         if let Some(port) = self.connectors.get()
             && let Err(why) = port.decline(&offer.name)
         {
@@ -475,14 +771,7 @@ impl ApprovalSession {
             ConnectionChoice::None => Ok(None),
             ConnectionChoice::Held(label) => Ok(Some(label)),
             ConnectionChoice::New { label, values } => {
-                let invalidated = port.connect(name, method, &label, values)?;
-                if !invalidated.is_empty() {
-                    self.tell(&format!(
-                        "this connection no longer covers what {} granted, so {} must decide again",
-                        invalidated.join(", "),
-                        if invalidated.len() == 1 { "it" } else { "they" }
-                    ));
-                }
+                self.report_invalidated(&port.connect(name, method, &label, values)?);
                 Ok(Some(label))
             }
         }
@@ -513,11 +802,20 @@ impl ApprovalSession {
             .lock()
             .expect("offers mutex poisoned")
             .retain(|offer| offer.name != name);
-        let mut pending = self.pending.lock().expect("pending mutex poisoned");
-        for entry in pending.values_mut() {
-            if entry.offer.as_ref().is_some_and(|offer| offer.name == name) {
-                entry.offer = None;
-            }
+        let stripped: Vec<String> = {
+            let mut pending = self.pending.lock().expect("pending mutex poisoned");
+            pending
+                .iter_mut()
+                .filter(|(_, entry)| entry.offer.as_ref().is_some_and(|offer| offer.name == name))
+                .map(|(id, entry)| {
+                    entry.offer = None;
+                    id.clone()
+                })
+                .collect()
+        };
+        // One card's answer settles this connector for every card holding it, so every sign-in they left open is one nobody will answer (§3.2.6).
+        for id in stripped {
+            self.abandon_round(&id);
         }
     }
 
@@ -566,6 +864,8 @@ impl ApprovalSession {
             treatment: entry.treatment,
             run: self.run.clone(),
             offer: entry.offer.clone(),
+            connect: self.round_of(id).map(|round| round.ask),
+            connect_seq: self.settled_count(id),
         })
     }
 
@@ -636,6 +936,7 @@ impl ApprovalSession {
                 entry.offer = Some(offer.clone());
             }
         }
+        let connect_seq = self.settled_count(&req.id);
         self.notifier.present(&PendingPrompt {
             id: req.id,
             host: req.host,
@@ -643,6 +944,8 @@ impl ApprovalSession {
             treatment: req.treatment,
             run: self.run.clone(),
             offer,
+            connect: None,
+            connect_seq,
         });
     }
 
@@ -740,6 +1043,7 @@ impl ApprovalSession {
         let Some(entry) = self.remove_pending(id) else {
             return DecisionOutcome::UnknownId;
         };
+        self.abandon_round(id);
         self.notifier.dismiss(id);
         self.answer(id, &entry, Decision::Timeout);
         self.note_if_open(&entry, EntryState::Undecided);
@@ -1007,6 +1311,9 @@ impl ApprovalSession {
     }
 
     pub fn withdraw_run(&self) {
+        // Stored before the cards go: a round settling in between would find no card and no withdrawal, and would speak to a run that had already left.
+        self.withdrawn
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let open: Vec<(String, PendingEntry)> = {
             let mut pending = self.pending.lock().expect("pending mutex poisoned");
             pending.drain().collect()
@@ -1015,6 +1322,8 @@ impl ApprovalSession {
             self.note_if_open(entry, EntryState::Withdrawn);
             self.notifier.dismiss(id);
         }
+        // The run is gone, so every sign-in it left open is one nobody can answer — and each holds what the component was handed (§3.2.6).
+        self.abandon_every_round();
         self.notifier.clear_informs();
     }
 
@@ -2026,6 +2335,365 @@ pub(crate) mod tests {
             n.informed.lock().unwrap().len(),
             1,
             "one misconfiguration is one message, however busy the workload"
+        );
+    }
+
+    /// A sign-in scripted one round at a time, so a test says which shape the card is driving.
+    #[derive(Default)]
+    struct ScriptedRounds {
+        script: StdMutex<std::collections::VecDeque<ConnectRound>>,
+        abandoned: StdMutex<Vec<String>>,
+        /// Run once before a round answers, so a test can settle the card while its round is still in flight — which is what another surface answering, or the run going away, does on its own task.
+        interleave: StdMutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    }
+
+    impl ScriptedRounds {
+        fn answering(rounds: Vec<ConnectRound>) -> Arc<Self> {
+            Arc::new(Self {
+                script: StdMutex::new(rounds.into()),
+                abandoned: StdMutex::default(),
+                interleave: StdMutex::default(),
+            })
+        }
+
+        fn next(&self) -> Result<ConnectRound, String> {
+            if let Some(settle) = self.interleave.lock().expect("interleave lock").take() {
+                settle();
+            }
+            Ok(self
+                .script
+                .lock()
+                .expect("script lock")
+                .pop_front()
+                .expect("a round the script does not have"))
+        }
+    }
+
+    impl ConnectRoundPort for ScriptedRounds {
+        fn begin_connect(&self, _: &str, _: &str, _: &str) -> Result<ConnectRound, String> {
+            self.next()
+        }
+
+        fn answer_connect(
+            &self,
+            _: &str,
+            _: lns_ipc::SecretValues,
+        ) -> Result<ConnectRound, String> {
+            self.next()
+        }
+
+        fn abandon_connect(&self, session: &str) {
+            self.abandoned
+                .lock()
+                .expect("abandoned lock")
+                .push(session.to_string());
+        }
+    }
+
+    /// A card mid-sign-in: one round drawn, the next answer finishing it.
+    fn signing_in(
+        refuse: Option<String>,
+    ) -> (Fixture, Arc<FakeConnectorPort>, Arc<ScriptedRounds>) {
+        let f = raising_a_card(None, Policy::default());
+        let port = Arc::new(FakeConnectorPort {
+            refuse,
+            ..FakeConnectorPort::default()
+        });
+        f.0.set_connector_port(port.clone());
+        let rounds = ScriptedRounds::answering(vec![
+            ConnectRound::Asks {
+                session: "round-1".into(),
+                message: "open the picker".into(),
+                fields: Vec::new(),
+                from_code: true,
+            },
+            ConnectRound::Connected {
+                connection: "work".into(),
+                invalidated: Vec::new(),
+            },
+        ]);
+        f.0.set_connect_round_port(rounds.clone());
+        f.0.begin_connect("r1", "token", "work");
+        (f, port, rounds)
+    }
+
+    #[test]
+    fn a_grant_the_store_refuses_leaves_a_card_the_developer_may_press_again() {
+        // The card is kept on a refusal, and a kept card that is never presented again is one the tray draws as still working — with its button dead, and only `Never here` left.
+        let ((s, n, _store, _rx), _port, _rounds) = signing_in(Some(
+            "some-provider was replaced since this card was raised".into(),
+        ));
+
+        s.answer_connect("r1", lns_ipc::SecretValues::default());
+
+        let presented = n.presented.lock().unwrap();
+        let last = presented.last().expect("the card is presented again");
+        assert_eq!(last.id, "r1");
+        assert!(last.connect.is_none(), "the sign-in is over");
+        assert_eq!(
+            last.connect_seq,
+            s.settled_count("r1"),
+            "the card must be drawn at the count it was settled at, or it keeps waiting on a round that already came back"
+        );
+    }
+
+    #[test]
+    fn a_run_that_went_away_takes_every_open_sign_in_with_it() {
+        // Nobody is left to answer, and the round holds the step state the component was handed — which §3.2.6 keeps in memory for a bounded life, not until `sessionSeconds` runs out on its own.
+        let ((s, _n, _store, _rx), _port, rounds) = signing_in(None);
+
+        s.withdraw_run();
+
+        assert_eq!(*rounds.abandoned.lock().unwrap(), ["round-1"]);
+    }
+
+    #[test]
+    fn a_round_that_came_back_to_a_card_that_went_is_dropped_rather_than_held() {
+        // The component may spend its whole `callSeconds` while another task settles the card — `lns connector grant` on the IPC path, or the run going away on the relay's. Nobody is left to answer, so §3.2.6 drops the state rather than waiting out `sessionSeconds`.
+        let (session, _n, _store, _rx) = raising_a_card(None, Policy::default());
+        let s = Arc::new(session);
+        s.set_connector_port(Arc::new(FakeConnectorPort::default()));
+        let rounds = ScriptedRounds::answering(vec![ConnectRound::Asks {
+            session: "round-1".into(),
+            message: "open the picker".into(),
+            fields: Vec::new(),
+            from_code: true,
+        }]);
+        s.set_connect_round_port(rounds.clone());
+        let withdrawing = Arc::downgrade(&s);
+        *rounds.interleave.lock().unwrap() = Some(Box::new(move || {
+            if let Some(session) = withdrawing.upgrade() {
+                session.withdraw_run();
+            }
+        }));
+
+        s.begin_connect("r1", "token", "work");
+
+        assert_eq!(*rounds.abandoned.lock().unwrap(), ["round-1"]);
+        assert!(
+            s.prompt_of("r1").is_none(),
+            "and nothing is left for a later card under this id to draw"
+        );
+    }
+
+    #[test]
+    fn a_sign_in_that_outlived_the_run_reports_to_nobody() {
+        // `withdraw_run` clears the window on its way out, so a message after it re-pins a window nothing is left to read — and there is no card to grant to either way.
+        let (session, n, _store, _rx) = raising_a_card(None, Policy::default());
+        let s = Arc::new(session);
+        let port = Arc::new(FakeConnectorPort::default());
+        s.set_connector_port(port.clone());
+        let rounds = ScriptedRounds::answering(vec![
+            ConnectRound::Asks {
+                session: "round-1".into(),
+                message: "open the picker".into(),
+                fields: Vec::new(),
+                from_code: true,
+            },
+            ConnectRound::Connected {
+                connection: "work".into(),
+                invalidated: Vec::new(),
+            },
+        ]);
+        s.set_connect_round_port(rounds.clone());
+        s.begin_connect("r1", "token", "work");
+        let withdrawing = Arc::downgrade(&s);
+        *rounds.interleave.lock().unwrap() = Some(Box::new(move || {
+            if let Some(session) = withdrawing.upgrade() {
+                session.withdraw_run();
+            }
+        }));
+        n.informed.lock().unwrap().clear();
+
+        s.answer_connect("r1", lns_ipc::SecretValues::default());
+
+        assert!(port.granted.lock().unwrap().is_empty());
+        let informed = n.informed.lock().unwrap().clone();
+        assert!(
+            informed.is_empty(),
+            "nothing answered this connector, and nobody is there to be told: {informed:?}"
+        );
+    }
+
+    #[test]
+    fn a_round_that_failed_after_the_run_went_reports_to_nobody_either() {
+        // Every answer a round can give reaches a withdrawn run the same way: a window that has just been cleared, and an entry list already written `Withdrawn`.
+        let (session, n, _store, _rx) = raising_a_card(None, Policy::default());
+        let s = Arc::new(session);
+        s.set_connector_port(Arc::new(FakeConnectorPort::default()));
+        let rounds = ScriptedRounds::answering(vec![
+            ConnectRound::Asks {
+                session: "round-1".into(),
+                message: "open the picker".into(),
+                fields: Vec::new(),
+                from_code: true,
+            },
+            ConnectRound::Failed("GitHub returned no refresh token".into()),
+        ]);
+        s.set_connect_round_port(rounds.clone());
+        s.begin_connect("r1", "token", "work");
+        let withdrawing = Arc::downgrade(&s);
+        *rounds.interleave.lock().unwrap() = Some(Box::new(move || {
+            if let Some(session) = withdrawing.upgrade() {
+                session.withdraw_run();
+            }
+        }));
+        n.informed.lock().unwrap().clear();
+
+        s.answer_connect("r1", lns_ipc::SecretValues::default());
+
+        let informed = n.informed.lock().unwrap().clone();
+        assert!(informed.is_empty(), "got {informed:?}");
+    }
+
+    #[test]
+    fn a_round_dropped_under_a_card_that_stayed_leaves_it_pressable() {
+        // A decline the store refuses drops the round and keeps the card. A card never drawn again is one the tray leaves reading "Working…" with a dead button.
+        let (s, _n, _store, _rx) = raising_a_card(None, Policy::default());
+        s.set_connector_port(Arc::new(FakeConnectorPort {
+            refuse: Some("the store would not write it".into()),
+            ..FakeConnectorPort::default()
+        }));
+        s.set_connect_round_port(ScriptedRounds::answering(vec![ConnectRound::Asks {
+            session: "round-1".into(),
+            message: "open the picker".into(),
+            fields: Vec::new(),
+            from_code: true,
+        }]));
+        s.begin_connect("r1", "token", "work");
+        let waiting_at = s.settled_count("r1");
+        s.decline_offer("r1");
+
+        s.answer_connect("r1", lns_ipc::SecretValues::default());
+
+        assert!(
+            s.settled_count("r1") > waiting_at,
+            "the card must be drawn past the count it was waiting on"
+        );
+    }
+
+    #[test]
+    fn a_sign_in_that_finished_after_its_card_went_keeps_the_connection_and_grants_nothing() {
+        // The mechanism stored the connection the moment it finished; the grant it was opened for belongs to a card nobody holds any more, and writing it would grant against a disclosure nobody is looking at.
+        let (session, n, _store, _rx) = raising_a_card(None, Policy::default());
+        let s = Arc::new(session);
+        let port = Arc::new(FakeConnectorPort::default());
+        s.set_connector_port(port.clone());
+        let rounds = ScriptedRounds::answering(vec![
+            ConnectRound::Asks {
+                session: "round-1".into(),
+                message: "open the picker".into(),
+                fields: Vec::new(),
+                from_code: true,
+            },
+            ConnectRound::Connected {
+                connection: "work".into(),
+                invalidated: Vec::new(),
+            },
+        ]);
+        s.set_connect_round_port(rounds.clone());
+        s.begin_connect("r1", "token", "work");
+        let granting = Arc::downgrade(&s);
+        *rounds.interleave.lock().unwrap() = Some(Box::new(move || {
+            if let Some(session) = granting.upgrade() {
+                // What `lns connector grant` does, on its own task: it answers the connector and releases every card holding it.
+                session.grant_offered("some-provider", "token", ConnectionChoice::None);
+            }
+        }));
+
+        s.answer_connect("r1", lns_ipc::SecretValues::default());
+
+        let informed = n.informed.lock().unwrap().clone();
+        assert!(
+            informed
+                .iter()
+                .any(|said| said.contains("this card is gone") && said.contains("work")),
+            "the message must name what happened here, not a cause it did not see: {informed:?}"
+        );
+        assert_eq!(
+            port.granted.lock().unwrap().len(),
+            1,
+            "the grant that settled the card is the only one written"
+        );
+    }
+
+    #[test]
+    fn a_finished_sign_in_grants_through_the_connection_it_just_made() {
+        // The whole point of the exchange: a grant naming no connection injects no credential, so the run would reach the destination unarmed after a sign-in that looked like it worked.
+        let (s, _n, _store, _rx) = raising_a_card(None, Policy::default());
+        let port = Arc::new(FakeConnectorPort::default());
+        s.set_connector_port(port.clone());
+        s.set_connect_round_port(ScriptedRounds::answering(vec![
+            ConnectRound::Asks {
+                session: "round-1".into(),
+                message: "open the picker".into(),
+                fields: Vec::new(),
+                from_code: true,
+            },
+            ConnectRound::Connected {
+                connection: "work".into(),
+                invalidated: Vec::new(),
+            },
+        ]));
+        s.begin_connect("r1", "token", "work");
+
+        s.answer_connect("r1", lns_ipc::SecretValues::default());
+
+        assert_eq!(
+            *port.granted.lock().unwrap(),
+            [Granted {
+                name: "some-provider".into(),
+                // The bytes the card disclosed when the sign-in opened, not whatever is installed now.
+                digest: "sha256:abc".into(),
+                method: "token".into(),
+                connection: Some("work".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn granting_through_a_connection_this_machine_holds_drops_the_sign_in_it_interrupts() {
+        // The grant settles the card, so the round it was drawing is one nobody will ever answer — and it holds what was already typed (§3.2.6).
+        let (s, _n, _store, _rx) = raising_a_card(None, Policy::default());
+        s.set_connector_port(Arc::new(FakeConnectorPort::default()));
+        let rounds = ScriptedRounds::answering(vec![ConnectRound::Asks {
+            session: "round-1".into(),
+            message: "open the picker".into(),
+            fields: Vec::new(),
+            from_code: true,
+        }]);
+        s.set_connect_round_port(rounds.clone());
+        s.begin_connect("r1", "token", "sign-in");
+
+        s.grant_offer("r1", "token", ConnectionChoice::Held("work".into()));
+
+        assert_eq!(*rounds.abandoned.lock().unwrap(), ["round-1"]);
+    }
+
+    #[test]
+    fn a_card_with_no_store_behind_it_opens_no_sign_in() {
+        // The card is drawn from the run's offers, which a service that could not read the store still holds; pressing Sign in must then say so rather than appear to start something.
+        let (s, n, _store, _rx) = raising_a_card(None, Policy::default());
+
+        assert_eq!(
+            s.begin_connect("r1", "token", "work"),
+            DecisionOutcome::Resolved
+        );
+
+        assert_eq!(*n.informed.lock().unwrap(), [NO_CONNECTOR_STORE]);
+    }
+
+    #[test]
+    fn a_sign_in_on_a_card_that_is_gone_answers_nothing() {
+        let (s, _n, _store, _rx) = fixture();
+
+        assert_eq!(
+            s.begin_connect("nothing", "token", "work"),
+            DecisionOutcome::UnknownId
+        );
+        assert_eq!(
+            s.answer_connect("nothing", lns_ipc::SecretValues::default()),
+            DecisionOutcome::UnknownId
         );
     }
 

@@ -10,7 +10,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
 use crate::approval_flow::protocol::Decision;
-use crate::approval_flow::session::{ConnectionChoice, PendingPrompt};
+use crate::approval_flow::session::{ConnectAsk, ConnectionChoice, PendingPrompt};
 use crate::approval_flow::window::{self, Snapshot, StackItem, WindowState};
 use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
@@ -451,6 +451,14 @@ impl eframe::App for TrayApp {
                 self.window_state.grant(&id, &method, connection);
                 ui.ctx().request_repaint();
             }
+            Some(CardAction::BeginConnect { id, method, label }) => {
+                self.window_state.begin_connect(&id, method, label);
+                ui.ctx().request_repaint();
+            }
+            Some(CardAction::AnswerConnect { id, values }) => {
+                self.window_state.answer_connect(&id, values);
+                ui.ctx().request_repaint();
+            }
             Some(CardAction::Decline { id }) => {
                 self.window_state.decline(&id);
                 ui.ctx().request_repaint();
@@ -484,6 +492,17 @@ pub enum CardAction {
         id: String,
         method: String,
         connection: ConnectionChoice,
+    },
+    /// Open the sign-in this card will drive round by round (§3.2.6).
+    BeginConnect {
+        id: String,
+        method: String,
+        label: String,
+    },
+    /// Answer the round now on the card.
+    AnswerConnect {
+        id: String,
+        values: lns_ipc::SecretValues,
     },
     /// A standing no for this project (§3.2.4).
     Decline {
@@ -1266,6 +1285,7 @@ fn render_connector_card(
     let id = prompt.id.clone();
     let method = chosen_method(offer, draft);
     let method_name = method.map(|method| method.name.clone()).unwrap_or_default();
+    let stage = connect_stage(prompt, method, draft);
     // Shared because both closures run inside one call: the body decides readiness from what the user just did, the footer draws the button from it.
     let ready = std::cell::Cell::new(false);
     let out = crate::ui::card_sectioned(
@@ -1285,9 +1305,19 @@ fn render_connector_card(
             crate::ui::badges(ui, prompt.badges());
             match method {
                 Some(method) => {
-                    render_connection_choice(ui, offer, method, draft);
+                    // The picker is frozen once a sign-in is under way: the round belongs to the method it began with, and a card showing another method's disclosure beside `Continue` would disclose one thing and grant another.
+                    ui.add_enabled_ui(matches!(stage, ConnectStage::Idle { .. }), |ui| {
+                        render_connection_choice(ui, offer, method, draft);
+                    });
                     render_disclosure(ui, offer, method);
-                    ready.set(ready_to_grant(method, draft));
+                    match &stage {
+                        ConnectStage::Asking(ask) => {
+                            render_round(ui, ask, draft);
+                            ready.set(true);
+                        }
+                        ConnectStage::Working => ready.set(false),
+                        ConnectStage::Idle { .. } => ready.set(ready_to_grant(method, draft)),
+                    }
                 }
                 // §3.2.2: the card names what needed a newer lns, and keeps `Never here` — the hold outranks an ordinary allow, so declining is the only answer that ends it.
                 None => render_needs_a_newer_lns(ui, offer),
@@ -1298,8 +1328,14 @@ fn render_connector_card(
             let mut chosen = None;
             let ready = ready.get();
             ui.columns(2, |cols| {
-                if enabled_primary_button(&mut cols[0], "Connect", ready).clicked() && ready {
-                    chosen = Some(ConnectorChoice::Grant);
+                if enabled_primary_button(&mut cols[0], primary_label(&stage), ready).clicked()
+                    && ready
+                {
+                    chosen = Some(match stage {
+                        ConnectStage::Asking(_) => ConnectorChoice::Answer,
+                        ConnectStage::Idle { begins: true } => ConnectorChoice::Begin,
+                        _ => ConnectorChoice::Grant,
+                    });
                 }
                 if deny_button(&mut cols[1], "Never here").clicked() {
                     chosen = Some(ConnectorChoice::Decline);
@@ -1308,20 +1344,138 @@ fn render_connector_card(
             chosen
         },
     );
+    if let Some(choice) = &out.inner {
+        draft.sent_at = latched_at(choice, prompt.connect_seq);
+    }
     let action = out.inner.map(|choice| match choice {
         ConnectorChoice::Grant => CardAction::Grant {
             id: id.clone(),
             method: method_name,
             connection: connection_choice(draft),
         },
+        ConnectorChoice::Begin => CardAction::BeginConnect {
+            id: id.clone(),
+            method: method_name,
+            label: draft.label.trim().to_string(),
+        },
+        ConnectorChoice::Answer => CardAction::AnswerConnect {
+            id: id.clone(),
+            values: lns_ipc::SecretValues(std::mem::take(&mut draft.answers)),
+        },
         ConnectorChoice::Decline => CardAction::Decline { id },
     });
     (action, out.response)
 }
 
+/// Which press waits for a round to come back, so a component spending its deadline cannot be sent a second one — and which does not, because `connect_seq` advances on a round and on nothing else.
+fn latched_at(choice: &ConnectorChoice, seq: u64) -> Option<u64> {
+    match choice {
+        ConnectorChoice::Begin | ConnectorChoice::Answer => Some(seq),
+        ConnectorChoice::Grant | ConnectorChoice::Decline => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 enum ConnectorChoice {
     Grant,
+    /// Open the sign-in, because a `code` method decides what to ask for and the card learns it only by asking (§3.2.6).
+    Begin,
+    /// Answer the round on screen.
+    Answer,
     Decline,
+}
+
+/// The round this card is waiting on, and what the primary button does about it.
+enum ConnectStage<'a> {
+    /// Nothing in flight: the button grants, or opens a sign-in where the method signs in through its own code.
+    Idle { begins: bool },
+    /// A round is on screen and the button answers it.
+    Asking(&'a ConnectAsk),
+    /// A round was sent and has not come back. A component may spend its whole deadline, so the button must not send a second one.
+    Working,
+}
+
+fn connect_stage<'a>(
+    prompt: &'a PendingPrompt,
+    method: Option<&lns_ipc::ConnectorMethodView>,
+    draft: &OfferDraft,
+) -> ConnectStage<'a> {
+    if draft.sent_at == Some(prompt.connect_seq) {
+        return ConnectStage::Working;
+    }
+    match &prompt.connect {
+        Some(ask) => ConnectStage::Asking(ask),
+        None => ConnectStage::Idle {
+            begins: draft.connecting && method.is_some_and(|method| method.carries_code),
+        },
+    }
+}
+
+/// The round in the connector's own words, with the fields it asked for. Every label here is the component's, so the card says so before any of it is read (§3.2.6).
+fn render_round(ui: &mut egui::Ui, ask: &ConnectAsk, draft: &mut OfferDraft) {
+    use egui::RichText;
+
+    ui.add_space(8.0);
+    for line in attribution(ask) {
+        ui.label(
+            RichText::new(line)
+                .size(theme::FONT_CAPTION)
+                .color(window::TEXT_MUTED),
+        );
+        ui.add_space(4.0);
+    }
+    for field in &ask.fields {
+        ui.add_space(6.0);
+        let value = draft.answers.entry(field.name.clone()).or_default();
+        if field.secret {
+            secret_input(ui, value, &field.label);
+        } else {
+            plain_input(ui, value, &field.label);
+        }
+    }
+}
+
+/// Whose words the round carries. A mechanism lns implements has no author to attribute, so it gets none.
+fn attribution(ask: &ConnectAsk) -> Vec<String> {
+    if !ask.from_code {
+        return ask
+            .message
+            .is_empty()
+            .then(Vec::new)
+            .unwrap_or_else(|| vec![ask.message.clone()]);
+    }
+    let mut lines = Vec::new();
+    if !ask.message.is_empty() {
+        lines.push(lns_ipc::connector_says(&ask.connector, &ask.message));
+    }
+    if !ask.fields.is_empty() {
+        lines.push(lns_ipc::connector_asks(&ask.connector));
+    }
+    lines
+}
+
+fn plain_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Response {
+    ui.scope(|ui| {
+        ui.style_mut().visuals.widgets.inactive.bg_stroke =
+            egui::Stroke::new(1.0_f32, window::BORDER);
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .hint_text(hint)
+                .margin(egui::Margin::symmetric(10, 9))
+                .desired_width(f32::INFINITY),
+        )
+    })
+    .inner
+}
+
+/// What the primary button says, which is what pressing it will do.
+fn primary_label(stage: &ConnectStage<'_>) -> &'static str {
+    match stage {
+        ConnectStage::Working => "Working…",
+        ConnectStage::Asking(_) => "Continue",
+        ConnectStage::Idle { begins: true } => "Sign in",
+        ConnectStage::Idle { begins: false } => "Connect",
+    }
 }
 
 /// The method this card is offering: the one the draft names, else the first this version can offer.
@@ -1333,19 +1487,15 @@ pub(crate) fn chosen_method<'a>(
         return offer.methods.iter().find(|method| &method.name == named);
     }
     let offerable = || offer.methods.iter().filter(|method| method.offerable);
-    // One this card can finish, first: a method whose mechanism decides its own fields can only be connected at a terminal, so choosing it over a method beside it would leave the user nothing to press.
+    // One this machine already holds a connection for, first: it is the method that asks the developer for least.
     offerable()
-        .find(|method| completable_here(offer, method))
+        .find(|method| {
+            offer
+                .connections
+                .iter()
+                .any(|held| held.method == method.name)
+        })
         .or_else(|| offerable().next())
-}
-
-/// Whether pressing Connect on this card could lead anywhere: the card asks for it itself, or the machine already holds a connection it could be granted through.
-fn completable_here(offer: &lns_ipc::ConnectorView, method: &lns_ipc::ConnectorMethodView) -> bool {
-    asks_here(method)
-        || offer
-            .connections
-            .iter()
-            .any(|held| held.method == method.name)
 }
 
 /// Which connection the grant is made with, every one this connector holds, because §3.2.4 makes the choice and its authority part of the disclosure.
@@ -1449,15 +1599,6 @@ fn render_new_connection(
     if !draft.connecting {
         return;
     }
-    if !asks_here(method) {
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(CONNECT_AT_A_TERMINAL)
-                .size(theme::FONT_CAPTION)
-                .color(window::TEXT_MUTED),
-        );
-        return;
-    }
     if let Some(help) = &method.help {
         ui.add_space(6.0);
         ui.label(
@@ -1473,6 +1614,10 @@ fn render_new_connection(
             .margin(egui::Margin::symmetric(10, 9))
             .desired_width(f32::INFINITY),
     );
+    if method.carries_code {
+        // A mechanism decides what to ask and how often, so there is nothing to draw until the first round comes back (§3.2.6).
+        return;
+    }
     let asked_for = method.auth_label.as_deref().unwrap_or_default();
     for ask in &method.asks {
         ui.add_space(6.0);
@@ -1481,8 +1626,8 @@ fn render_new_connection(
     }
 }
 
-/// What the card says instead of a form it cannot draw. A run is offered the connections this machine held when it started, so one made now reaches it at its next start — the same answer the fileset refusal gives.
-const CONNECT_AT_A_TERMINAL: &str = "This method signs in through its own code, which decides what to ask for, so this card cannot ask. Run `lns connector connect` at a terminal and start this run again.";
+/// What a surface that grants in one press says instead of a form it cannot drive. A run is offered the connections this machine held when it started, so one made now reaches it at its next start.
+pub(crate) const SIGN_IN_ELSEWHERE: &str = "This method signs in through its own code, which decides what to ask for round by round. Sign in on the approval card, or run `lns connector connect` at a terminal, then grant it here.";
 
 /// Suggests a name nothing already holds, because reusing one silently replaces the connection under it — counting them is not enough, since disconnecting one leaves its successor's name taken.
 fn begin_connecting(
@@ -1536,11 +1681,6 @@ fn disclosure_lines(
         lines.push(format!("Installed at: {}", offer.digest));
     }
     lines
-}
-
-/// A `code` method's mechanism decides what to ask and may take more than one round, which a card cannot show; so the card discloses and grants, and the asking happens where there is a terminal to ask at.
-fn asks_here(method: &lns_ipc::ConnectorMethodView) -> bool {
-    !method.carries_code
 }
 
 /// The sentence a card MUST carry verbatim for a method whose mechanism is code nobody can read, and which of the two it is (§1.5). The blunter one withdraws a guarantee, so it is drawn as a warning.
@@ -1623,9 +1763,9 @@ pub(crate) fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &Offe
     if !draft.connecting {
         return draft.connection.is_some();
     }
-    if !asks_here(method) {
-        // The card cannot collect what a mechanism decides round by round, so it grants a connection made elsewhere.
-        return false;
+    if method.carries_code {
+        // The press opens the exchange rather than granting, so the name is all the card needs before it can begin.
+        return !draft.label.trim().is_empty();
     }
     !draft.label.trim().is_empty()
         && method
@@ -1746,9 +1886,14 @@ impl CardState {
 pub struct OfferDraft {
     method: Option<String>,
     connection: Option<String>,
-    connecting: bool,
+    /// Whether this draft is making a new connection rather than naming one this machine already holds.
+    pub(crate) connecting: bool,
     label: String,
     values: std::collections::BTreeMap<String, String>,
+    /// What the developer has typed into the round now on screen, keyed by the name the mechanism will read it back under.
+    answers: std::collections::BTreeMap<String, String>,
+    /// The settle count this card last acted on, so a round still running is drawn as waiting rather than as a button to press again.
+    sent_at: Option<u64>,
 }
 
 /// Hand-written for the reason `WireInjection`'s is: the draft holds what the user just typed, and no debug of a UI state may put a live credential on the trace stream.
@@ -1759,6 +1904,8 @@ impl std::fmt::Debug for OfferDraft {
             .field("connection", &self.connection)
             .field("connecting", &self.connecting)
             .field("asked_for", &self.values.keys().collect::<Vec<_>>())
+            .field("answering", &self.answers.keys().collect::<Vec<_>>())
+            .field("sent_at", &self.sent_at)
             .finish_non_exhaustive()
     }
 }
@@ -2113,6 +2260,8 @@ mod tests {
                         })
                         .collect(),
                 }),
+                connect: None,
+                connect_seq: 0,
             }],
             informs: Vec::new(),
             order: vec![StackItem::Network(0)],
@@ -2525,8 +2674,8 @@ mod tests {
     }
 
     #[test]
-    fn a_card_offers_a_method_it_can_finish_over_one_it_cannot() {
-        // A connector commonly declares a code sign-in and a paste-a-token fallback; choosing the first would leave the user only `Never here`.
+    fn a_card_offers_the_method_its_author_declared_first() {
+        // Both can be finished here now, so nothing outranks the order the connector's own document put them in.
         let offer = lns_ipc::ConnectorView {
             methods: vec![carrying_code(&[], false), opening(None)],
             ..installed_at("sha256:abc")
@@ -2534,13 +2683,14 @@ mod tests {
 
         let chosen = chosen_method(&offer, &OfferDraft::default()).expect("one is offerable");
 
-        assert_eq!(chosen.name, "token");
+        assert_eq!(chosen.name, "sign-in");
     }
 
     #[test]
-    fn a_card_still_offers_a_code_method_where_a_connection_for_it_is_already_held() {
+    fn a_card_offers_the_method_this_machine_already_holds_a_connection_for() {
+        // It is the method that asks the developer for least: a held connection needs no sign-in at all.
         let mut offer = lns_ipc::ConnectorView {
-            methods: vec![carrying_code(&[], false)],
+            methods: vec![opening(None), carrying_code(&[], false)],
             ..installed_at("sha256:abc")
         };
         offer.connections.push(lns_ipc::ConnectorConnectionView {
@@ -2554,36 +2704,154 @@ mod tests {
         assert_eq!(chosen.name, "sign-in");
     }
 
-    #[test]
-    fn a_card_does_not_invite_a_paste_of_what_a_component_is_supposed_to_produce() {
-        // The mechanism decides what to ask and may take more than one round; a card can show neither.
-        let carrying = carrying_code(&[], false);
+    fn asked(name: &str, secret: bool) -> lns_ipc::ConnectorFieldView {
+        lns_ipc::ConnectorFieldView {
+            name: name.into(),
+            label: format!("the {name}"),
+            secret,
+        }
+    }
 
-        assert!(!asks_here(&carrying), "the card draws no form for it");
+    fn round(
+        message: &str,
+        fields: Vec<lns_ipc::ConnectorFieldView>,
+        from_code: bool,
+    ) -> ConnectAsk {
+        ConnectAsk {
+            connector: "some-provider".into(),
+            method: "sign-in".into(),
+            message: message.into(),
+            fields,
+            from_code,
+        }
+    }
+
+    #[test]
+    fn a_code_method_needs_only_a_name_before_the_card_can_open_its_sign_in() {
+        // The press opens the exchange; what it asks for is the mechanism's decision, so the card cannot collect it first (§3.2.6).
+        let naming = OfferDraft {
+            connecting: true,
+            label: "work".into(),
+            ..OfferDraft::default()
+        };
+
+        assert!(ready_to_grant(&carrying_code(&[], false), &naming));
         assert!(
             !ready_to_grant(
-                &carrying,
+                &carrying_code(&[], false),
                 &OfferDraft {
                     connecting: true,
-                    label: "work".into(),
                     ..OfferDraft::default()
                 }
             ),
-            "and there is nothing it could collect that would make one ready"
-        );
-        assert!(
-            asks_here(&opening(None)),
-            "a method lns implements still asks here"
+            "a connection is kept under its name, so an unnamed one has nowhere to go"
         );
     }
 
     #[test]
-    fn a_card_that_cannot_ask_names_a_route_it_can_actually_complete() {
-        // A run is offered the connections this machine held when it started, so "grant it here afterwards" would be a promise the card cannot keep.
+    fn the_button_says_what_pressing_it_will_do() {
+        let ask = round("open the picker", vec![asked("device_code", true)], true);
+
+        assert_eq!(
+            primary_label(&ConnectStage::Idle { begins: false }),
+            "Connect"
+        );
+        assert_eq!(
+            primary_label(&ConnectStage::Idle { begins: true }),
+            "Sign in"
+        );
+        assert_eq!(primary_label(&ConnectStage::Asking(&ask)), "Continue");
+        assert_eq!(primary_label(&ConnectStage::Working), "Working…");
+    }
+
+    #[test]
+    fn a_round_still_running_is_not_a_button_to_press_again() {
+        // A component may spend its whole `callSeconds`, and a second answer would be sent against a handle the first one consumed.
+        let prompt = offered_prompt("open", &[], &[]).pending.remove(0);
+        let sent = OfferDraft {
+            sent_at: Some(prompt.connect_seq),
+            ..OfferDraft::default()
+        };
+
+        assert!(matches!(
+            connect_stage(&prompt, None, &sent),
+            ConnectStage::Working
+        ));
         assert!(
-            CONNECT_AT_A_TERMINAL.contains("lns connector connect")
-                && CONNECT_AT_A_TERMINAL.contains("start this run again"),
-            "got: {CONNECT_AT_A_TERMINAL}"
+            matches!(
+                connect_stage(&prompt, None, &OfferDraft::default()),
+                ConnectStage::Idle { begins: false }
+            ),
+            "a card nothing was sent from is one the developer may press"
+        );
+    }
+
+    #[test]
+    fn only_a_press_that_opens_or_answers_a_round_waits_for_one() {
+        // `connect_seq` advances on a sign-in round and on nothing else, so latching a grant or a decline against it would leave a card that was kept — a refused connect, a refused decline — reading "Working…" with a dead button for the rest of its life.
+        assert_eq!(latched_at(&ConnectorChoice::Begin, 3), Some(3));
+        assert_eq!(latched_at(&ConnectorChoice::Answer, 3), Some(3));
+        assert_eq!(latched_at(&ConnectorChoice::Grant, 3), None);
+        assert_eq!(latched_at(&ConnectorChoice::Decline, 3), None);
+    }
+
+    #[test]
+    fn a_card_kept_after_a_refused_grant_is_one_the_developer_may_press_again() {
+        let prompt = offered_prompt("open", &[], &[]).pending.remove(0);
+
+        let draft = OfferDraft {
+            sent_at: latched_at(&ConnectorChoice::Grant, prompt.connect_seq),
+            ..OfferDraft::default()
+        };
+
+        assert!(matches!(
+            connect_stage(&prompt, None, &draft),
+            ConnectStage::Idle { .. }
+        ));
+    }
+
+    #[test]
+    fn a_round_that_came_back_is_the_one_the_card_draws() {
+        let mut prompt = offered_prompt("open", &[], &[]).pending.remove(0);
+        prompt.connect = Some(round("open the picker", Vec::new(), true));
+        prompt.connect_seq = 1;
+
+        assert!(matches!(
+            connect_stage(
+                &prompt,
+                None,
+                &OfferDraft {
+                    sent_at: Some(0),
+                    ..OfferDraft::default()
+                }
+            ),
+            ConnectStage::Asking(_)
+        ));
+    }
+
+    #[test]
+    fn the_card_says_whose_words_a_round_carries() {
+        // They arrive after every check the document got, so lns attributes them rather than showing them as its own (§3.2.6).
+        assert_eq!(
+            attribution(&round(
+                "open the picker",
+                vec![asked("device_code", true)],
+                true
+            )),
+            [
+                "some-provider says: open the picker",
+                "some-provider asks, in its own words:"
+            ],
+            "the labels are the connector's too, so attributing only the message would leave them reading as lns's prompts"
+        );
+        assert_eq!(
+            attribution(&round("enter 8C29-9212", Vec::new(), true)),
+            ["some-provider says: enter 8C29-9212"],
+            "a round that asks for nothing still shows something, and it is still the connector's"
+        );
+        assert!(
+            attribution(&round("", vec![asked("token", true)], false)).is_empty(),
+            "a mechanism lns implements has no author to attribute"
         );
     }
 
@@ -2775,6 +3043,8 @@ mod tests {
                 treatment: Treatment::Inspected,
                 run: Some("some-run".into()),
                 offer: None,
+                connect: None,
+                connect_seq: 0,
             }],
             informs: Vec::new(),
             order: vec![StackItem::Network(0)],
@@ -2799,6 +3069,8 @@ mod tests {
                 treatment: Treatment::Inspected,
                 run: Some("some-run".into()),
                 offer: None,
+                connect: None,
+                connect_seq: 0,
             },
             tx,
         );
@@ -2832,6 +3104,8 @@ mod tests {
             treatment: Treatment::Inspected,
             run: Some("some-run".into()),
             offer: None,
+            connect: None,
+            connect_seq: 0,
         };
         Snapshot {
             pending: vec![net("n0", "a.test"), net("n1", "b.test")],
