@@ -11,6 +11,7 @@ struct ApprovalHistory: View {
             LNSPageHeading(title: "Approvals", subtitle: model.sandboxName)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(24)
             HStack {
+                SandboxFilter(model: model)
                 Menu {
                     Button("All answers") { model.filters.answers = []; model.clearHistory() }
                     Divider()

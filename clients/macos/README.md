@@ -12,7 +12,8 @@ creation dialogs, audit details, and live approvals. Native controls and keyboar
 shortcuts remain available. Shared colors and presentation components live in
 `Sources/LNSMac/LNSTheme.swift`.
 
-The native dashboard includes sandbox selection, event-kind filters, global
+Audit and Approvals each include a sandbox filter in their own view; the sidebar
+contains navigation only. The native dashboard includes event-kind filters, global
 audit search, event details and copy controls, integrity warnings, and approval
 history grouped into waiting requests and an archive. History rows offer the
 service's persistent answers, connector grants, and removal from the list.
