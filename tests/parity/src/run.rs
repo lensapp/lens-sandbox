@@ -1,5 +1,7 @@
 use crate::cases::{self, Ctx, Image};
 use crate::config::{Backend, Config, Images};
+use crate::fixtures::remote::RemoteFixtures;
+use crate::fixtures::source::FixtureSource;
 use crate::fixtures::{Activity, Fixtures, Sizes, refuse_unsuitable_bind};
 use crate::host;
 use crate::result::{
@@ -10,14 +12,15 @@ use crate::sample::Sampler;
 use crate::service::PrivateService;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub struct RunPlan {
     pub backend: Backend,
     pub images: Images,
-    pub bind: Ipv4Addr,
+    pub bind: Option<Ipv4Addr>,
+    pub fixtures_at: Option<SocketAddrV4>,
     pub base_port: u16,
     pub guest_subnet: String,
     pub selected: Vec<String>,
@@ -158,12 +161,30 @@ pub struct BackendOverrides {
     pub env: BTreeMap<String, String>,
 }
 
+/// The fixtures this run puts its cases to: this process's own, or a pair the runner reads over another machine's report server.
+pub fn start_fixtures(plan: &RunPlan) -> Result<FixtureSource> {
+    match plan.fixtures_at {
+        Some(endpoint) => Ok(FixtureSource::Remote(Box::new(RemoteFixtures::connect(
+            endpoint,
+        )?))),
+        None => {
+            let bind = plan.bind.context(MISSING_FIXTURES)?;
+            refuse_unsuitable_bind(bind)?;
+            Ok(FixtureSource::InProcess(Fixtures::start(
+                bind,
+                plan.base_port,
+                Sizes::default(),
+            )?))
+        }
+    }
+}
+
+pub const MISSING_FIXTURES: &str = "--bind takes the host's LAN IPv4 address the guest reaches it on, or --fixtures-at IP:BASE_PORT names the machine that serves the fixtures";
+
 pub fn execute(plan: RunPlan) -> Result<RunResult> {
-    refuse_unsuitable_bind(plan.bind)?;
+    let fixtures = start_fixtures(&plan)?;
     std::fs::create_dir_all(&plan.work_dir)
         .with_context(|| format!("create {}", plan.work_dir.display()))?;
-
-    let fixtures = Fixtures::start(plan.bind, plan.base_port, Sizes::default())?;
     let started_unix_ms = unix_ms();
     let started = Instant::now();
 
@@ -209,6 +230,7 @@ pub fn execute(plan: RunPlan) -> Result<RunResult> {
         service_pid: pid,
         images,
         host: host::facts(),
+        fixtures: fixtures.record(),
         started_unix_ms,
         finished_unix_ms: unix_ms(),
         cases: Vec::new(),
@@ -259,6 +281,9 @@ fn budget_for(case: &cases::Case, budgets: &BTreeMap<String, u64>) -> Duration {
 }
 
 fn run_case(ctx: &Ctx, case: &cases::Case, budget: Duration) -> CaseResult {
+    if let Err(err) = ctx.fixtures.reset() {
+        return CaseResult::new(case.name).fail(format!("{err:#}"));
+    }
     ctx.begin_case(budget);
     let started = Instant::now();
     let mut result = (case.run)(ctx);
@@ -377,6 +402,11 @@ mod tests {
             service_pid: None,
             images: vec![],
             host: HostFacts::default(),
+            fixtures: crate::result::FixturesRecord {
+                host: "192.168.1.50".into(),
+                mode: crate::result::FixturesMode::InProcess,
+                version: "0.25.0".into(),
+            },
             started_unix_ms: 0,
             finished_unix_ms: 0,
             cases,
@@ -641,6 +671,57 @@ mod tests {
         assert!(revision == "unknown" || revision.len() == 40, "{revision}");
     }
 
+    fn plan_with(bind: Option<Ipv4Addr>, fixtures_at: Option<SocketAddrV4>) -> RunPlan {
+        RunPlan {
+            backend: Backend {
+                name: "netstack".into(),
+                lns: PathBuf::from("bin/lns"),
+                lns_service: PathBuf::from("bin/lns-service"),
+                env: BTreeMap::new(),
+                expect: BTreeMap::new(),
+                expected_differences: vec![],
+            },
+            images: Images::default(),
+            bind,
+            fixtures_at,
+            base_port: 0,
+            guest_subnet: "192.168.127".into(),
+            selected: vec![],
+            budgets: BTreeMap::new(),
+            work_dir: std::env::temp_dir().join("parity-never-created"),
+            out: std::env::temp_dir().join("parity-never-written.json"),
+        }
+    }
+
+    fn fixtures_refused(plan: &RunPlan) -> String {
+        match start_fixtures(plan) {
+            Ok(_) => panic!("these fixtures must be refused"),
+            Err(err) => format!("{err:#}"),
+        }
+    }
+
+    #[test]
+    fn a_run_that_names_no_fixtures_at_all_names_both_ways_to_give_them() {
+        let err = fixtures_refused(&plan_with(None, None));
+
+        assert!(err.contains("--bind"), "{err}");
+        assert!(err.contains("--fixtures-at"), "{err}");
+    }
+
+    #[test]
+    fn fixtures_on_another_machine_are_read_over_their_report_server() {
+        let served = crate::fixtures::Fixtures::start(Ipv4Addr::LOCALHOST, 0, Sizes::default())
+            .expect("the fixtures bind on loopback");
+        let port = served.serve_report(0).expect("the report server binds");
+        let plan = plan_with(None, Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)));
+
+        // The address decides the road: --fixtures-at never asks for --bind, it asks the machine it names.
+        let err = fixtures_refused(&plan);
+        assert!(err.contains("loopback"), "{err}");
+        assert!(!err.contains("--bind"), "{err}");
+        drop(served);
+    }
+
     #[test]
     fn a_bind_address_the_guest_cannot_reach_stops_the_run_before_it_starts_a_service() {
         let plan = RunPlan {
@@ -653,7 +734,8 @@ mod tests {
                 expected_differences: vec![],
             },
             images: Images::default(),
-            bind: Ipv4Addr::LOCALHOST,
+            bind: Some(Ipv4Addr::LOCALHOST),
+            fixtures_at: None,
             base_port: 0,
             guest_subnet: "192.168.127".into(),
             selected: vec![],

@@ -51,6 +51,8 @@ struct RunArgs {
     env: Vec<String>,
     #[arg(long)]
     bind: Option<Ipv4Addr>,
+    #[arg(long = "fixtures-at", value_name = "IP:BASE_PORT")]
+    fixtures_at: Option<SocketAddrV4>,
     #[arg(long)]
     base_port: Option<u16>,
     #[arg(long)]
@@ -136,15 +138,15 @@ fn run_backend(args: RunArgs) -> Result<i32> {
     }
     run::check_budgets(&budgets)?;
 
-    let bind = match args.bind.or_else(|| {
+    let bind = args.bind.or_else(|| {
         config
             .as_ref()
             .and_then(|config| config.bind.clone())
             .and_then(|text| text.parse().ok())
-    }) {
-        Some(address) => address,
-        None => bail!("--bind takes the host's LAN IPv4 address the guest reaches it on"),
-    };
+    });
+    if bind.is_none() && args.fixtures_at.is_none() {
+        bail!(run::MISSING_FIXTURES);
+    }
 
     let plan = RunPlan {
         backend,
@@ -153,6 +155,7 @@ fn run_backend(args: RunArgs) -> Result<i32> {
             .map(|c| c.images.clone())
             .unwrap_or_default(),
         bind,
+        fixtures_at: args.fixtures_at,
         base_port: args
             .base_port
             .or_else(|| config.as_ref().map(Config::base_port))
@@ -281,6 +284,7 @@ mod tests {
             lns_service: Some(PathBuf::from("bin/lns-service")),
             env: vec![],
             bind: Some(Ipv4Addr::new(192, 168, 1, 50)),
+            fixtures_at: None,
             base_port: None,
             guest_subnet: None,
             cases: vec![],
@@ -295,6 +299,58 @@ mod tests {
     }
 
     #[test]
+    fn a_run_may_put_its_cases_to_the_fixtures_on_another_machine() {
+        let cli = Cli::parse_from([
+            "parity",
+            "run",
+            "--backend",
+            "netstack",
+            "--lns",
+            "bin/lns",
+            "--lns-service",
+            "bin/lns-service",
+            "--fixtures-at",
+            "192.168.1.77:47200",
+            "--out",
+            "netstack.json",
+        ]);
+        let Command::Run(args) = cli.command else {
+            panic!("expected a run");
+        };
+
+        assert_eq!(
+            args.fixtures_at,
+            Some(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 77), 47200))
+        );
+        assert_eq!(args.bind, None, "--bind is not asked for as well");
+    }
+
+    #[test]
+    fn the_fixtures_serve_their_report_when_they_are_asked_to() {
+        let cli = Cli::parse_from([
+            "parity",
+            "fixtures",
+            "--bind",
+            "192.168.1.77",
+            "--base-port",
+            "47200",
+            "--serve",
+        ]);
+        let Command::Fixtures(args) = cli.command else {
+            panic!("expected the fixtures");
+        };
+
+        assert!(args.serve);
+        assert_eq!(report_port(args.base_port).unwrap(), 47220);
+
+        let quiet = Cli::parse_from(["parity", "fixtures", "--bind", "192.168.1.77"]);
+        let Command::Fixtures(args) = quiet.command else {
+            panic!("expected the fixtures");
+        };
+        assert!(!args.serve, "the report server is opt-in");
+    }
+
+    #[test]
     fn a_run_without_a_lan_address_is_refused_before_anything_starts() {
         let args = RunArgs {
             config: None,
@@ -303,6 +359,7 @@ mod tests {
             lns_service: Some(PathBuf::from("bin/lns-service")),
             env: vec![],
             bind: None,
+            fixtures_at: None,
             base_port: None,
             guest_subnet: None,
             cases: vec![],
@@ -314,6 +371,7 @@ mod tests {
         let err = run_backend(args).unwrap_err().to_string();
 
         assert!(err.contains("--bind"), "{err}");
+        assert!(err.contains("--fixtures-at"), "{err}");
     }
 
     #[test]
@@ -325,6 +383,7 @@ mod tests {
             lns_service: Some(PathBuf::from("bin/lns-service")),
             env: vec!["LNS_NETDEV".into()],
             bind: Some(Ipv4Addr::new(192, 168, 1, 50)),
+            fixtures_at: None,
             base_port: None,
             guest_subnet: None,
             cases: vec![],
@@ -383,31 +442,6 @@ mod tests {
     }
 
     #[test]
-    fn the_fixtures_serve_their_report_when_they_are_asked_to() {
-        let cli = Cli::parse_from([
-            "parity",
-            "fixtures",
-            "--bind",
-            "192.168.1.77",
-            "--base-port",
-            "47200",
-            "--serve",
-        ]);
-        let Command::Fixtures(args) = cli.command else {
-            panic!("expected the fixtures");
-        };
-
-        assert!(args.serve);
-        assert_eq!(report_port(args.base_port).unwrap(), 47220);
-
-        let quiet = Cli::parse_from(["parity", "fixtures", "--bind", "192.168.1.77"]);
-        let Command::Fixtures(args) = quiet.command else {
-            panic!("expected the fixtures");
-        };
-        assert!(!args.serve, "the report server is opt-in");
-    }
-
-    #[test]
     fn the_work_directory_is_this_processs_own() {
         let dir = default_work_dir();
         assert!(
@@ -434,6 +468,11 @@ mod tests {
             service_pid: None,
             images: vec![],
             host: result::HostFacts::default(),
+            fixtures: result::FixturesRecord {
+                host: "192.168.1.50".into(),
+                mode: result::FixturesMode::InProcess,
+                version: "0.25.0".into(),
+            },
             started_unix_ms: 0,
             finished_unix_ms: 0,
             cases: vec![case],

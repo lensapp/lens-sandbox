@@ -58,12 +58,33 @@ impl std::fmt::Display for Difference {
 pub struct DiffReport {
     pub unexpected: Vec<Difference>,
     pub expected: Vec<Difference>,
+    /// Why the two runs are not comparable at all, when they are not.
+    pub incomparable: Option<String>,
 }
 
 impl DiffReport {
     pub fn agrees(&self) -> bool {
-        self.unexpected.is_empty()
+        self.unexpected.is_empty() && self.incomparable.is_none()
     }
+}
+
+/// Two runs compare only when their cases met the same fixtures: another host, another mode or another harness version measures another network.
+pub fn incomparable_fixtures(left: &RunResult, right: &RunResult) -> Option<String> {
+    let (a, b) = (&left.fixtures, &right.fixtures);
+    if a == b {
+        return None;
+    }
+    Some(format!(
+        "{} used {} fixtures on {} (harness {}), {} used {} fixtures on {} (harness {})",
+        left.backend.name,
+        a.mode.as_str(),
+        a.host,
+        a.version,
+        right.backend.name,
+        b.mode.as_str(),
+        b.host,
+        b.version,
+    ))
 }
 
 pub fn diff(left: &RunResult, right: &RunResult) -> DiffReport {
@@ -74,7 +95,10 @@ pub fn diff(left: &RunResult, right: &RunResult) -> DiffReport {
         .map(|c| c.name.as_str())
         .collect();
 
-    let mut report = DiffReport::default();
+    let mut report = DiffReport {
+        incomparable: incomparable_fixtures(left, right),
+        ..DiffReport::default()
+    };
     for name in names {
         let expected = left.expects_difference(name) || right.expects_difference(name);
         for difference in case_differences(left, right, name) {
@@ -145,6 +169,11 @@ fn measures_agree(left: Option<&Measure>, right: Option<&Measure>) -> bool {
 
 pub fn render(report: &DiffReport, left: &RunResult, right: &RunResult) -> String {
     let mut out = format!("{} vs {}\n", describe(left), describe(right));
+    if let Some(why) = &report.incomparable {
+        out.push_str(&format!(
+            "these runs are not comparable: {why}\nput both backends to the same fixtures before you read the differences below\n"
+        ));
+    }
     if report.unexpected.is_empty() {
         out.push_str("no unexpected difference\n");
     } else {
@@ -169,7 +198,18 @@ fn describe(result: &RunResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::result::{BackendRecord, CaseResult, HostFacts, RunResult, SCHEMA_VERSION, Status};
+    use crate::result::{
+        BackendRecord, CaseResult, FixturesMode, FixturesRecord, HostFacts, RunResult,
+        SCHEMA_VERSION, Status,
+    };
+
+    fn fixtures_on(host: &str, mode: FixturesMode) -> FixturesRecord {
+        FixturesRecord {
+            host: host.into(),
+            mode,
+            version: "0.25.0".into(),
+        }
+    }
 
     fn result(name: &str, cases: Vec<CaseResult>, expected: &[&str]) -> RunResult {
         RunResult {
@@ -186,6 +226,7 @@ mod tests {
             service_pid: None,
             images: vec![],
             host: HostFacts::default(),
+            fixtures: fixtures_on("192.168.1.50", FixturesMode::InProcess),
             started_unix_ms: 0,
             finished_unix_ms: 0,
             cases,
@@ -412,6 +453,56 @@ mod tests {
             &[],
         );
         assert!(!diff(&left, &other).agrees());
+    }
+
+    #[test]
+    fn two_runs_that_met_different_fixtures_are_not_compared() {
+        let cases = vec![case("upload-100m", Status::Pass, &[])];
+        let left = result("netstack", cases.clone(), &[]);
+        let mut right = result("vmnet", cases, &[]);
+        right.fixtures = fixtures_on("192.168.1.77:47220", FixturesMode::Remote);
+        let report = diff(&left, &right);
+
+        assert!(
+            !report.agrees(),
+            "an incomparable pair never reads as green"
+        );
+        assert!(report.unexpected.is_empty(), "the cases themselves agree");
+        let why = report.incomparable.clone().expect("the diff says why");
+        assert!(
+            why.contains("netstack used in-process fixtures on 192.168.1.50"),
+            "{why}"
+        );
+        assert!(
+            why.contains("vmnet used remote fixtures on 192.168.1.77:47220"),
+            "{why}"
+        );
+
+        let text = render(&report, &left, &right);
+        assert!(text.contains("not comparable"), "{text}");
+    }
+
+    #[test]
+    fn two_runs_that_met_the_same_remote_fixtures_are_compared_as_usual() {
+        let cases = vec![case("upload-100m", Status::Pass, &[])];
+        let mut left = result("netstack", cases.clone(), &[]);
+        let mut right = result("vmnet", cases, &[]);
+        left.fixtures = fixtures_on("192.168.1.77:47220", FixturesMode::Remote);
+        right.fixtures = fixtures_on("192.168.1.77:47220", FixturesMode::Remote);
+
+        assert!(diff(&left, &right).agrees());
+    }
+
+    #[test]
+    fn fixtures_of_another_harness_version_are_not_comparable_either() {
+        let cases = vec![case("upload-100m", Status::Pass, &[])];
+        let left = result("netstack", cases.clone(), &[]);
+        let mut right = result("netstack-next", cases, &[]);
+        right.fixtures.version = "0.26.0".into();
+
+        let why = incomparable_fixtures(&left, &right).expect("the versions differ");
+        assert!(why.contains("harness 0.26.0"), "{why}");
+        assert!(incomparable_fixtures(&left, &left).is_none());
     }
 
     #[test]

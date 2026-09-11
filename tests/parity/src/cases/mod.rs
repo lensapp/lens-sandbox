@@ -7,7 +7,8 @@ mod transfer;
 mod udp;
 
 use crate::config::Images;
-use crate::fixtures::{Activity, ConnRecord, Fixtures, Role};
+use crate::fixtures::source::FixtureSource;
+use crate::fixtures::{Activity, ConnRecord, Role};
 use crate::lns::{Lns, Output, write_sandbox};
 use crate::result::CaseResult;
 use anyhow::{Context, Result};
@@ -152,7 +153,7 @@ pub fn timed(name: &str, body: impl FnOnce(&mut CaseResult) -> Result<Outcome>) 
 
 pub struct Ctx<'a> {
     pub lns: &'a Lns,
-    pub fixtures: &'a Fixtures,
+    pub fixtures: &'a FixtureSource,
     pub project: PathBuf,
     pub guest_subnet: String,
     pub expectations: BTreeMap<String, String>,
@@ -165,7 +166,7 @@ pub struct Ctx<'a> {
 impl<'a> Ctx<'a> {
     pub fn prepare(
         lns: &'a Lns,
-        fixtures: &'a Fixtures,
+        fixtures: &'a FixtureSource,
         images: &'a Images,
         project: &Path,
         guest_subnet: String,

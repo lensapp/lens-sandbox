@@ -1,5 +1,6 @@
 use super::*;
-use crate::fixtures::{ConnRecord, Sizes};
+use crate::fixtures::source::FixtureSource;
+use crate::fixtures::{ConnRecord, Fixtures, Sizes};
 use crate::result::Status;
 use anyhow::bail;
 
@@ -165,7 +166,9 @@ fn polling_returns_as_soon_as_the_fixture_recorded_what_the_case_waits_for() {
 #[test]
 fn the_context_writes_one_definition_per_image_it_runs() {
     let dir = tempfile::tempdir().unwrap();
-    let fixtures = Fixtures::start(std::net::Ipv4Addr::LOCALHOST, 0, Sizes::default()).unwrap();
+    let fixtures = FixtureSource::InProcess(
+        Fixtures::start(std::net::Ipv4Addr::LOCALHOST, 0, Sizes::default()).unwrap(),
+    );
     let lns = Lns::new(PathBuf::from("/bin/echo"), BTreeMap::new());
     let images = Images::default();
     let ctx = Ctx::prepare(
@@ -262,7 +265,9 @@ fn a_guest_command_killed_at_its_budget_says_so_in_the_case() {
 #[test]
 fn a_case_run_outside_the_runner_still_has_a_budget_to_spend() {
     let dir = tempfile::tempdir().unwrap();
-    let fixtures = Fixtures::start(std::net::Ipv4Addr::LOCALHOST, 0, Sizes::default()).unwrap();
+    let fixtures = FixtureSource::InProcess(
+        Fixtures::start(std::net::Ipv4Addr::LOCALHOST, 0, Sizes::default()).unwrap(),
+    );
     let lns = Lns::new(PathBuf::from("/bin/echo"), BTreeMap::new());
     let images = Images::default();
     let ctx = Ctx::prepare(

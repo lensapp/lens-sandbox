@@ -1,6 +1,8 @@
 pub mod http;
 pub mod pattern;
+pub mod remote;
 pub mod report_server;
+pub mod source;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,18 @@ pub enum Role {
 }
 
 impl Role {
+    pub const ALL: [Role; 9] = [
+        Role::Sink,
+        Role::Source,
+        Role::Bidirectional,
+        Role::HalfCloseReply,
+        Role::HostHalfClose,
+        Role::Reset,
+        Role::Echo,
+        Role::UdpEcho,
+        Role::Witness,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Sink => "sink",
@@ -265,9 +279,33 @@ impl Fixtures {
         })
     }
 
+    /// The loopback witness on its own: with the fixtures on another machine the witness stays here, because it has to bind the service host's own loopback.
+    pub fn start_witness(base_port: u16) -> Result<Self> {
+        let shared = new_shared(Sizes::default());
+        let port = offset_port(base_port, WITNESS_PORT_OFFSET)?;
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+            .with_context(|| format!("bind witness on 127.0.0.1:{port}"))?;
+        let port = listener.local_addr()?.port();
+        let ports = BTreeMap::from([(Role::Witness.as_str().to_string(), port)]);
+        spawn_tcp(listener, Role::Witness, port, Arc::clone(&shared));
+        shared.with_report(|report| {
+            report.bind = Ipv4Addr::LOCALHOST.to_string();
+            report.ports = ports.clone();
+        });
+        Ok(Self {
+            shared,
+            ports,
+            bind: Ipv4Addr::LOCALHOST,
+        })
+    }
+
     /// Serves what these fixtures saw over HTTP, so a runner on another machine reads the same report the in-process runner holds.
     pub fn serve_report(&self, port: u16) -> Result<u16> {
         report_server::spawn(Arc::clone(&self.shared), SocketAddrV4::new(self.bind, port))
+    }
+
+    pub fn reset(&self) {
+        self.shared.reset();
     }
 
     pub fn bind(&self) -> Ipv4Addr {

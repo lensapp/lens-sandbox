@@ -3,7 +3,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FixturesMode {
+    InProcess,
+    Remote,
+}
+
+impl FixturesMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FixturesMode::InProcess => "in-process",
+            FixturesMode::Remote => "remote",
+        }
+    }
+}
+
+/// Which fixtures a run put its cases to; two runs are only comparable when all three agree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixturesRecord {
+    pub host: String,
+    pub mode: FixturesMode,
+    pub version: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -189,6 +213,7 @@ pub struct RunResult {
     #[serde(default)]
     pub images: Vec<ImageRecord>,
     pub host: HostFacts,
+    pub fixtures: FixturesRecord,
     pub started_unix_ms: u64,
     pub finished_unix_ms: u64,
     #[serde(default)]
@@ -284,6 +309,11 @@ mod tests {
                 arch: "arm64".into(),
                 dns_scope_count: Some(6),
             },
+            fixtures: FixturesRecord {
+                host: "192.168.1.50".into(),
+                mode: FixturesMode::InProcess,
+                version: "0.25.0".into(),
+            },
             started_unix_ms: 1,
             finished_unix_ms: 2,
             cases: vec![CaseResult::new("upload-100m").pass()],
@@ -303,6 +333,32 @@ mod tests {
         result.write(&path).unwrap();
 
         assert_eq!(RunResult::read(&path).unwrap(), result);
+    }
+
+    #[test]
+    fn a_result_names_the_fixtures_it_put_its_cases_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json");
+        let mut result = minimal();
+        result.fixtures = FixturesRecord {
+            host: "192.168.1.77:47220".into(),
+            mode: FixturesMode::Remote,
+            version: "0.25.0".into(),
+        };
+        result.write(&path).unwrap();
+
+        let read = RunResult::read(&path).unwrap();
+        assert_eq!(read.fixtures.mode, FixturesMode::Remote);
+        assert_eq!(read.fixtures.host, "192.168.1.77:47220");
+        assert_eq!(read.fixtures.version, "0.25.0");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"remote\""),
+            "the mode is written the way the diff prints it"
+        );
+        assert_eq!(FixturesMode::InProcess.as_str(), "in-process");
+        assert_eq!(FixturesMode::Remote.as_str(), "remote");
     }
 
     #[test]
