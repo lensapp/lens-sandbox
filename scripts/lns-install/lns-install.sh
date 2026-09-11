@@ -271,6 +271,37 @@ if [ "$OS" = "linux" ]; then
   fi
 fi
 
+# On macOS lns serves each guest's network from a per-run gvproxy. The service downloads the
+# pinned build on first use; fetching it here means the first run does not wait for it.
+if [ "$OS" = "darwin" ]; then
+  GVPROXY_VERSION="0.8.9"
+  GVPROXY_SHA256="c6f7b4bc7f21bf810b5cf54e04d979b014c5d96472a03a9e97fe62a00940067c"
+  GVPROXY_URL="https://github.com/containers/gvisor-tap-vsock/releases/download/v${GVPROXY_VERSION}/gvproxy-darwin"
+  GVPROXY_DIR="${LNS_HOME:-${HOME}/.lns}/gvproxy/${GVPROXY_VERSION}"
+  GVPROXY_PATH="${GVPROXY_DIR}/gvproxy"
+
+  gvproxy_is_pinned() {
+    [ -f "$1" ] && [ "$(shasum -a 256 "$1" | cut -d' ' -f1)" = "$GVPROXY_SHA256" ]
+  }
+
+  if [ -n "${LNS_GVPROXY_BIN:-}" ] || command -v gvproxy >/dev/null 2>&1; then
+    info "Using the gvproxy already on this host for the guest network."
+  elif gvproxy_is_pinned "$GVPROXY_PATH"; then
+    info "gvproxy v${GVPROXY_VERSION} is already installed for the guest network."
+  else
+    info "Fetching gvproxy v${GVPROXY_VERSION} for the guest network..."
+    GVPROXY_TMP="${TMPDIR_INSTALL}/gvproxy-darwin"
+    # A failure here is not fatal: the service fetches and verifies the same binary on first use.
+    if download "$GVPROXY_URL" "$GVPROXY_TMP" && gvproxy_is_pinned "$GVPROXY_TMP"; then
+      mkdir -p "$GVPROXY_DIR"
+      install -m 0755 "$GVPROXY_TMP" "$GVPROXY_PATH"
+      info "Installed gvproxy to ${GVPROXY_PATH}"
+    else
+      warn "Could not fetch a verified gvproxy. The service will fetch it on the first \`${BINARY_NAME} run\`."
+    fi
+  fi
+fi
+
 # lns-service links against libgtk-3, libayatana-appindicator3, libxdo; probe via ldconfig so
 # minimal Linux installs (server, NixOS, Alpine) get a friendly error instead of an opaque loader crash.
 if [ "$OS" = "linux" ] && [ "$HAS_SERVICE" = true ] && command -v ldconfig >/dev/null 2>&1; then

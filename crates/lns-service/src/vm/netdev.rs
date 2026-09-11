@@ -243,12 +243,12 @@ fn set_buffer_sizes(socket: &UnixDatagram) -> Result<()> {
     Ok(())
 }
 
-pub struct RunningNetDev<C: Child> {
-    pub child: C,
-    pub fd: OwnedFd,
+pub(crate) struct RunningNetDev<C: Child> {
+    pub(crate) child: C,
+    pub(crate) fd: OwnedFd,
 }
 
-pub async fn start_with<S: Spawner>(
+pub(crate) async fn start_with<S: Spawner>(
     spawner: &S,
     program: &Path,
     layout: &NetLayout,
