@@ -579,6 +579,29 @@ fn one_handle_answers_once() {
 }
 
 #[test]
+fn a_round_the_person_walked_away_from_holds_nothing_and_answers_nobody() {
+    let rig = Rig::holding(CODE_DOCUMENT, Some(b"the mechanism"));
+    let mechanisms = OneMechanism::answering(vec![asking("access_token", true)]);
+    let Connecting::Asks { session, .. } = driver(&rig, &mechanisms, 0)
+        .begin("some-provider", "sign-in", "work")
+        .expect("the mechanism asks")
+    else {
+        panic!("this mechanism asks first");
+    };
+
+    driver(&rig, &mechanisms, 0).abandon_handle(&session);
+
+    assert!(
+        rig.sessions.open.lock().expect("open lock").is_empty(),
+        "an abandoned round holds no state, rather than waiting out sessionSeconds with it"
+    );
+    let err = driver(&rig, &mechanisms, 0)
+        .answer(&session, Answers::new())
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("no longer open"), "{err:#}");
+}
+
+#[test]
 fn an_answer_a_round_consumed_is_dropped_rather_than_handed_over_again() {
     let rig = Rig::holding(CODE_DOCUMENT, Some(b"the mechanism"));
     let mechanisms = OneMechanism::answering(vec![

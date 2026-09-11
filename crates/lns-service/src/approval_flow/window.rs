@@ -21,6 +21,15 @@ pub enum RequestAction {
         method: String,
         connection: ConnectionChoice,
     },
+    /// Open the sign-in this card will drive round by round (§3.2.6).
+    BeginConnect {
+        method: String,
+        label: String,
+    },
+    /// Answer the round the card last drew.
+    AnswerConnect {
+        values: lns_ipc::SecretValues,
+    },
     /// A standing no for this run; the ordinary card then asks what the hold stood in for.
     Decline,
     /// A closed card: fail the held request, but record nothing — the developer made no decision.
@@ -154,13 +163,27 @@ impl WindowState {
 
     /// Keeps the card: a decline is answered by the ordinary question the hold stood in for, on the same request.
     pub fn decline(&self, id: &str) -> bool {
+        self.keep_and_deliver(id, RequestAction::Decline)
+    }
+
+    /// Keeps the card: a sign-in runs over several rounds, and every one of them is drawn on the card that began it.
+    pub fn begin_connect(&self, id: &str, method: String, label: String) -> bool {
+        self.keep_and_deliver(id, RequestAction::BeginConnect { method, label })
+    }
+
+    /// Keeps the card: the mechanism may answer with another round.
+    pub fn answer_connect(&self, id: &str, values: lns_ipc::SecretValues) -> bool {
+        self.keep_and_deliver(id, RequestAction::AnswerConnect { values })
+    }
+
+    fn keep_and_deliver(&self, id: &str, action: RequestAction) -> bool {
         let g = self.lock();
         let Some(entry) = g.pending.iter().find(|e| e.prompt.id == id) else {
             return false;
         };
         let _ = entry.decision_tx.send(DecisionDelivery {
             id: id.to_string(),
-            action: RequestAction::Decline,
+            action,
         });
         true
     }
@@ -366,6 +389,8 @@ mod tests {
             treatment: Treatment::Inspected,
             run: None,
             offer: None,
+            connect: None,
+            connect_seq: 0,
         }
     }
 
@@ -407,10 +432,41 @@ mod tests {
     }
 
     #[test]
+    fn every_round_of_a_sign_in_keeps_the_card_that_began_it() {
+        // A sign-in takes as many rounds as the mechanism needs, and each one is drawn on this card; removing it would leave the exchange nowhere to continue.
+        let s = WindowState::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
+
+        assert!(s.begin_connect("r1", "sign-in".into(), "work".into()));
+        assert_eq!(
+            rx.try_recv().expect("a delivery").action,
+            RequestAction::BeginConnect {
+                method: "sign-in".into(),
+                label: "work".into(),
+            }
+        );
+        assert_eq!(s.pending_count(), 1);
+
+        let values = lns_ipc::SecretValues(std::collections::BTreeMap::from([(
+            "device_code".to_string(),
+            "8C29-9212".to_string(),
+        )]));
+        assert!(s.answer_connect("r1", values.clone()));
+        assert_eq!(
+            rx.try_recv().expect("a delivery").action,
+            RequestAction::AnswerConnect { values }
+        );
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
     fn answering_a_card_that_is_gone_delivers_nothing() {
         let s = WindowState::new();
         assert!(!s.grant("gone", "token", ConnectionChoice::None));
         assert!(!s.decline("gone"));
+        assert!(!s.begin_connect("gone", "sign-in".into(), "work".into()));
+        assert!(!s.answer_connect("gone", lns_ipc::SecretValues::default()));
     }
 
     #[test]
