@@ -11,7 +11,9 @@
 #   4. Nothing else on the guest's subnet answers: neither the gateway
 #      on any port but DNS, nor any other address in 192.168.127.0/24.
 #   5. A host listener that logs every accept sees none of them. A failed
-#      connect alone does not prove nothing was reached.
+#      connect alone does not prove nothing was reached. The listener answers
+#      a probe from the host first, and is still alive at the end, so an empty
+#      log means "refused" and never "never listened".
 #
 # The gateway also serves DNS over TCP on 192.168.127.1:53, and there is no
 # probe for it here. Every unmarked TCP connection the workload makes is
@@ -124,6 +126,21 @@ WITNESS_PID=$!
 trap 'kill "$WITNESS_PID" 2>/dev/null; rm -rf "$PROJECT"' EXIT
 sleep 1
 
+# A witness that never bound logs nothing, and a "zero accepts" check over an
+# empty log passes for the wrong reason. Prove it answers from the host first.
+CONTROL=$(curl -sS --max-time 3 "http://127.0.0.1:${WITNESS_PORT}/" 2>&1 || true)
+printf '[test]  the witness answers the host: [%s]\n' "$CONTROL"
+case "$CONTROL" in
+  *REACHED!*) pass "the witness listener is up on 127.0.0.1:${WITNESS_PORT}" ;;
+  *) fail "the witness listener never answered the host; the probes below would prove nothing. Got: [${CONTROL}]" ;;
+esac
+
+# The control's own accept is logged after nc exits, so let it land, then clear
+# the log and let the listener bind again before the guest probes it.
+sleep 1
+: >"$WITNESS_LOG"
+sleep 1
+
 printf '[test]  nothing on the guest subnet answers but the resolver\n'
 PROBES=$(cat <<EOF
 probe() {
@@ -169,7 +186,10 @@ esac
 if [ -s "$WITNESS_LOG" ] && grep -q accepted "$WITNESS_LOG"; then
   fail "the host listener accepted a connection from the guest: $(cat "$WITNESS_LOG")"
 fi
-pass "the host listener saw no accept at all"
+if ! kill -0 "$WITNESS_PID" 2>/dev/null; then
+  fail "the witness listener died during the probes; its empty log proves nothing."
+fi
+pass "the host listener saw no accept at all, and was still listening at the end"
 
 printf '[test]  the audit chain names the backend that served the link\n'
 AUDIT=$("$LNS" audit "$RUN_NAME") || fail "\`lns audit ${RUN_NAME}\` failed."
