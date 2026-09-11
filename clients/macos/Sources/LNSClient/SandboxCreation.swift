@@ -37,20 +37,24 @@ public struct SandboxDraft {
     static func isLowerHex(_ byte: UInt8) -> Bool { (48...57).contains(byte) || (97...102).contains(byte) }
 }
 
-public struct SandboxProcessLaunch {
+public struct HelperProcessLaunch {
     public let executable: URL
     public let arguments: [String]
     public let environment: [String: String]
 
     public init(draft: SandboxDraft, bundle: URL, socket: String, environment: [String: String]) throws {
+        self.init(arguments: try draft.arguments(), bundle: bundle, socket: socket, environment: environment)
+    }
+
+    public init(arguments: [String], bundle: URL, socket: String, environment: [String: String]) {
         let helper = ServiceLaunch(bundle: bundle, socket: socket, environment: environment)
         executable = helper.executable
-        arguments = try draft.arguments()
+        self.arguments = arguments
         self.environment = helper.environment
     }
 }
 
-public enum SandboxLaunchEvent {
+public enum HelperProcessEvent {
     case output(Data), diagnostic(Data), exited(Int32)
 }
 
@@ -61,9 +65,9 @@ public final class SandboxCreation {
     public private(set) var error: String?
     public private(set) var runID: String?
     public var onChange: (() -> Void)?
-    private let launch: (SandboxDraft) throws -> AsyncThrowingStream<SandboxLaunchEvent, Error>
+    private let launch: (SandboxDraft) throws -> AsyncThrowingStream<HelperProcessEvent, Error>
 
-    public init(launch: @escaping (SandboxDraft) throws -> AsyncThrowingStream<SandboxLaunchEvent, Error>) { self.launch = launch }
+    public init(launch: @escaping (SandboxDraft) throws -> AsyncThrowingStream<HelperProcessEvent, Error>) { self.launch = launch }
     public func start(_ draft: SandboxDraft) async -> Bool {
         guard !busy else { return false }
         busy = true; output = ""; error = nil; runID = nil; onChange?()

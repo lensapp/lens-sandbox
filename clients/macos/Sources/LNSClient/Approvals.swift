@@ -108,9 +108,16 @@ public struct ServiceRequest: Encodable {
     public let notices: [String]?
     public let connection: ConnectionChoice?
     private var management: ManagementCommand?
+    private var registry: RegistryCommand?
+    public static func registry(_ command: RegistryCommand) -> Self {
+        var request = Self(type: command.type)
+        request.registry = command
+        return request
+    }
     public var replyTimeout: Double {
         switch type {
         case "StartRun", "InstallConnector": return 300
+        case "RegistryLogin": return 120
         case "StopRun": return 30
         default: return 10
         }
@@ -125,6 +132,7 @@ public struct ServiceRequest: Encodable {
     private enum CodingKeys: String, CodingKey { case type, token, action, id, answer, method, digest, notices, connection }
 
     public func encode(to encoder: Encoder) throws {
+        if let registry { try registry.encode(to: encoder); return }
         if let management { try management.encode(to: encoder); return }
         var fields = encoder.container(keyedBy: CodingKeys.self)
         try fields.encode(type, forKey: .type)
@@ -202,6 +210,7 @@ public enum ServiceReply {
     case snapshot(ApprovalSnapshot), submitted, stale, shuttingDown
     case acknowledged, offer(ConnectorOffer?)
     case connectors([ConnectorOffer]), completed(String)
+    case registryLogins([RegistryLogin])
 
     public static func decode(_ data: Data) throws -> Self {
         struct Envelope: Decodable { let type: String; let message: String? }
@@ -209,6 +218,10 @@ public enum ServiceReply {
         let envelope = try decoder.decode(Envelope.self, from: data)
         if let reply = try management(data, type: envelope.type) { return reply }
         switch envelope.type {
+        case "RegistryLoginStored", "RegistryLoggedOut": return .completed(envelope.type)
+        case "RegistryLogins":
+            struct Accounts: Decodable { let logins: [RegistryLogin] }
+            return .registryLogins(try decoder.decode(Accounts.self, from: data).logins)
         case "LiveApprovals": return .snapshot(try decoder.decode(ApprovalSnapshot.self, from: data))
         case "LiveApprovalSubmitted": return .submitted
         case "LiveApprovalStale": return .stale

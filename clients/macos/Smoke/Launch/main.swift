@@ -11,7 +11,7 @@ struct LaunchSmoke {
         draft.name = "--debug"
         for code in [0, 125] {
             let creation = SandboxCreation { draft in
-                SandboxProcess.launch(try SandboxProcessLaunch(draft: draft, bundle: bundle,
+                HelperProcess.launch(try HelperProcessLaunch(draft: draft, bundle: bundle,
                     socket: "/private/test/service.sock", environment: ["SMOKE_EXIT": String(code)]))
             }
             let success = await creation.start(draft)
@@ -23,5 +23,25 @@ struct LaunchSmoke {
             }
         }
         print("PASS: bundled launch drains both pipes and preserves startup failure")
+        let marker = bundle.appendingPathComponent("code-seen")
+        let login = HelperProcessLaunch(arguments: ["login", "hub.lns.run"], bundle: bundle,
+            socket: "/private/test/service.sock", environment: ["CODE_SEEN": marker.path])
+        var sawCode = false
+        var completed = false
+        for try await event in HelperProcess.launch(login) {
+            switch event {
+            case let .output(bytes):
+                if String(decoding: bytes, as: UTF8.self).contains("ABCD") {
+                    sawCode = true
+                    try Data().write(to: marker)
+                }
+            case let .exited(code):
+                guard code == 0, sawCode else { throw ServiceError(message: "Browser code was buffered until the helper exited") }
+                completed = true
+            case .diagnostic: break
+            }
+        }
+        guard completed else { throw ServiceError(message: "Browser helper did not finish") }
+        print("PASS: browser confirmation code arrives while the helper is still waiting")
     }
 }

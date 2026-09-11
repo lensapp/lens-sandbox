@@ -14,7 +14,7 @@ final class ServiceControlTests: XCTestCase {
         func dashboard() async throws -> DashboardData { throw ServiceError(message: "unexpected dashboard") }
     }
 
-    func testStartingIsExplicitAndDuplicateClicksCannotLaunchTwoHelpers() async {
+    func testStartingCannotLaunchTwoHelpersAtOnce() async {
         let client = Client()
         let started = expectation(description: "helper started")
         var finish: CheckedContinuation<Void, Error>?
@@ -33,6 +33,22 @@ final class ServiceControlTests: XCTestCase {
         await task.value
         XCTAssertEqual(control.phase, .idle)
         XCTAssertTrue(client.requests.isEmpty)
+    }
+
+    func testAppLaunchStartsTheHelperOnceAndFailureAllowsManualRetry() async {
+        var launches = 0
+        var errors = 0
+        let control = ServiceControl(client: Client(), launch: {
+            launches += 1
+            throw ServiceError(message: "failed to start")
+        }, confirm: { false }, quit: {})
+        control.onError = { _ in errors += 1 }
+        await control.startOnLaunch()
+        await control.startOnLaunch()
+        XCTAssertEqual(launches, 1)
+        XCTAssertEqual(errors, 1)
+        await control.start()
+        XCTAssertEqual(launches, 2)
     }
 
     func testStopRequiresConfirmationAndAServiceAcknowledgmentBeforeQuitting() async {

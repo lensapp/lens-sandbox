@@ -3,12 +3,13 @@ import Combine
 import LNSClient
 
 enum DashboardPage: String, CaseIterable, Identifiable {
-    case sandboxes = "Sandboxes", connectors = "Connectors", audit = "Audit", approvals = "Approvals"
+    case sandboxes = "Sandboxes", connectors = "Connectors", registries = "Registries", audit = "Audit", approvals = "Approvals"
     var id: String { rawValue }
     var symbol: String {
         switch self {
         case .sandboxes: return "shippingbox"
         case .connectors: return "link"
+        case .registries: return "externaldrive.connected.to.line.below"
         case .audit: return "list.bullet.rectangle"
         case .approvals: return "checkmark.shield"
         }
@@ -24,6 +25,8 @@ final class DashboardModel: ObservableObject {
     @Published var creatingSandbox = false
     let creation: SandboxCreation?
     let management: ManagementSession
+    let registries: RegistrySession
+    let registryBrowser: ((String) throws -> AsyncThrowingStream<HelperProcessEvent, Error>)?
     @Published var filters = DashboardFilters()
     @Published var selectedEvent: String?
     @Published private(set) var selectedHistory: String?
@@ -40,13 +43,17 @@ final class DashboardModel: ObservableObject {
     private let refreshes: DashboardRefresh
     private var offerTask: Task<Void, Never>?
 
-    init(service: any ServiceClient, launchSandbox: ((SandboxDraft) throws -> AsyncThrowingStream<SandboxLaunchEvent, Error>)? = nil) {
+    init(service: any ServiceClient, launchSandbox: ((SandboxDraft) throws -> AsyncThrowingStream<HelperProcessEvent, Error>)? = nil,
+         registryBrowser: ((String) throws -> AsyncThrowingStream<HelperProcessEvent, Error>)? = nil) {
         self.service = service
         creation = launchSandbox.map { SandboxCreation(launch: $0) }
         management = ManagementSession(service: service)
+        registries = RegistrySession(service: service)
+        self.registryBrowser = registryBrowser
         refreshes = DashboardRefresh { try await service.dashboard() }
         management.onChange = { [weak self] in self?.objectWillChange.send() }
         creation?.onChange = { [weak self] in self?.objectWillChange.send() }
+        registries.onChange = { [weak self] in self?.objectWillChange.send() }
     }
 
     var data: DashboardData { feed.data }
@@ -59,6 +66,7 @@ final class DashboardModel: ObservableObject {
     var detail: DashboardEvent? { data.events.first { $0.id == selectedEvent } }
     var sandboxName: String {
         if page == .connectors { return "Installed on this Mac" }
+        if page == .registries { return "Accounts used to pull sandbox definitions and images" }
         if page == .sandboxes { return "\(currentSandboxes.count) sandboxes" }
         guard let id = filters.sandbox else { return "All sandboxes" }
         return data.sandboxes.first { $0.id == id }?.name ?? id
@@ -113,16 +121,19 @@ final class DashboardModel: ObservableObject {
         try Task.checkCancellation()
         feed.receive(snapshot)
         management.serviceConnected()
+        registries.setConnected(true)
         connectionNotice = nil
         if let id = selectedEvent, !snapshot.events.contains(where: { $0.id == id }) { selectedEvent = nil }
         if let id = selectedHistory, !snapshot.approvals.contains(where: { $0.id == id }) { clearHistory() }
         await management.refresh()
+        await registries.refresh()
     }
 
     private func disconnect() {
         refreshes.cancel()
         feed.disconnect()
         management.disconnect()
+        registries.setConnected(false)
         managementSheet = nil
         selectedEvent = nil
         clearHistory()

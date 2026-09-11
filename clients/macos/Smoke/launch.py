@@ -9,6 +9,19 @@ with tempfile.TemporaryDirectory(prefix="lns launch ") as directory:
     helper.parent.mkdir(parents=True)
     helper.write_text('''#!/bin/sh
 set -eu
+if [ "$1" = login ]; then
+    test "$#" = 2
+    test "$2" = hub.lns.run
+    test "$LNS_SOCKET_PATH" = /private/test/service.sock
+    printf 'Your confirmation code is ABCD\\n'
+    attempts=0
+    while [ ! -f "$CODE_SEEN" ]; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -gt 40 ]; then exit 1; fi
+        sleep 0.1
+    done
+    exit 0
+fi
 test "$#" = 4
 test "$1" = run
 test "$2" = --detach
