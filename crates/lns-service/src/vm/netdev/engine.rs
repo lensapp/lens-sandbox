@@ -1597,8 +1597,11 @@ mod tests {
             .await
             .expect("the relay that carried the flow has ended");
         let unheld = tokio::time::timeout(PATIENCE, async {
-            while Arc::strong_count(&held) > 1 {
+            loop {
                 tokio::time::sleep(Duration::from_millis(2)).await;
+                if Arc::strong_count(&held) == 1 {
+                    break;
+                }
             }
         })
         .await;
