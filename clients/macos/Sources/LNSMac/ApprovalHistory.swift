@@ -4,6 +4,7 @@ import LNSClient
 @MainActor
 struct ApprovalHistory: View {
     @ObservedObject var model: DashboardModel
+    @ObservedObject var live: AppModel
     private let answers = ["undecided", "withdrawn", "always allow", "always deny", "granted", "declined", "notice"]
 
     var body: some View {
@@ -31,28 +32,54 @@ struct ApprovalHistory: View {
                 LNSStatus(title: "\(model.waitingCount) waiting", color: model.waitingCount > 0 ? LNSTheme.warning : LNSTheme.muted)
             }
             .padding(.horizontal, 24).padding(.bottom, 16)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    groups(model.waiting)
-                    if !model.archived.isEmpty {
-                        DisclosureGroup("Archive (\(model.archived.count))", isExpanded: Binding(
-                            get: { model.archiveChoice ?? model.waiting.isEmpty },
-                            set: { model.archiveChoice = $0 }
-                        )) {
-                            groups(model.archived).padding(.top, 12)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        if let id = live.reviewingApprovalID {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text("Live request").font(.headline).foregroundStyle(LNSTheme.heading)
+                                    Spacer()
+                                    Button("Close details") { live.reviewingApprovalID = nil }.buttonStyle(.borderless)
+                                }
+                                if let approval = live.snapshot.approvals.first(where: { $0.id == id }) {
+                                    ApprovalCard(approval: approval, compact: false) { live.respond(to: approval, with: $0) }
+                                        .id(approval.id)
+                                        .disabled(!live.connected || approval.submitting || live.busy.contains(approval.id))
+                                } else {
+                                    Text("This request is no longer available. Its saved decision may appear below.")
+                                        .foregroundStyle(LNSTheme.muted)
+                                }
+                            }
+                            .id("live-review")
+                        }
+                        groups(model.waiting)
+                        if !model.archived.isEmpty {
+                            DisclosureGroup("Archive (\(model.archived.count))", isExpanded: Binding(
+                                get: { model.archiveChoice ?? model.waiting.isEmpty },
+                                set: { model.archiveChoice = $0 }
+                            )) {
+                                groups(model.archived).padding(.top, 12)
+                            }
                         }
                     }
+                    .padding(.horizontal, 24).padding(.bottom, 24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 24).padding(.bottom, 24)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .overlay {
-                if model.history.isEmpty {
-                    LNSEmptyState(
-                        symbol: "checkmark.shield",
-                        title: model.connected ? "No matching requests" : "Waiting for the service…",
-                        message: "Requests for sandbox access and your answers appear here."
-                    ).allowsHitTesting(false)
+                .overlay {
+                    if model.history.isEmpty && live.reviewingApprovalID == nil {
+                        LNSEmptyState(
+                            symbol: "checkmark.shield",
+                            title: model.connected ? "No matching requests" : "Waiting for the service…",
+                            message: "Requests for sandbox access and your answers appear here."
+                        ).allowsHitTesting(false)
+                    }
+                }
+                .onChange(of: live.reviewingApprovalID) { id in
+                    if id != nil { proxy.scrollTo("live-review", anchor: .top) }
+                }
+                .onAppear {
+                    if live.reviewingApprovalID != nil { proxy.scrollTo("live-review", anchor: .top) }
                 }
             }
         }

@@ -11,6 +11,9 @@ final class AppModel: ObservableObject {
     @Published var notice: String?
     @Published var connectionNotice: String?
     var onSnapshot: ((ApprovalSnapshot) -> Void)?
+    var onShowApprovals: (() -> Void)?
+    var openDashboard: (() -> Void)?
+    @Published var reviewingApprovalID: String?
     private let service: any ServiceClient
     let socketPath: String
     private let control: ServiceControl
@@ -107,6 +110,16 @@ final class AppModel: ObservableObject {
         Task { await control.stop(connected: connected) }
     }
 
+    func showApprovals() { onShowApprovals?() }
+
+    func reviewApproval(_ id: String) {
+        dashboard.page = .approvals
+        dashboard.selectSandbox(nil)
+        dashboard.filters.answers = []
+        reviewingApprovalID = id
+        openDashboard?()
+    }
+
     func startService() {
         guard canStartService else { return }
         notice = nil
@@ -137,7 +150,4 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func dismissVisibleRequests() {
-        for approval in snapshot.approvals { respond(to: approval, with: .dismiss) }
-    }
 }

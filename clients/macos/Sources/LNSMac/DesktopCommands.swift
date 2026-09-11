@@ -25,10 +25,7 @@ struct DesktopCommands: Commands {
             Button("Registries") { show(.registries) }.keyboardShortcut("6")
             Button("Audit") { show(.audit) }.keyboardShortcut("1")
             Button("Approvals") { show(.approvals) }.keyboardShortcut("2")
-            Button("Live Requests") {
-                openWindow(id: "approvals")
-                NSApplication.shared.activate(ignoringOtherApps: true)
-            }.keyboardShortcut("3")
+            Button("Live Requests", action: model.showApprovals).keyboardShortcut("3")
         }
         CommandGroup(replacing: .appTermination) {
             Button("Quit Interface") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
