@@ -16,9 +16,11 @@ pub(crate) struct Fake {
     fail_open: std::sync::atomic::AtomicBool,
     fail_prepare: std::sync::atomic::AtomicBool,
     failure: Mutex<Option<CallError>>,
-    status: Mutex<Option<u16>>,
+    pub(crate) status: Mutex<Option<u16>>,
+    pub(crate) raw_body: Mutex<Option<Vec<u8>>>,
     entropy_length: Mutex<Option<usize>>,
     pub(crate) interleave: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    callback_result: Mutex<Option<Callback>>,
     state: Mutex<String>,
     pub(crate) canceled: Mutex<Vec<String>>,
 }
@@ -34,14 +36,15 @@ impl Http for Fake {
         Ok(HttpResponse {
             status: self.status.lock().unwrap().unwrap_or(200),
             headers: vec![],
-            body: self
-                .replies
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("a scripted response")
-                .to_string()
-                .into_bytes(),
+            body: self.raw_body.lock().unwrap().take().unwrap_or_else(|| {
+                self.replies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("a scripted response")
+                    .to_string()
+                    .into_bytes()
+            }),
         })
     }
 }
@@ -93,6 +96,9 @@ impl Browser for Fake {
         Ok(())
     }
     fn poll(&self, _: &str, _: &str, _: u64) -> Result<Callback> {
+        if let Some(result) = self.callback_result.lock().unwrap().take() {
+            return Ok(result);
+        }
         if self
             .authorization_error
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -634,4 +640,199 @@ fn selected_scopes_survive_configuration_changes_and_cannot_be_selected_twice() 
         panic!("connected")
     };
     assert_eq!(outcome.authority, ["read".into()].into());
+}
+
+#[test]
+fn device_authorization_survives_an_unavailable_local_browser() {
+    let (native, host, fake) = setup(
+        device(),
+        vec![
+            serde_json::json!({"device_code":"private-device","user_code":"ABCD","verification_uri":"https://auth.example/verify","expires_in":900}),
+            serde_json::json!({"access_token":"access","token_type":"Bearer"}),
+        ],
+    );
+    fake.fail_open
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let start = selected(&native, &host, 0);
+    let waiting = pending(native.advance(&host, &start.state, 0).unwrap());
+    assert!(
+        matches!(waiting.progress, OAuthProgress::DeviceAuthorization { ref user_code, .. } if user_code == "ABCD")
+    );
+    assert!(matches!(
+        native.advance(&host, &waiting.state, 5000).unwrap(),
+        Advance::Done(_)
+    ));
+    assert!(fake.canceled.lock().unwrap().is_empty());
+}
+
+#[test]
+fn transient_provider_responses_retry_each_interactive_phase_without_restarting_consent() {
+    for phase in ["initiation", "poll", "exchange"] {
+        let (native, host, fake) = setup(
+            if phase == "exchange" {
+                code()
+            } else {
+                device()
+            },
+            vec![],
+        );
+        let mut waiting = selected(&native, &host, 0);
+        if phase == "poll" {
+            fake.replies.lock().unwrap().push_back(serde_json::json!({"device_code":"private-device","user_code":"ABCD","verification_uri":"https://auth.example/verify","expires_in":900}));
+            waiting = pending(native.advance(&host, &waiting.state, 0).unwrap());
+        } else if phase == "exchange" {
+            waiting = pending(native.advance(&host, &waiting.state, 0).unwrap());
+            *fake.callback.lock().unwrap() = Some("private-code".into());
+        }
+        let mut delay = if phase == "poll" { 10000 } else { 5000 };
+        for status in [503, 429, 502] {
+            *fake.status.lock().unwrap() = Some(status);
+            *fake.raw_body.lock().unwrap() = Some(b"<html>gateway unavailable</html>".to_vec());
+            let now = waiting.next_at_millis;
+            waiting = pending(native.advance(&host, &waiting.state, now).unwrap());
+            assert_eq!(waiting.next_at_millis, now + delay, "{phase}");
+            let calls = fake.requests.lock().unwrap().len();
+            waiting = pending(
+                native
+                    .advance(&host, &waiting.state, waiting.next_at_millis - 1)
+                    .unwrap(),
+            );
+            assert_eq!(fake.requests.lock().unwrap().len(), calls);
+            delay *= 2;
+        }
+        *fake.status.lock().unwrap() = Some(200);
+        if phase == "initiation" {
+            fake.replies.lock().unwrap().push_back(serde_json::json!({"device_code":"private-device","user_code":"ABCD","verification_uri":"https://auth.example/verify","expires_in":900}));
+            waiting = pending(
+                native
+                    .advance(&host, &waiting.state, waiting.next_at_millis)
+                    .unwrap(),
+            );
+        }
+        fake.replies
+            .lock()
+            .unwrap()
+            .push_back(serde_json::json!({"access_token":"access","token_type":"Bearer"}));
+        assert!(matches!(
+            native
+                .advance(&host, &waiting.state, waiting.next_at_millis)
+                .unwrap(),
+            Advance::Done(_)
+        ));
+        assert_eq!(fake.opened.lock().unwrap().len(), 1);
+        if phase == "exchange" {
+            let requests = fake.requests.lock().unwrap();
+            assert!(requests.iter().all(|r| r.body == requests[0].body));
+            assert_eq!(fake.canceled.lock().unwrap().as_slice(), ["handle"]);
+        }
+    }
+}
+
+#[test]
+fn a_host_refusal_is_terminal_and_is_not_retried_as_an_outage() {
+    let (native, host, fake) = setup(device(), vec![]);
+    let start = selected(&native, &host, 0);
+    *fake.failure.lock().unwrap() = Some(CallError::Refused("secret detail".into()));
+    let error = native
+        .advance(&host, &start.state, 0)
+        .err()
+        .expect("host refusal is terminal");
+    assert!(error.to_string().contains("refused"));
+    assert!(!error.to_string().contains("secret"));
+}
+
+#[test]
+fn unsupported_issuer_is_named_without_disclosing_callback_parameters() {
+    let (native, host, fake) = setup(code(), vec![]);
+    let start = selected(&native, &host, 0);
+    let waiting = pending(native.advance(&host, &start.state, 0).unwrap());
+    *fake.callback_result.lock().unwrap() = Some(Callback::UnsupportedIssuer);
+    let error = native.advance(&host, &waiting.state, 1000).err().unwrap();
+    assert!(error.to_string().contains("unsupported iss"));
+    assert!(fake.requests.lock().unwrap().is_empty());
+    assert_eq!(fake.canceled.lock().unwrap().as_slice(), ["handle"]);
+}
+
+#[test]
+fn repeated_exchange_outages_obey_backoff_cap_and_original_deadline() {
+    let (native, host, fake) = setup(code(), vec![]);
+    let start = selected(&native, &host, 0);
+    let mut waiting = pending(native.advance(&host, &start.state, 0).unwrap());
+    *fake.callback.lock().unwrap() = Some("private-code".into());
+    *fake.status.lock().unwrap() = Some(503);
+    for delay in [5000, 10000, 20000, 40000, 60000, 60000] {
+        *fake.raw_body.lock().unwrap() = Some(b"gateway unavailable".to_vec());
+        let now = waiting.next_at_millis;
+        waiting = pending(native.advance(&host, &waiting.state, now).unwrap());
+        assert_eq!(waiting.next_at_millis, now + delay);
+        assert_eq!(waiting.expires_at_millis, 900000);
+    }
+    assert!(
+        native
+            .open_browser(&waiting.state)
+            .unwrap_err()
+            .to_string()
+            .contains("exchanging")
+    );
+    let calls = fake.requests.lock().unwrap().len();
+    assert!(matches!(
+        native
+            .advance(&host, &waiting.state, 900000)
+            .err()
+            .unwrap()
+            .downcast_ref::<FlowError>(),
+        Some(FlowError::Expired)
+    ));
+    assert_eq!(fake.requests.lock().unwrap().len(), calls);
+    assert_eq!(fake.opened.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn device_polling_distinguishes_json_outages_from_malformed_success_and_redirects() {
+    let (native, host, fake) = setup(
+        device(),
+        vec![
+            device_response(),
+            serde_json::json!({"error":"temporarily_unavailable"}),
+            serde_json::json!({"error":"server_error"}),
+        ],
+    );
+    let start = selected(&native, &host, 0);
+    let waiting = pending(native.advance(&host, &start.state, 0).unwrap());
+    let waiting = pending(native.advance(&host, &waiting.state, 2000).unwrap());
+    assert_eq!(waiting.next_at_millis, 6000);
+    *fake.status.lock().unwrap() = Some(302);
+    assert!(
+        native.advance(&host, &waiting.state, 6000).is_err(),
+        "a redirect must not be retried"
+    );
+    *fake.status.lock().unwrap() = Some(200);
+    *fake.raw_body.lock().unwrap() = Some(b"<html>not a token response</html>".to_vec());
+    assert!(
+        native
+            .advance(&host, &waiting.state, 6000)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("malformed JSON")
+    );
+}
+
+#[test]
+fn device_initiation_retries_transport_failure_within_its_original_deadline() {
+    let (native, host, fake) = setup(device(), vec![device_response()]);
+    let start = selected(&native, &host, 0);
+    *fake.failure.lock().unwrap() = Some(CallError::Failed("sensitive transport details".into()));
+    let waiting = pending(native.advance(&host, &start.state, 0).unwrap());
+    assert_eq!(waiting.next_at_millis, 5000);
+    assert_eq!(waiting.expires_at_millis, 900000);
+    assert!(!format!("{waiting:?}").contains("sensitive"));
+    let waiting = pending(native.advance(&host, &waiting.state, 4999).unwrap());
+    assert_eq!(fake.requests.lock().unwrap().len(), 1);
+    let waiting = pending(native.advance(&host, &waiting.state, 5000).unwrap());
+    assert!(matches!(
+        waiting.progress,
+        OAuthProgress::DeviceAuthorization { .. }
+    ));
+    assert_eq!(fake.requests.lock().unwrap().len(), 2);
 }

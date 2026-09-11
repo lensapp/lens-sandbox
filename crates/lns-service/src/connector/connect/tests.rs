@@ -145,13 +145,16 @@ pub(crate) const CODE_DOCUMENT: &str = r#"{"apiVersion":"lns.run/v1","kind":"con
 
 /// The installed set and the two decision files, in memory, so a driver test says nothing about disks.
 #[derive(Default)]
-struct FakeSet {
+pub(crate) struct FakeSet {
     entries: Mutex<Vec<crate::connector::store::Installed>>,
+    pub(crate) reads: std::sync::atomic::AtomicUsize,
     components: Mutex<Vec<Vec<u8>>>,
 }
 
 impl crate::connector::store::InstalledSet for FakeSet {
     fn list(&self) -> std::io::Result<Vec<crate::connector::store::Installed>> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(self.entries.lock().expect("set lock").clone())
     }
 
@@ -224,7 +227,7 @@ impl<T: Clone + Send + Sync> lns_policy::decision_store::DecisionStore<T> for Fa
 }
 
 pub(crate) struct Rig {
-    set: FakeSet,
+    pub(crate) set: FakeSet,
     pub(crate) values: FakeMap<Connection>,
     grants: FakeMap<crate::connector::store::RunDecision>,
     sessions: InMemorySessions,

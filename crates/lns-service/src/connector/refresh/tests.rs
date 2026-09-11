@@ -756,3 +756,23 @@ fn native_renewal_retries_back_off_and_stop_when_reconnect_or_no_refresh_is_requ
         .refresh_token = None;
     assert!(schedule.due("provider", &held, u64::MAX).is_empty());
 }
+
+#[test]
+fn an_idle_refresh_pass_reads_the_installed_entry_only_once() {
+    let rig = Rig::holding(CODE_DOCUMENT, Some(b"component"));
+    let mechanisms = Renewing::answering(Err(anyhow::anyhow!("no renewal is due")));
+    rig.set.reads.store(0, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        once(
+            &rig.store(),
+            &mechanisms,
+            &Wrote::default(),
+            &Schedule::default(),
+            "some-provider",
+            0
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(rig.set.reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+}

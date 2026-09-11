@@ -566,3 +566,73 @@ fn canceled_expired_or_changed_connectors_cannot_accept_permission_answers() {
         assert!(fake.opened.lock().unwrap().is_empty());
     }
 }
+
+#[test]
+fn transient_device_polling_keeps_one_operation_and_cancellation_stops_its_retry() {
+    let (rig, mechanisms, fake) = machine();
+    let handle = begin(&rig, &mechanisms);
+    at(&rig, &mechanisms, 0)
+        .advance_native(&handle, || 0)
+        .unwrap();
+    *fake.status.lock().unwrap() = Some(503);
+    *fake.raw_body.lock().unwrap() = Some(b"<html>unavailable</html>".to_vec());
+    at(&rig, &mechanisms, 5000)
+        .advance_native(&handle, || 5000)
+        .unwrap();
+    for now in 5001..5010 {
+        assert!(matches!(
+            at(&rig, &mechanisms, now)
+                .native_status(&handle)
+                .unwrap()
+                .connecting,
+            Connecting::Pending { .. }
+        ));
+        at(&rig, &mechanisms, now)
+            .advance_native(&handle, || now)
+            .unwrap();
+    }
+    assert_eq!(fake.requests.lock().unwrap().len(), 2);
+    at(&rig, &mechanisms, 6000).abandon_handle(&handle);
+    at(&rig, &mechanisms, 15000)
+        .advance_native(&handle, || 15000)
+        .unwrap();
+    assert_eq!(fake.requests.lock().unwrap().len(), 2);
+    assert!(
+        rig.store()
+            .connections_of("some-provider")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn reconciliation_snapshot_exposes_only_the_next_live_granted_expiry() {
+    let (rig, mechanisms, _) = machine();
+    let held = connected(&rig, &mechanisms);
+    let holder = crate::connector::store::GrantHolder::Run("run".into());
+    let snapshot =
+        crate::connector::handler::granted_supply_snapshot(&rig.store(), &holder, 5000).unwrap();
+    assert!(snapshot.expires_at_millis.is_none());
+    rig.store()
+        .decide(
+            &holder,
+            "some-provider",
+            crate::connector::store::RunDecision::Granted {
+                digest: "sha256:abc".into(),
+                method: "sign-in".into(),
+                connection: Some("work".into()),
+                authority: held.authority,
+            },
+        )
+        .unwrap();
+    let snapshot =
+        crate::connector::handler::granted_supply_snapshot(&rig.store(), &holder, 5000).unwrap();
+    assert_eq!(snapshot.expires_at_millis, Some(3605000));
+    let snapshot =
+        crate::connector::handler::granted_supply_snapshot(&rig.store(), &holder, 3605000).unwrap();
+    assert!(snapshot.expires_at_millis.is_none());
+    assert_eq!(
+        snapshot.payloads["some-provider"].credentials[0].injections[0].value(),
+        ""
+    );
+}
