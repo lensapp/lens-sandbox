@@ -160,6 +160,37 @@ Anything over a limit is dropped and counted, and the count is written to the
 developer trace stream (`lns run --debug`). A guest that outruns the stack
 loses frames, as it would on a busy wire.
 
+### Where the network variables are set
+
+`LNS_GUEST_SUBNET` and `LNS_NETDEV` are read by the service, from its own
+environment, when it serves a link. They are not part of what `lns run` sends
+over the socket, so setting one for a run changes nothing. `lns run` says so
+when it sees one:
+
+```
+$ LNS_NETDEV=vmnet lns run -- curl -sS https://example.com
+warning: LNS_NETDEV takes effect on lns-service, not on this run. Set it where the service starts: `lns service stop`, then start the service again with the variable in its environment.
+```
+
+Set one on the service instead. `lns service start` passes its own environment
+to the service it launches:
+
+```bash
+lns service stop
+LNS_NETDEV=vmnet lns service start
+```
+
+Every run served by that service uses the setting, until the service stops.
+A service the login agent starts at your next login does not carry it, because
+the agent holds no environment of yours: set it again the same way.
+
+To run the service in the foreground with the setting instead, start the
+binary yourself and leave the terminal open:
+
+```bash
+LNS_NETDEV=vmnet "$(dirname "$(command -v lns)")/lns-service"
+```
+
 ### Moving the guest subnet
 
 `LNS_GUEST_SUBNET=<a /24>` replaces `192.168.127.0/24`, for hosts that
@@ -167,7 +198,8 @@ already use it. The gateway is always `.1` and the guest `.2`, and the
 boundary policy follows:
 
 ```bash
-LNS_GUEST_SUBNET=10.99.7.0/24 lns run -- curl -sS https://example.com
+lns service stop
+LNS_GUEST_SUBNET=10.99.7.0/24 lns service start
 ```
 
 The value must be a `/24` whose last octet is `0`. If the host holds an
@@ -181,7 +213,8 @@ subnet whole.
 bridge, with the host answering DHCP:
 
 ```bash
-LNS_NETDEV=vmnet lns run -- curl -sS https://example.com
+lns service stop
+LNS_NETDEV=vmnet lns service start
 ```
 
 This is an escape hatch for one release. Report anything that needs it.
