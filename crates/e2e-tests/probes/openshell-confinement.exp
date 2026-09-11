@@ -1,0 +1,77 @@
+set timeout 90
+set root [file normalize [lindex $argv 0]]
+set name "openshell-confinement-[pid]"
+set fixture "$root/crates/e2e-tests/probes/openshell-confinement.yaml"
+set probe {
+    const fs = require('fs'), net = require('net'), http = require('http'), cp = require('child_process');
+    const assert = require('assert/strict');
+    async function check() {
+        assert.equal(process.getuid(), 0);
+        assert.match(fs.readFileSync('/proc/self/status', 'utf8'), /CapBnd:\s+00000000000000fb/);
+        assert.match(fs.readFileSync('/proc/self/status', 'utf8'), /Seccomp:\s+2/);
+        assert.throws(() => fs.readFileSync('/proc/1/environ'));
+        const supervisors = fs.readdirSync('/proc').filter(p => /^\d+$/.test(p)).filter(p => {
+            try { return fs.readFileSync(`/proc/${p}/comm`, 'utf8').trim() === 'lns-supervisor'; }
+            catch { return false; }
+        });
+        assert(supervisors.length > 0, 'no privileged launcher found');
+        for (const pid of supervisors) {
+            assert.throws(() => fs.readFileSync(`/proc/${pid}/environ`));
+            assert.match(fs.readFileSync(`/proc/${pid}/status`, 'utf8'), /Uid:\s+1\s+0\s+0\s+0/);
+        }
+        assert(!Object.keys(process.env).some(k => /^(LENS_|OPENSHELL_)/.test(k)));
+        assert.equal(process.env.http_proxy, 'http://10.200.0.1:3128');
+        await new Promise((resolve, reject) => {
+            const socket = net.connect({host:'1.1.1.1', port:80});
+            socket.on('connect', () => { socket.destroy(); reject(Error('direct egress escaped')); });
+            socket.on('error', resolve);
+            socket.setTimeout(3000, () => { socket.destroy(); reject(Error('direct egress did not fail promptly')); });
+        });
+        for (const [host, code] of [['example.com', 403], ['ports.ubuntu.com', 200]]) {
+            await new Promise((resolve, reject) => {
+                const path = host === 'ports.ubuntu.com' ? '/ubuntu-ports/' : '/';
+                const request = net.connect({host:'10.200.0.1', port:3128}, () => {
+                    request.write(`GET http://${host}${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`);
+                });
+                let data = '';
+                request.on('data', chunk => {
+                    data += chunk.toString();
+                    if (data.includes('\r\n')) {
+                        request.destroy();
+                        try { assert.equal(Number(data.split(' ')[1]), code); resolve(); } catch(e) { reject(e); }
+                    }
+                });
+                request.on('error', reject);
+                request.setTimeout(10000, () => request.destroy(Error('proxy timeout')));
+            });
+        }
+        const orphan = cp.execFileSync('/bin/sh', ['-c', 'sleep 0.1 >/dev/null 2>&1 & echo $!'], {encoding:'utf8'}).trim();
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        assert(!fs.existsSync(`/proc/${orphan}`), 'orphan was not reaped');
+        console.log('confinement-ok');
+    }
+    check().then(() => { if (process.env.HOLD === '1') setInterval(() => {}, 1000); }).catch(e => { console.error(e); process.exit(40); });
+}
+spawn -noecho $root/target/debug/lns run --yes --quiet --tty=false --interactive=false --name $name -f $fixture -- env HOLD=1 /usr/local/bin/node -e $probe
+expect {
+    "confinement-ok" {}
+    eof { puts "FAIL: root primary confinement"; exit 1 }
+    timeout { puts "FAIL: root primary timeout"; exit 1 }
+}
+set primary $spawn_id
+foreach terminal {false true} {
+    spawn -noecho $root/target/debug/lns exec --tty=$terminal $name -- /usr/local/bin/node -e $probe
+    expect {
+        "confinement-ok" {}
+        eof { puts "FAIL: root exec confinement"; exit 1 }
+        timeout { puts "FAIL: root exec timeout"; exit 1 }
+    }
+    expect eof
+    set result [wait]
+    if {[lindex $result 3] != 0} { puts "FAIL: exec exit $result"; exit 1 }
+}
+exec $root/target/debug/lns sandbox kill --signal TERM $name
+set spawn_id $primary
+expect eof
+wait
+puts "openshell-confinement-e2e-ok"

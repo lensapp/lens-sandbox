@@ -1,0 +1,23 @@
+apiVersion: lns.run/v1
+kind: sandbox
+name: ubuntu-demo
+spec:
+  image: ubuntu:24.04
+  user: "1000:1000"
+  workdir: /tmp
+  command: /bin/bash
+  egress:
+    http:
+      - match: ports.ubuntu.com
+        verdict: allow
+      - match: archive.ubuntu.com
+        verdict: allow
+      - match: security.ubuntu.com
+        verdict: allow
+  scripts:
+    - when: pre-start
+      user: root
+      description: Install curl and trusted CA certificates
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends curl ca-certificates

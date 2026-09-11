@@ -1,0 +1,188 @@
+diff --git a/crates/openshell-supervisor-network/src/opa.rs b/crates/openshell-supervisor-network/src/opa.rs
+index d2ed5937..65e14332 100644
+--- a/crates/openshell-supervisor-network/src/opa.rs
++++ b/crates/openshell-supervisor-network/src/opa.rs
+@@ -149,6 +149,7 @@ pub struct SandboxConfig {
+ /// because policy evaluation is fast (microseconds) and contention is low
+ /// (one eval per CONNECT request).
+ pub struct OpaEngine {
++    connection_approver: RwLock<Option<Arc<ConnectionApprover>>>,
+     engine: Mutex<regorus::Engine>,
+     generation: Arc<AtomicU64>,
+     middleware_runner: RwLock<ChainRunner>,
+@@ -157,6 +158,8 @@ pub struct OpaEngine {
+     fail_closed_reason: RwLock<Option<String>>,
+ }
+ 
++pub type ConnectionApprover = dyn Fn(&NetworkInput, &NetworkAction) -> bool + Send + Sync;
++
+ #[cfg(test)]
+ static TEST_OPA_QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
+ 
+@@ -282,6 +285,7 @@ impl OpaEngine {
+         let generation = Arc::new(AtomicU64::new(0));
+         let (generation_tx, _) = watch::channel(0);
+         Self {
++            connection_approver: RwLock::new(None),
+             engine: Mutex::new(engine),
+             generation,
+             middleware_runner: RwLock::new(ChainRunner::default()),
+@@ -614,6 +618,36 @@ impl OpaEngine {
+         })
+     }
+ 
++    pub fn set_connection_approver(&self, approver: Arc<ConnectionApprover>) -> Result<()> {
++        *self
++            .connection_approver
++            .write()
++            .map_err(|_| miette::miette!("connection approver lock poisoned"))? = Some(approver);
++        Ok(())
++    }
++
++    pub fn authorize_connection(&self, input: &NetworkInput) -> Result<EgressAuthorization> {
++        let original = self.authorize_egress(input)?;
++        if matches!(original.action, NetworkAction::Allow { .. }) {
++            return Ok(original);
++        }
++        let approver = self
++            .connection_approver
++            .read()
++            .map_err(|_| miette::miette!("connection approver lock poisoned"))?
++            .clone();
++        if !approver.is_some_and(|approve| approve(input, &original.action)) {
++            return Ok(original);
++        }
++        let mut current = self.authorize_egress(input)?;
++        if current.action == original.action {
++            current.action = NetworkAction::Allow {
++                matched_policy: Some("connection-approval".into()),
++            };
++        }
++        Ok(current)
++    }
++
+     /// Return all explicit TCP endpoints eligible for policy DNS.
+     ///
+     /// The owned endpoint records and generation are captured while holding
+diff --git a/crates/openshell-supervisor-network/src/policy_dns/resolver.rs b/crates/openshell-supervisor-network/src/policy_dns/resolver.rs
+index 1044538a..a13fc726 100644
+--- a/crates/openshell-supervisor-network/src/policy_dns/resolver.rs
++++ b/crates/openshell-supervisor-network/src/policy_dns/resolver.rs
+@@ -101,7 +101,6 @@ impl SocketTrustedResolver {
+         }
+     }
+ 
+-    #[cfg(test)]
+     pub(crate) fn with_timeout(server: SocketAddr, exchange_timeout: Duration) -> Self {
+         Self {
+             server,
+diff --git a/crates/openshell-supervisor-network/src/proxy.rs b/crates/openshell-supervisor-network/src/proxy.rs
+index e3a48194..63ce7521 100644
+--- a/crates/openshell-supervisor-network/src/proxy.rs
++++ b/crates/openshell-supervisor-network/src/proxy.rs
+@@ -137,12 +137,15 @@ pub struct ProxyHandle {
+ }
+ 
+ impl ProxyHandle {
++    pub fn local_addr(&self) -> Option<SocketAddr> {
++        self.http_addr
++    }
+     /// Start the proxy with OPA engine for policy evaluation.
+     ///
+     /// The proxy uses OPA for network decisions with process-identity binding
+     /// via `/proc/net/tcp`. All connections are evaluated through OPA policy.
+     #[allow(clippy::too_many_arguments)]
+-    pub(crate) async fn start_with_bind_addr(
++    pub async fn start_with_bind_addr(
+         policy: &ProxyPolicy,
+         bind_addr: Option<SocketAddr>,
+         opa_engine: Arc<OpaEngine>,
+@@ -171,6 +174,36 @@ impl ProxyHandle {
+         }
+ 
+         let listener = TcpListener::bind(http_addr).await.into_diagnostic()?;
++        Self::start_with_listener(
++            listener,
++            opa_engine,
++            identity_cache,
++            entrypoint_pid,
++            tls_state,
++            provider_credentials,
++            policy_local_ctx,
++            denial_tx,
++            activity_tx,
++            engine_ready,
++            upstream_proxy_args,
++        )
++        .await
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    pub async fn start_with_listener(
++        listener: TcpListener,
++        opa_engine: Arc<OpaEngine>,
++        identity_cache: Arc<BinaryIdentityCache>,
++        entrypoint_pid: Arc<AtomicU32>,
++        tls_state: Option<Arc<ProxyTlsState>>,
++        provider_credentials: Option<ProviderCredentialState>,
++        policy_local_ctx: Option<Arc<PolicyLocalContext>>,
++        denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
++        activity_tx: Option<ActivitySender>,
++        engine_ready: tokio::sync::watch::Receiver<bool>,
++        upstream_proxy_args: &upstream_proxy::UpstreamProxyArgs,
++    ) -> Result<Self> {
+         let local_addr = listener.local_addr().into_diagnostic()?;
+         {
+             let event = NetworkActivityBuilder::new(openshell_ocsf::ctx::ctx())
+@@ -2563,7 +2596,7 @@ fn authorize_egress_intent(
+         cmdline_paths: cmdline_paths.clone(),
+     };
+ 
+-    let result = match engine.authorize_egress(&input) {
++    let result = match engine.authorize_connection(&input) {
+         Ok(authorization) => EgressDecision {
+             intent: intent.clone(),
+             action: authorization.action.clone(),
+@@ -2618,7 +2651,7 @@ fn evaluate_endpoint_only_opa(engine: &OpaEngine, intent: EgressIntent) -> Egres
+         cmdline_paths: vec![],
+     };
+ 
+-    match engine.authorize_egress(&input) {
++    match engine.authorize_connection(&input) {
+         Ok(authorization) => EgressDecision {
+             intent,
+             action: authorization.action.clone(),
+diff --git a/crates/openshell-supervisor-network/src/run.rs b/crates/openshell-supervisor-network/src/run.rs
+index af9ffb84..b1a5aa0c 100644
+--- a/crates/openshell-supervisor-network/src/run.rs
++++ b/crates/openshell-supervisor-network/src/run.rs
+@@ -38,6 +38,29 @@ use crate::opa::OpaEngine;
+ use crate::policy_local::PolicyLocalContext;
+ use crate::proxy::ProxyHandle;
+ 
++pub async fn resolve_dns_upstream(
++    server: SocketAddr,
++    name: &str,
++    ipv6: bool,
++    exchange_timeout: Duration,
++) -> Result<Vec<IpAddr>> {
++    use crate::policy_dns::{
++        AddressFamily, NormalizedName, SocketTrustedResolver, TrustedResolver,
++    };
++    let name = NormalizedName::parse(name).map_err(|_| miette::miette!("invalid DNS name"))?;
++    let family = if ipv6 {
++        AddressFamily::Ipv6
++    } else {
++        AddressFamily::Ipv4
++    };
++    let resolver = SocketTrustedResolver::with_timeout(server, exchange_timeout);
++    resolver
++        .resolve(&name, family)
++        .await
++        .map(|answer| answer.addresses)
++        .map_err(|error| miette::miette!("{error}"))
++}
++
+ #[cfg(target_os = "linux")]
+ pub struct TransparentRuntimeSetup {
+     pub listeners: Vec<tokio::net::TcpListener>,

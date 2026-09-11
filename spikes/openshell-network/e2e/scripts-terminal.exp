@@ -1,0 +1,22 @@
+set timeout 150
+set root [lindex $argv 0]
+spawn -noecho $root/target/debug/lns run --yes -f $root/lns.yaml
+expect {
+    -re {\$ $} {}
+    timeout { exit 1 }
+    eof { exit 2 }
+}
+send -- "printf '%s%s\\n' ubuntu-shell- ready; curl --version; exit\r"
+expect {
+    "ubuntu-shell-ready" {}
+    timeout { exit 3 }
+    eof { exit 4 }
+}
+expect {
+    -re {curl [0-9]+\.[0-9]+} {}
+    timeout { exit 5 }
+    eof { exit 6 }
+}
+expect eof
+set result [wait]
+exit [lindex $result 3]

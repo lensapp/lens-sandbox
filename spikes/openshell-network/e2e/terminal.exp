@@ -1,0 +1,82 @@
+set timeout 120
+set root [file normalize [lindex $argv 0]]
+set run_name "openshell-terminal-[pid]"
+set probe {
+    if (![process.stdin, process.stdout, process.stderr].every(s => s.isTTY)) {
+        console.error("FAIL: workload does not have a terminal"); process.exit(40);
+    }
+    process.stdin.setRawMode(true);
+    process.stdout.write("\nterminal-ready\n");
+    process.stdin.on("data", data => {
+        if (data[0] === 3) process.stdout.write("\nraw-control-c-ok\n");
+        if (data[0] === 115) process.stdout.write(`\nsize:${process.stdout.columns}x${process.stdout.rows}\n`);
+        if (data[0] === 113) {
+            process.stdin.setRawMode(false);
+            process.stdout.write("\nterminal-complete\n", () => process.exit(0));
+        }
+    });
+}
+spawn $root/target/debug/lns run --yes --quiet -it --name $run_name -f $root/spikes/openshell-network/e2e/terminal.yaml -- node -e $probe
+expect {
+    "terminal-ready" {}
+    "FAIL:" { puts "FAIL: terminal handoff"; exit 1 }
+    eof { puts "FAIL: workload exited before terminal readiness"; exit 1 }
+    timeout { puts "FAIL: terminal startup timed out"; exit 1 }
+}
+set timeout 15
+send -- "\003"
+expect {
+    "raw-control-c-ok" {}
+    eof { puts "FAIL: Ctrl+C terminated the terminal relay"; exit 1 }
+    timeout { puts "FAIL: raw Ctrl+C was not delivered"; exit 1 }
+}
+stty rows 37 columns 111 < $spawn_out(slave,name)
+after 500
+send -- "s"
+expect {
+    "size:111x37" {}
+    timeout { puts "FAIL: terminal resize was not delivered"; exit 1 }
+}
+send -- "\020\021"
+expect {
+    eof {}
+    timeout { puts "FAIL: detach chord did not return"; exit 1 }
+}
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] != 0} {
+    puts "FAIL: detach exit: $result"
+    exit 1
+}
+spawn $root/target/debug/lns sandbox attach $run_name
+after 500
+send -- "\003"
+expect {
+    "raw-control-c-ok" {}
+    timeout { puts "FAIL: terminal did not survive detach and reattach"; exit 1 }
+}
+send -- "q"
+expect {
+    "terminal-complete" {}
+    timeout { puts "FAIL: final terminal output lost"; exit 1 }
+}
+expect eof
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] != 0} {
+    puts "FAIL: terminal workload exit: $result"
+    exit 1
+}
+puts "openshell-terminal-e2e-ok"
+set piped {if (process.stdin.isTTY || process.stdout.isTTY || process.stderr.isTTY) process.exit(41); console.log("openshell-pipes-e2e-ok");}
+set timeout 120
+spawn $root/target/debug/lns run --yes --quiet --tty=false --interactive=false -f $root/spikes/openshell-network/e2e/terminal.yaml -- node -e $piped
+expect {
+    "openshell-pipes-e2e-ok" {}
+    eof { puts "FAIL: redirected workload became interactive"; exit 1 }
+    timeout { puts "FAIL: redirected workload timed out"; exit 1 }
+}
+expect eof
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] != 0} {
+    puts "FAIL: redirected workload exit: $result"
+    exit 1
+}

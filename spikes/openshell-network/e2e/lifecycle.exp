@@ -1,0 +1,53 @@
+set timeout 90
+set root [file normalize [lindex $argv 0]]
+set fixture "$root/spikes/openshell-network/e2e/terminal.yaml"
+set code {setInterval(() => {}, 1000); console.log("signal-ready");}
+foreach terminal {true false} {
+    set name "openshell-signals-$terminal-[pid]"
+    spawn -noecho $root/target/debug/lns run --yes --quiet --tty=$terminal --interactive=true --name $name -f $fixture -- node -e $code
+    expect {
+        "signal-ready" {}
+        eof { puts "FAIL: signal fixture exited before readiness"; exit 1 }
+        timeout { puts "FAIL: signal fixture startup timed out"; exit 1 }
+    }
+    exec $root/target/debug/lns sandbox kill --signal INT $name
+    set timeout 15
+    expect {
+        eof {}
+        timeout { puts "FAIL: forwarded SIGINT did not terminate workload"; exit 1 }
+    }
+    set result [wait]
+    if {[lindex $result 2] != 0 || [lindex $result 3] != 130} {
+        puts "FAIL: expected exit 130, got $result"; exit 1
+    }
+    set timeout 90
+}
+puts "openshell-signals-e2e-ok"
+set probe {
+    const fs = require("fs");
+    const cp = require("child_process");
+    const supervisors = fs.readdirSync("/proc").filter(p => /^\d+$/.test(p)).filter(p => {
+        try { return fs.readFileSync(`/proc/${p}/comm`, "utf8").trim() === "lns-supervisor"; }
+        catch { return false; }
+    });
+    if (supervisors.length !== 1) process.exit(40);
+    if (!/^Seccomp:\s+2$/m.test(fs.readFileSync(`/proc/${supervisors[0]}/status`, "utf8"))) process.exit(41);
+    const orphan = cp.execFileSync("/bin/sh", ["-c", "sleep 0.1 >/dev/null 2>&1 & echo $!"], {encoding:"utf8"}).trim();
+    setTimeout(() => {
+        if (fs.existsSync(`/proc/${orphan}`)) {
+            console.error("FAIL: orphan was not reaped"); process.exit(42);
+        }
+        console.log("openshell-hardening-reaper-e2e-ok");
+    }, 3000);
+}
+spawn -noecho $root/target/debug/lns run --yes --quiet --tty=false --interactive=false -f $fixture -- node -e $probe
+expect {
+    "openshell-hardening-reaper-e2e-ok" {}
+    eof { puts "FAIL: hardening or orphan cleanup failed"; exit 1 }
+    timeout { puts "FAIL: orphan cleanup timed out"; exit 1 }
+}
+expect eof
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] != 0} {
+    puts "FAIL: orphan probe exit: $result"; exit 1
+}

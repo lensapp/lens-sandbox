@@ -1,0 +1,7 @@
+apiVersion: lns.run/v1
+kind: sandbox
+name: openshell-approval-e2e
+spec:
+  image: public.ecr.aws/docker/library/alpine:3.20
+  user: "65534:65534"
+  workdir: /tmp

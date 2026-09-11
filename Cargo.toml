@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["target/openshell", "spikes/openshell-network"]
 resolver = "2"
 members = [
     "crates/lns-artifact",

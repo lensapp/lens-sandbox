@@ -23,6 +23,8 @@ pub struct SessionOutcome {
 }
 
 pub(crate) struct WorkloadSpec {
+    #[cfg(target_os = "linux")]
+    pub(crate) isolation: crate::isolation::Launch,
     pub(crate) argv: Vec<String>,
     pub(crate) env: Vec<String>,
     pub(crate) cwd: Option<SessionCwd>,
@@ -106,6 +108,8 @@ pub(crate) fn build_workload_spec<'a>(
         .filter(|h| !h.is_empty() && *h != "/")
         .map(str::to_string);
     WorkloadSpec {
+        #[cfg(target_os = "linux")]
+        isolation: crate::isolation::Launch::Direct,
         argv,
         cwd: session_cwd(cwd, &confinement, effective_home.as_deref()),
         hostname,

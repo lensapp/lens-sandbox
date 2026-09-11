@@ -6,6 +6,8 @@
 GIT_HOME=$(mktemp -d)
 mkdir -p "$GIT_HOME/.config"
 : >"$GIT_HOME/.gitconfig"
+mkdir -p "$GIT_HOME/tmp"
+export TMPDIR="$GIT_HOME/tmp"
 
 # The toolchain homes default to $HOME, so pin them to the real one before it
 # moves — a fixture that shells out to cargo must not find a cold toolchain.

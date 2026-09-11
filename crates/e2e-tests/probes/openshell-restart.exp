@@ -1,0 +1,65 @@
+set timeout 90
+set root [file normalize [lindex $argv 0]]
+set name "openshell-restart-[pid]"
+set fixture "$root/crates/e2e-tests/probes/openshell-confinement.yaml"
+set reservation [socket -server {apply {{args} {}}} -myaddr 127.0.0.1 0]
+set port [lindex [fconfigure $reservation -sockname] 2]
+close $reservation
+set server {
+    const fs = require('fs'), http = require('http'), assert = require('assert/strict');
+    assert.equal(process.getuid(), 0);
+    assert.match(fs.readFileSync('/proc/self/status', 'utf8'), /CapBnd:\s+00000000000000fb/);
+    assert.throws(() => fs.openSync('/.lens/bin/lns-supervisor', 'r+'), {code:'EROFS'});
+    const marker = '/root/openshell-restart-count';
+    const count = fs.existsSync(marker) ? Number(fs.readFileSync(marker, 'utf8')) + 1 : 1;
+    fs.writeFileSync(marker, String(count));
+    http.createServer((req, res) => res.end(`boot-${count}`)).listen(8080, '127.0.0.1', () => console.log(`ready-${count}`));
+}
+spawn -noecho $root/target/debug/lns run --yes --quiet --tty=false --interactive=false --name $name -p 127.0.0.1:$port:8080 -f $fixture -- /usr/local/bin/node -e $server
+expect {
+    "ready-1" {}
+    eof { puts "FAIL: initial boot"; exit 1 }
+    timeout { puts "FAIL: initial boot timeout"; exit 1 }
+}
+set primary $spawn_id
+set body [exec curl --noproxy * --fail --silent --show-error --max-time 10 http://127.0.0.1:$port/]
+if {$body ne "boot-1"} { error "initial published port: $body" }
+set tamper {
+    const fs = require('fs'), assert = require('assert/strict');
+    assert.equal(process.getuid(), 0);
+    assert.throws(() => fs.openSync('/.lens/bin/lns-supervisor', 'r+'), {code:'EROFS'});
+    fs.mkdirSync('/root/decoy/bin', {recursive:true});
+    fs.writeFileSync('/root/decoy/bin/lns-supervisor', 'untrusted retained bytes');
+    fs.renameSync('/.lens', '/.lens-displaced');
+    fs.symlinkSync('/root/decoy', '/.lens');
+    console.log('retained-decoy-installed');
+}
+set output [exec $root/target/debug/lns exec --tty=false $name -- /usr/local/bin/node -e $tamper]
+if {![string match *retained-decoy-installed* $output]} { error "tamper setup failed: $output" }
+set output [exec $root/target/debug/lns exec --tty=false $name -- /usr/local/bin/node -e {console.log('sealed-exec-ok')}]
+if {![string match *sealed-exec-ok* $output]} { error "sealed exec failed: $output" }
+exec $root/target/debug/lns sandbox stop -t 5 $name
+set spawn_id $primary
+expect eof
+wait
+spawn -noecho $root/target/debug/lns sandbox start -a $name
+expect {
+    "ready-2" {}
+    eof { puts "FAIL: retained restart"; exit 1 }
+    timeout { puts "FAIL: retained restart timeout"; exit 1 }
+}
+set primary $spawn_id
+set body [exec curl --noproxy * --fail --silent --show-error --max-time 10 http://127.0.0.1:$port/]
+if {$body ne "boot-2"} { error "restarted published port: $body" }
+set output [exec $root/target/debug/lns exec --tty=false $name -- /usr/local/bin/node -e {
+    const fs = require('fs'), assert = require('assert/strict');
+    assert.throws(() => fs.openSync('/.lens/bin/lns-supervisor', 'r+'), {code:'EROFS'});
+    assert.match(fs.readFileSync('/proc/self/status', 'utf8'), /CapBnd:\s+00000000000000fb/);
+    console.log('restarted-exec-ok');
+}]
+if {![string match *restarted-exec-ok* $output]} { error "restarted exec failed: $output" }
+exec $root/target/debug/lns sandbox stop -t 5 $name
+set spawn_id $primary
+expect eof
+wait
+puts "openshell-restart-e2e-ok"

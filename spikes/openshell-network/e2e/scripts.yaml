@@ -1,0 +1,37 @@
+apiVersion: lns.run/v1
+kind: sandbox
+name: openshell-scripts
+spec:
+  image: ubuntu:24.04
+  user: "1000:1000"
+  workdir: /tmp
+  egress:
+    http:
+      - match: ports.ubuntu.com
+        verdict: allow
+      - match: archive.ubuntu.com
+        verdict: allow
+      - match: security.ubuntu.com
+        verdict: allow
+      - match: "*"
+        verdict: deny
+  scripts:
+    - when: pre-start
+      user: root
+      run: |
+        test "$(id -u)" = 0
+        test "$HOME" = /root
+        test "$(pwd)" = /root
+        if read answer; then exit 40; fi
+        test -z "${LENS_SANDBOX_TOKEN+x}"
+        if cat /proc/1/environ >/dev/null 2>&1; then exit 41; fi
+        grep -q 'CapBnd:.*00000000000000fb' /proc/self/status
+        if /.lens/nft flush ruleset; then exit 42; fi
+        apt-get update -o APT::Update::Error-Mode=any
+        apt-get install -y --no-install-recommends curl ca-certificates
+        if curl --connect-timeout 3 --noproxy '*' http://1.1.1.1; then exit 43; fi
+        if curl --connect-timeout 3 -fsS http://example.com; then exit 44; fi
+        curl --connect-timeout 5 -fsS http://ports.ubuntu.com/ubuntu-ports/ -o /dev/null
+        echo root-script-confined-ok
+  command: |
+    sh -ec 'test "$(id -u)" = 1000; curl --version; echo openshell-pre-start-ok'

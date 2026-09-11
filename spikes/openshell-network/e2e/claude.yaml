@@ -1,0 +1,40 @@
+apiVersion: lns.run/v1
+kind: sandbox
+name: openshell-claude-install
+spec:
+  image: docker.io/library/node:24-bookworm@sha256:a3acdfc965381ce998d17f8ae1cd297932ab89862fea0b4f61907b59a86e611b
+  user: node
+  workdir: /tmp
+  env:
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    DISABLE_AUTOUPDATER: "1"
+    DISABLE_ERROR_REPORTING: "1"
+    DISABLE_TELEMETRY: "1"
+    DO_NOT_TRACK: "1"
+    NPM_CONFIG_UPDATE_NOTIFIER: "false"
+  resources:
+    cpu: 2
+    memory: 2Gi
+  volumes:
+    - type: volume
+      source: claude-npm-global
+      target: /home/node/.npm-global
+  egress:
+    http:
+      - match: registry.npmjs.org
+        verdict: allow
+      - match: downloads.claude.ai
+        verdict: allow
+      - match: api.anthropic.com
+        verdict: allow
+      - match: platform.claude.com
+        verdict: allow
+  command: >-
+    sh -c '
+    test "$HOME" = /home/node && test "$USER" = node &&
+    test "$(id -u)" = 1000 &&
+    test ! -e "$HOME/.npm-global/bin/claude" &&
+    export PATH="$HOME/.npm-global/bin:$PATH" &&
+    npm install --loglevel error --fetch-retries 0 --fetch-timeout 30000
+    --prefix "$HOME/.npm-global" -g @anthropic-ai/claude-code &&
+    claude --version && echo openshell-claude-install-ok'

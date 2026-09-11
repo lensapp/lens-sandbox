@@ -1,0 +1,15 @@
+apiVersion: lns.run/v1
+kind: sandbox
+name: openshell-scripts-failure
+spec:
+  image: ubuntu:24.04
+  user: "1000:1000"
+  scripts:
+    - when: pre-start
+      user: root
+      run: |
+        false
+        echo forbidden-after-failure
+    - when: pre-start
+      run: echo forbidden-later-script
+  command: echo forbidden-workload

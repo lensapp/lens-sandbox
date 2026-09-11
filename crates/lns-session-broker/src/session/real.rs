@@ -173,7 +173,14 @@ pub fn handle_session(
         user: std::env::var("SANDBOX_USER").ok(),
     };
     let inherited: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
-    let spec = build_workload_spec(
+    let primary = !confine
+        && argv
+            .first()
+            .is_some_and(|arg| arg == lns_session::isolation::SUPERVISOR);
+    if primary {
+        crate::isolation::real::initialize().map_err(SessionError::Protocol)?;
+    }
+    let mut spec = build_workload_spec(
         argv,
         env,
         cwd,
@@ -182,6 +189,24 @@ pub fn handle_session(
         &identity,
         inherited.iter().map(String::as_str),
     );
+    spec.isolation = crate::isolation::select(
+        primary,
+        crate::isolation::real::active(),
+        confine,
+        identity.uid.unwrap_or(0),
+        identity.gid.unwrap_or(0),
+    );
+    if let crate::isolation::Launch::Exec { uid, gid } = spec.isolation {
+        let mut args = vec![
+            lns_session::isolation::SUPERVISOR.into(),
+            lns_session::isolation::EXEC_MODE.into(),
+            uid.to_string(),
+            gid.to_string(),
+        ];
+        args.append(&mut spec.argv);
+        spec.argv = args;
+        spec.confinement = Confinement::Inherit;
+    }
     if tty {
         run_tty_session(conn, spec, winsize, stdin, dies_with_client, pid_tx, forker)
     } else {
@@ -538,11 +563,21 @@ fn make_pipe() -> Result<(RawFd, RawFd), SessionError> {
 }
 
 fn exec_child(spec: &WorkloadSpec) -> ! {
+    let isolated = !matches!(spec.isolation, crate::isolation::Launch::Direct);
+    if isolated
+        && let Err(error) = crate::isolation::real::handoff(matches!(
+            spec.isolation,
+            crate::isolation::Launch::Primary
+        ))
+    {
+        let _ = writeln_stderr(&format!("isolating the session: {error}"));
+        child_exit(126);
+    }
     // SAFETY: post-dup2 child; raw close_range (no musl binding) drops every fd>=3 so conn/pty.master/listeners never survive execvp.
     unsafe {
         libc::syscall(
             libc::SYS_close_range,
-            3 as c_long,
+            if isolated { 6 } else { 3 } as c_long,
             c_uint::MAX as c_long,
             0 as c_long,
         )
@@ -573,7 +608,20 @@ fn exec_child(spec: &WorkloadSpec) -> ! {
     let mut argv_ptrs: Vec<*const c_char> = cargs.iter().map(|c| c.as_ptr()).collect();
     argv_ptrs.push(ptr::null());
     // SAFETY: argv_ptrs is NULL-terminated; CStrings outlive the call which doesn't return on success.
-    unsafe { libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr()) };
+    unsafe {
+        if isolated {
+            unsafe extern "C" {
+                static environ: *const *const c_char;
+            }
+            libc::fexecve(
+                lns_session::isolation::SUPERVISOR_FD,
+                argv_ptrs.as_ptr(),
+                environ,
+            );
+        } else {
+            libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr());
+        }
+    };
     let failure = io::Error::last_os_error();
     let _ = writeln_stderr(&format!("execvp({:?}): {failure}", spec.argv[0]));
     let found =

@@ -25,11 +25,32 @@ const CASES: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn the_ported_matcher_agrees_with_the_gate_it_was_ported_from() {
+fn the_host_matcher_agrees_with_the_openshell_gate() {
     for (pattern, host) in CASES {
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let gate = lns_openshell_spike::Gate::new(tx).unwrap();
+        let policy = serde_json::from_value(serde_json::json!({
+            "network": {"egress": {"http": [{"match": pattern, "verdict": "allow"}]}}
+        }))
+        .unwrap();
+        gate.reload(&policy).unwrap();
+        let authorization = gate
+            .engine
+            .authorize_egress(&openshell_supervisor_network::opa::NetworkInput {
+                host: host.to_string(),
+                port: 443,
+                binary_path: "/usr/bin/curl".into(),
+                binary_sha256: String::new(),
+                ancestors: Vec::new(),
+                cmdline_paths: Vec::new(),
+            })
+            .unwrap();
         assert_eq!(
             lns_policy::matching::domain_matches(pattern, host),
-            lens_sandbox_core::routing::domain_matches(pattern, host),
+            matches!(
+                authorization.action,
+                openshell_supervisor_network::opa::NetworkAction::Allow { .. }
+            ),
             "the CLI decides rule placement with its own copy of this matcher, so a divergence on ({pattern:?}, {host:?}) means it reasons about an order the gate does not enforce"
         );
     }

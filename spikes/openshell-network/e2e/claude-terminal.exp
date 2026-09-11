@@ -1,0 +1,45 @@
+set timeout 120
+set root [file normalize [lindex $argv 0]]
+set run_name "claude-terminal-[pid]"
+set command {export PATH="$HOME/.npm-global/bin:$PATH"; command -v claude >/dev/null || npm install --loglevel error --fetch-retries 0 --fetch-timeout 30000 --prefix "$HOME/.npm-global" -g @anthropic-ai/claude-code || exit; exec claude}
+if {[info exists env(CLAUDE_TERMINAL_VIA_EXEC)]} {
+    exec $root/target/debug/lns run --yes --quiet -d --name $run_name -f $root/spikes/openshell-network/e2e/claude.yaml -- sleep 600
+    set command "export http_proxy=http://127.0.0.1:3128 https_proxy=http://127.0.0.1:3128 HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128; $command"
+    spawn $root/target/debug/lns exec -it $run_name -- sh -c $command
+} else {
+    spawn $root/target/debug/lns run --yes --quiet -it --name $run_name -f $root/spikes/openshell-network/e2e/claude.yaml -- sh -c $command
+}
+expect_before {
+    -exact "\033\[6n" { send -- "\033\[1;1R"; exp_continue }
+    -exact "\033\[c" { send -- "\033\[?1;2c"; exp_continue }
+    -exact "\033\[>0q" { send -- "\033P>|xterm(390)\033\\"; exp_continue }
+}
+expect {
+    -re {Choose.*text.*style} {}
+    "Input must be provided" { puts "FAIL: Claude entered print mode"; exit 1 }
+    eof { puts "FAIL: Claude exited before interactive onboarding"; exit 1 }
+    timeout { puts "FAIL: Claude onboarding timed out"; exit 1 }
+}
+send -- "\r"
+set timeout 20
+expect {
+    -re {Select.*login.*method} {}
+    eof { puts "FAIL: Claude exited after theme selection"; exit 1 }
+    timeout { puts "FAIL: Claude did not accept theme selection"; exit 1 }
+}
+send -- "\003"
+after 300
+send -- "\003"
+after 2000
+catch {exec $root/target/debug/lns exec $run_name -- ps -eo pid,ppid,stat,wchan:24,comm} snapshot
+puts "Process snapshot after Ctrl+C: $snapshot"
+expect {
+    eof {}
+    timeout { puts "FAIL: Claude did not exit on Ctrl+C"; exit 1 }
+}
+set result [wait]
+if {[lindex $result 2] != 0 || [lindex $result 3] ni {0 130}} {
+    puts "FAIL: Claude terminal exit: $result"
+    exit 1
+}
+puts "openshell-claude-terminal-e2e-ok"

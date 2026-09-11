@@ -1,7 +1,11 @@
 mod exit;
 mod forker;
 mod forward;
+#[cfg(any(target_os = "linux", test))]
+mod isolation;
 mod network;
+#[cfg(any(target_os = "linux", test))]
+mod protect;
 mod pty;
 mod session;
 mod trust;
@@ -42,6 +46,14 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "linux")]
 fn run() -> Result<i32, String> {
+    protect::environment(|option, value| {
+        // SAFETY: prctl changes only this broker's dumpability before any untrusted sessions start.
+        if unsafe { libc::prctl(option, value, 0, 0, 0) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error().to_string())
+        }
+    })?;
     if let Err(e) = network::bring_up_eth0() {
         eprintln!("lns-session-broker: best-effort network setup failed: {e}");
     }

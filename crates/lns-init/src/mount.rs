@@ -1063,6 +1063,25 @@ fn mask_dropped_path(sys: &dyn Syscalls, path: &str) -> Result<(), MountError> {
     }
 }
 
+fn mount_trusted_runtime_bin(sys: &dyn Syscalls, newroot: &str) -> Result<(), MountError> {
+    const RUNTIME_BIN: &str = "/.lens/bin";
+    do_mkdir(sys, LOWER_VIEW_MOUNT, 0o700)?;
+    do_mount(
+        sys,
+        "overlay",
+        LOWER_VIEW_MOUNT,
+        "overlay",
+        MountFlags::read_only().nosuid().nodev(),
+        Some(&lower_view_options()),
+    )?;
+    let source = format!("{LOWER_VIEW_MOUNT}{RUNTIME_BIN}");
+    if sys.is_dir(&cstring(&source, "runtime-bin-source")?) {
+        let target = the_boots_own_directory(sys, newroot, RUNTIME_BIN, 0o755)?;
+        do_mount(sys, &source, &target, "none", MountFlags::bind(), None)?;
+    }
+    do_umount(sys, LOWER_VIEW_MOUNT)
+}
+
 fn mount_run_tmpfs(
     sys: &dyn Syscalls,
     newroot: &str,
@@ -1334,6 +1353,8 @@ fn mount_composefs_and_exec_broker_inner(
     seed_loopback_names(newroot);
 
     mount_run_tmpfs(sys, newroot, run_ids)?;
+
+    mount_trusted_runtime_bin(sys, newroot)?;
 
     allow_unprivileged_low_ports(sys)?;
 
@@ -2184,6 +2205,57 @@ mod tests {
          composefs.descriptor.dev=/dev/vdb content.tag=lns-content \
          LENS_SANDBOX_TOKEN=deadbeefsecret LENS_SANDBOX_WS_URL=vsock://host:1024/v1/sandbox \
          AGENT_COMMAND_B64=ZWNobyBoaQ==";
+
+    #[test]
+    fn trusted_runtime_binaries_cover_retained_paths_and_parent_symlinks() {
+        let sys = FakeSyscalls::new()
+            .with_dir("/mnt/lower/.lens/bin")
+            .with_symlink_left_behind("/newroot/.lens", "/newroot/attacker");
+        mount_trusted_runtime_bin(&sys, "/newroot").unwrap();
+        let calls = sys.calls();
+        let mounted = calls.iter().position(|call| matches!(call,
+            Call::Mount { source, target, flags, .. }
+            if source == "/mnt/lower/.lens/bin" && target == "/newroot/.lens/bin" && flags.bind
+        )).expect("trusted runtime bin must cover the retained writable copy");
+        let lower = calls[..mounted]
+            .iter()
+            .rposition(|call| {
+                matches!(call,
+                    Call::Mount { target, flags, .. }
+                    if target == LOWER_VIEW_MOUNT && flags.read_only && !flags.noexec
+                )
+            })
+            .expect("runtime source must be read-only but executable");
+        assert!(lower < mounted);
+        assert!(cleared(&sys, "/newroot/.lens").is_some());
+        assert!(matches!(calls.last(), Some(Call::Umount(path)) if path == LOWER_VIEW_MOUNT));
+    }
+
+    #[test]
+    fn trusted_runtime_mount_failures_are_fatal() {
+        let reference = FakeSyscalls::new().with_dir("/mnt/lower/.lens/bin");
+        mount_trusted_runtime_bin(&reference, "/newroot").unwrap();
+        for failed_call in reference.calls() {
+            let sys = FakeSyscalls::new()
+                .with_dir("/mnt/lower/.lens/bin")
+                .fail_when(move |call| {
+                    (call == &failed_call).then_some(ErrorKind::PermissionDenied)
+                });
+            assert!(mount_trusted_runtime_bin(&sys, "/newroot").is_err());
+        }
+    }
+
+    #[test]
+    fn an_image_without_runtime_binaries_needs_no_runtime_bind() {
+        let sys = FakeSyscalls::new();
+        mount_trusted_runtime_bin(&sys, "/newroot").unwrap();
+        assert!(
+            !sys.calls()
+                .iter()
+                .any(|call| matches!(call, Call::Mount { flags, .. } if flags.bind))
+        );
+        assert!(matches!(sys.calls().last(), Some(Call::Umount(path)) if path == LOWER_VIEW_MOUNT));
+    }
 
     #[test]
     fn boot_sequence_records_every_step_in_order_then_fexecve() {

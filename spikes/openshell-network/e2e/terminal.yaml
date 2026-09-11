@@ -1,0 +1,14 @@
+apiVersion: lns.run/v1
+kind: sandbox
+name: openshell-terminal
+spec:
+  image: docker.io/library/node:24-bookworm@sha256:a3acdfc965381ce998d17f8ae1cd297932ab89862fea0b4f61907b59a86e611b
+  user: node
+  workdir: /tmp
+  resources:
+    cpu: 2
+    memory: 2Gi
+  egress:
+    http:
+      - match: "*"
+        verdict: deny

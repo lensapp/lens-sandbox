@@ -38,7 +38,11 @@ fn handle_conn(conn: RawFd) {
         return;
     };
     let target = SocketAddr::from(([127, 0, 0, 1], port));
-    let Ok(stream) = TcpStream::connect_timeout(&target, WORKLOAD_CONNECT_TIMEOUT) else {
+    let Ok(stream) = crate::isolation::route(
+        crate::isolation::real::active(),
+        crate::isolation::real::enter,
+        || TcpStream::connect_timeout(&target, WORKLOAD_CONNECT_TIMEOUT),
+    ) else {
         close(conn);
         return;
     };

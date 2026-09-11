@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod isolation;
+
 pub const BROKER_PORT: u32 = 1029;
 
 pub const FORWARD_PORT: u32 = 1030;
