@@ -386,7 +386,12 @@ place.** Where the authentication comes back with different authority, the grant
 naming that connection are invalidated and asked again
 ([sandbox-spec §3.2.4](sandbox-spec.md#324-installing-connecting-and-applying)).
 
-**Native OAuth progresses automatically.** `oauth_device` prints its trusted
+**Native OAuth starts with a permission choice, then progresses automatically.**
+The CLI and Rust approval UI show the connector’s named permission presets and
+their exact scopes. The user selects one explicitly before provider requests or
+browser activity; even a single preset requires confirmation. Empty scope sets
+are shown as provider default permissions. There is no free-form scope input.
+Cancel or closing the selection abandons the operation. After selection, `oauth_device` prints its trusted
 verification destination and user code, and waits while the service polls.
 `oauth_authorization_code` reports that it opened the browser and waits for the
 service-owned loopback callback. Both disclose requested scopes and authentication

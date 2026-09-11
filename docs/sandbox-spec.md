@@ -2010,8 +2010,43 @@ MUST NOT be selected by a workload credential.
 |---|---|
 | `clientId` | REQUIRED nonempty public client identifier, at most 4096 bytes; no whitespace or control characters. |
 | `tokenEndpoint` | REQUIRED absolute HTTPS URL. |
-| `scopes` | Optional list, at most 128 nonempty individual OAuth scope tokens of at most 256 bytes each, per RFC 6749 §3.3. Elements are joined with one space, never split implicitly. |
+| `scopeOptions` | REQUIRED list of 1–32 named permission presets, under the rules below. |
 | `label`, `help` | The common presentation fields in §3.2.2. |
+
+**User-selected scopes.** Each `scopeOptions` entry accepts exactly `name`,
+`label`, and `scopes`. `name` is a unique 1–64 byte ASCII identifier using letters,
+digits, hyphens, or underscores. `label` is nonempty visible text of at most 256
+bytes, without control characters. `scopes` is a list of at most 128 distinct
+nonempty individual OAuth scope tokens of at most 256 bytes each, per RFC 6749
+§3.3. Tokens are joined with one space, never split implicitly. An empty list
+explicitly requests the provider's default permissions and is presented as such.
+The old top-level `scopes` field is refused, not treated as an alias.
+
+For example:
+
+```yaml
+scopeOptions:
+  - name: read-only
+    label: Read only
+    scopes: [read]
+  - name: read-write
+    label: Read and write
+    scopes: [read, write]
+```
+
+Before contacting a provider or preparing a callback, lns presents the named
+presets with their exact scopes in a structured selection state. No preset is
+selected implicitly, including when only one exists. The user selects exactly
+one offered name; arbitrary scope strings and combinations are refused. CLI and
+approval UI submit this explicit answer once, then progress automatically.
+Selection shares the operation's cancellation, deadline, digest binding, and
+concurrency bounds. Status reads perform no selection and no provider work.
+Repeated or late selection cannot restart an operation or change its scopes.
+The selected scope set is captured in private operation state and used for both
+the authorization request and the scope fallback if the token response omits
+scope. A later connector edit cannot change that in-flight request. Refresh
+uses the connection's actual authority, never the connector's current options;
+changing permissions requires a new explicit connect and existing regrant rules.
 
 Only public clients are supported. A publisher may register an application and
 publish its public ID; a customer may install a local connector with their own
