@@ -73,19 +73,31 @@ impl HostSources {
 }
 
 impl Sources for HostSources {
-    fn scopes(&self) -> Vec<Scope> {
-        let resolv_conf = std::fs::read_to_string(&self.resolv_conf).unwrap_or_default();
-        let mut scopes = scopes_of_resolv_conf(&resolv_conf);
-        scopes.extend(scopes_of_scutil(&scutil_output(self.scutil.as_deref())));
-        scopes
+    fn scopes(&self) -> BoxFuture<'_, Vec<Scope>> {
+        Box::pin(async move {
+            let resolv_conf = tokio::fs::read_to_string(&self.resolv_conf)
+                .await
+                .unwrap_or_default();
+            let mut scopes = scopes_of_resolv_conf(&resolv_conf);
+            scopes.extend(scopes_of_scutil(
+                &scutil_output(self.scutil.as_deref()).await,
+            ));
+            scopes
+        })
     }
 }
 
-fn scutil_output(scutil: Option<&Path>) -> String {
+/// `kill_on_drop`: a read the caller gave up on takes its `scutil` child with it rather than leaving one behind per refresh.
+async fn scutil_output(scutil: Option<&Path>) -> String {
     let Some(scutil) = scutil else {
         return String::new();
     };
-    match std::process::Command::new(scutil).arg("--dns").output() {
+    let read = tokio::process::Command::new(scutil)
+        .arg("--dns")
+        .kill_on_drop(true)
+        .output()
+        .await;
+    match read {
         Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
         Err(_) => String::new(),
     }
@@ -174,28 +186,32 @@ mod tests {
         assert!(answered.is_err());
     }
 
-    #[test]
-    fn the_host_sources_read_resolv_conf() {
+    #[tokio::test]
+    async fn the_host_sources_read_resolv_conf() {
         let dir = tempfile::tempdir().unwrap();
 
-        let scopes = HostSources::new(resolv_conf_in(dir.path()), None).scopes();
+        let scopes = HostSources::new(resolv_conf_in(dir.path()), None)
+            .scopes()
+            .await;
 
         assert_eq!(scopes.len(), 1);
         assert_eq!(scopes[0].suffix, None);
         assert_eq!(scopes[0].servers, vec![server("9.9.9.9", PORT)]);
     }
 
-    #[test]
-    fn a_host_with_no_resolv_conf_at_all_names_no_scope() {
+    #[tokio::test]
+    async fn a_host_with_no_resolv_conf_at_all_names_no_scope() {
         let dir = tempfile::tempdir().unwrap();
 
-        let scopes = HostSources::new(dir.path().join("absent"), None).scopes();
+        let scopes = HostSources::new(dir.path().join("absent"), None)
+            .scopes()
+            .await;
 
         assert_eq!(scopes, Vec::new());
     }
 
-    #[test]
-    fn the_per_domain_resolvers_of_the_host_are_added_to_the_default_ones() {
+    #[tokio::test]
+    async fn the_per_domain_resolvers_of_the_host_are_added_to_the_default_ones() {
         let dir = tempfile::tempdir().unwrap();
         let scutil = dir.path().join("scutil");
         std::fs::write(
@@ -205,19 +221,23 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&scutil, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let scopes = HostSources::new(resolv_conf_in(dir.path()), Some(&scutil)).scopes();
+        let scopes = HostSources::new(resolv_conf_in(dir.path()), Some(&scutil))
+            .scopes()
+            .await;
 
         assert_eq!(scopes.len(), 2);
         assert_eq!(scopes[1].suffix.as_deref(), Some("corp.internal"));
         assert_eq!(scopes[1].servers, vec![server("10.0.0.53", PORT)]);
     }
 
-    #[test]
-    fn a_host_where_scutil_cannot_run_still_has_its_default_resolvers() {
+    #[tokio::test]
+    async fn a_host_where_scutil_cannot_run_still_has_its_default_resolvers() {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("absent");
 
-        let scopes = HostSources::new(resolv_conf_in(dir.path()), Some(&absent)).scopes();
+        let scopes = HostSources::new(resolv_conf_in(dir.path()), Some(&absent))
+            .scopes()
+            .await;
 
         assert_eq!(scopes.len(), 1);
     }

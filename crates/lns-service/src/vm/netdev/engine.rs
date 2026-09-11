@@ -1174,12 +1174,14 @@ mod tests {
     struct TestSources;
 
     impl dns::Sources for TestSources {
-        fn scopes(&self) -> Vec<dns::Scope> {
-            vec![dns::Scope {
-                suffix: None,
-                servers: vec![NAMESERVER.parse().unwrap()],
-                order: 0,
-            }]
+        fn scopes(&self) -> BoxFuture<'_, Vec<dns::Scope>> {
+            Box::pin(async {
+                vec![dns::Scope {
+                    suffix: None,
+                    servers: vec![NAMESERVER.parse().unwrap()],
+                    order: 0,
+                }]
+            })
         }
     }
 

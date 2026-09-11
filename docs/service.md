@@ -133,7 +133,10 @@ name no suffix covers goes to the default ones. The list is read again every
 mid-run is picked up. Every read runs off the runtime's workers, the first
 one included, so neither a query nor the start of a run waits for it. A
 query put before the first read has landed gets SERVFAIL, and the next one
-reads again.
+reads again. A read has 2 seconds; one that takes longer is dropped, with
+the `scutil` it was waiting on, and the list in hand is kept. A read that
+names no server at all is a host mid-change, so the list in hand is kept
+then too, and the service says so once.
 
 Each query goes to the first server over UDP, and to the next after 700 ms
 while the first is still pending; the first usable answer wins. SERVFAIL,

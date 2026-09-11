@@ -528,8 +528,8 @@ mod tests {
     struct NoResolvers;
 
     impl dns::Sources for NoResolvers {
-        fn scopes(&self) -> Vec<dns::Scope> {
-            Vec::new()
+        fn scopes(&self) -> futures_util::future::BoxFuture<'_, Vec<dns::Scope>> {
+            Box::pin(async { Vec::new() })
         }
     }
 
