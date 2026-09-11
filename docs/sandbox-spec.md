@@ -76,7 +76,7 @@ sees the resolved document, in full, before anything boots
 The same holds for `spec.ports`: a declared port is published, whether the
 sandbox came from a registry or from the directory in front of you.
 
-Three things stay outside a document's reach, because no declaration can supply
+Four things stay outside a document's reach, because no declaration can supply
 them:
 
 - **A destination nothing decides.** An entry decides its match; a destination no
@@ -88,6 +88,18 @@ them:
   whether the file is read is decided per machine, on the same terms as a
   destination. A document in the developer's own directory is their own consent
   and is never asked about.
+- **A program on the machine that runs it.** A `code` method MAY declare that its
+  component runs programs on this machine ([§3.2.6](#326-kind-code)), and a
+  document declaring it only declares it. This one is not settled by asking, the
+  way the three above are, because lns can bound a destination and a file read but
+  not a program's authority. It is settled twice instead: at **install**, where
+  provenance decides whether the declaration may exist on this machine at all — a
+  pulled document carrying it is refused, and only a local install may — and at the
+  **grant**, where the card names the capability and the user takes the method or
+  does not ([§1.5](#15-one-disclosure)). Until both, nothing runs. What differs
+  from the three above is not that nobody is asked — the grant is asking — but that
+  it is never settled per destination at first use, the way a request to an
+  undecided host is. There is no such thing as one program's worth of consent.
 
 A `connector` is the one kind that grants nothing even after it arrives.
 Installing it opens no destination, arms no injection, writes no file, and
@@ -169,6 +181,37 @@ digest, so what boots is what was approved
 Startup resolution is what makes a mixin worth having: a fix to a mixin reaches
 every sandbox that references it on the next run, without republishing any of
 them. See [§3.3](#33-kind-mixin).
+
+This section is about what a consumer approves before an untrusted sandbox runs. A
+connector is approved at a different moment — a grant, while the guest is already
+running ([§3.2.4](#324-installing-connecting-and-applying)) — and the rule is the
+same one: what is approved is what will be in force, stated in full beforehand.
+
+**A `code` method cannot be read before it is trusted, so its disclosure states
+bounds instead of behaviour** ([§3.2.6](#326-kind-code)). The card MUST name the
+hosts the component may contact — saying so plainly where it declares none, since
+"reaches nothing" is a disclosure and not an absence — and the digest the connector
+is installed at, which covers the component's bytes and is what the grant binds to.
+It MUST then carry one of two disclosures:
+
+| The method | The card carries |
+|---|---|
+| declares no `exec` | the **bounded-code disclosure**: lns cannot show what the code does, but bounds where it runs, what it reaches, and how long it has |
+| declares `exec` | the **unbounded-code disclosure**: lns cannot show what the code does, it runs programs on the user's machine with the user's own access, and lns cannot bound what those reach |
+
+The two are not interchangeable, and the second is not a stronger warning attached
+to the first — it **withdraws a guarantee the first makes**. Where `exec` is
+declared, lns does not bound what the code reaches, so a card carrying the
+bounded-code disclosure would state something false. A disclosure that overstates
+what lns enforces is worse than none.
+
+[`docs/cli-spec.md`](cli-spec.md) fixes the exact wording of each, as it does for
+every prompt; a card MUST carry it verbatim rather than a paraphrase, so that what
+the user reads cannot drift from what lns enforces.
+
+This is the whole reason `token` and the other declarative kinds are not
+reimplemented on top of `code`: a document a consumer can read needs no such
+disclosure at all.
 
 ---
 
@@ -1291,11 +1334,24 @@ spec:
 | `kind` | Produces | Notes |
 |---|---|---|
 | `token` | `token` | The user supplies one value. |
+| `code` | what its `outputs` name | The connector carries the mechanism itself ([§3.2.6](#326-kind-code)). |
+
+**`code` is the one kind whose `Produces` column the document fills in.** Every
+other kind names a mechanism lns implements, so what it produces is this version's
+to know. A `code` method's mechanism is the author's, so it produces whatever it
+says it produces, and it MUST declare `outputs` — without that list nothing can
+check a credential's `field` before the connector is installed. A `code` auth
+accepts the fields [§3.2.6](#326-kind-code) defines and no others; a `component`,
+`outputs`, `hosts`, or `exec` on any other kind is **refused**, because what a
+built-in produces and what it may reach are not a document's to restate.
 
 A method's `credentials` draw from what its `auth` produced
 ([§4.1](#41-the-credential-definition) `field`), so a method declaring
 `credentials` and no `auth` is **refused** — the credential would ship
-permanently unarmed.
+permanently unarmed. §4.1's rule that a credential may omit `field` only where its
+`auth` produces one value is what makes `outputs` load-bearing here: a `code`
+method producing several leaves nothing to say which one arms a credential that
+names none.
 
 **An unknown `auth.kind` MUST NOT refuse the document**, and this is a stated
 exception to [§1.2](#12-strict-decoding). A reader that does not know a `kind`
@@ -1321,7 +1377,7 @@ which is where a user meets the refusal.
 | [`filesets`](#3111-filesets) | MAY — `inline` or `path` | Written into the running guest at the path the entry names. |
 | [`env`](#314-env) | MAY | Applies to workloads that start afterwards, which is the only moment a variable can be given. |
 | `tools` | MUST NOT | Provisioned into the image layer before boot, and contributes to `PATH`. |
-| `scripts` | MUST NOT | Run once, before the workload. Connecting a connector MUST NOT mean running code. |
+| `scripts` | MUST NOT | Run once, before the workload. Connecting a connector MUST NOT run code **in the guest**. |
 | `volumes`, `ports` | MUST NOT | Which mounts and which listeners exist is fixed when the guest is created. |
 | `mixins` | MUST NOT | The card shows one document. A graph would apply egress and credentials from documents the user never saw. |
 | `image`, `command`, `workdir`, `user`, `resources` | MUST NOT | The [mixin](#33-kind-mixin) rule, for the same reasons. |
@@ -1329,6 +1385,30 @@ which is where a user meets the refusal.
 A `filesets[].hostPath` is refused too: a connector is installed once and used in
 every project, so reading a path off whichever machine happens to be running it
 is a [sandbox](#3111-filesets) concern.
+
+**The `scripts` row now says "in the guest", and that is a narrowing of the
+rationale, not of the rule.** The refusal stands on its original reason unchanged:
+a script runs once, before the workload, and a method is applied to a guest that is
+already running. What the added words settle is the question
+[§3.2.6](#326-kind-code) raises — whether a `code` method's component is a
+`scripts` block by another name. It is not. A script runs *inside the guest*,
+beside the workload, with that run's mounts and that run's network, and a connector
+could hand one to a guest the user is watching for exactly that reason. A component
+runs on the host, in the functions §3.2.6 names, and never inside any run.
+
+**That leaves the `hostPath` refusal directly above, which a reader will fairly
+ask about: why may a connector not read one named file, yet run a program?** The
+two answer different questions. The `hostPath` refusal is about **ownership** —
+which document decides that a particular file on this machine belongs in this
+guest. A connector is installed once and used in every project, so it cannot know
+that; the sandbox in front of the developer can. It is not a judgement that the
+read is dangerous: [§3.1.11](#3111-filesets) permits exactly that read for a
+sandbox, asks the developer per machine, and records the answer. Host execution
+falls on the connector's own side of that line, because what a credential is and
+how it is obtained is precisely what a connector knows and a sandbox does not. What
+makes it the heavier decision is not whose it is but what lns can bound, and
+§3.2.6's two rules and [§1.5](#15-one-disclosure)'s disclosure answer that
+separately.
 
 The refusal names the mechanism rather than the rule, so an author learns where
 the block belongs instead:
@@ -1542,8 +1622,9 @@ authenticated independently.
 
 A connection's **authority** is what its `auth` exchange reported about what the
 connection may do — OAuth scopes, in that mechanism's terms. It is opaque to this
-format: the mechanism produces it, and `lns` stores and compares it without
-interpreting it. A `kind: token` exchange reports none.
+format: the mechanism produces it, and `lns` stores and compares it, rendered as
+[§3.2.6](#326-kind-code) requires, without interpreting it. A `kind: token`
+exchange reports none.
 
 **A mechanism MUST report authority canonically.** The same permissions MUST
 report identically, and anything that varies between exchanges — an expiry, a
@@ -1563,7 +1644,8 @@ read from the connection rather than derived from the connector.
 
 `lns` MUST ask again in two cases, for the same reason and with the same force:
 
-- **A republished connector.** Any change is a different digest, so a grant bound
+- **A connector whose bytes changed** — republished, or reinstalled after an edit.
+  Any change is a different digest, so a grant bound
   to the old bytes does not carry over ([§7.1](#71-connectors)) — the whole digest,
   because any list of fields that can widen a grant is a list that can be missing
   one.
@@ -1650,6 +1732,264 @@ Two rules govern it, and only the second is checkable:
 
 A `connector` document carries the placeholder, never a value. Values stay
 per-machine.
+
+#### 3.2.6 `kind: code`
+
+Every other `auth.kind` names a mechanism lns implements. A `code` method carries
+one: a component the connector itself ships, which lns runs to obtain and renew the
+values the method produces.
+
+```yaml
+methods:
+  - name: sign-in
+    auth:
+      kind: code
+      component: ./sign-in.wasm    # a file beside this document, packed at publish
+      outputs: [access_token]      # what it produces, so a credential's field validates offline
+      hosts: [auth.example.com]    # the only hosts it may reach
+      limits: { callSeconds: 30, sessionSeconds: 900 }
+```
+
+A method that drives a tool on this machine declares one field more, and the rules
+in **Host execution** below then apply to the whole connector:
+
+```yaml
+      exec: true                   # it may run programs on this machine
+```
+
+**Why this exists.** A credential is often owned by a tool that already knows how
+to renew it. No declaration can express "drive that tool", and each provider that
+does not fit adds a field to the declarative path, so the kinds lns implements
+grow without end. A `code` method moves that cost into the connector.
+
+| Field | Type | Rules |
+|---|---|---|
+| `component` | string | REQUIRED. The component implementing this method — see **Where the component lives**. |
+| `outputs` | list | REQUIRED, non-empty, no duplicates. What this mechanism produces ([§3.2.2](#322-methods)). |
+| `hosts` | list | optional. The only destinations the component may reach, in the [`match`](#42-the-egress-definition) grammar. Absent means none, and the card says so. |
+| `exec` | bool | optional, default `false`. Whether the component may run programs on the machine. See **Host execution**. |
+| `limits` | map | optional. `callSeconds`, at most `30`, and `sessionSeconds`, at most `900`. Each defaults to its ceiling. A larger value is refused offline, so a document that validates on one build validates on every build of this version. |
+
+An `auth` also carries the `label` and `help` that [§3.2.2](#322-methods) gives
+every kind. A `code` auth accepts those, the fields above, and nothing else.
+
+**Where the component lives.** `component` is a path to a file beside this
+document, and it is written the same way whether the connector is installed from a
+local path or pulled — exactly as a fileset [`path`](#3111-filesets) is. `lns push`
+packs the file into a layer of the artifact and the entry keeps its spelling
+([§6](#6-publish-time-transforms)); the bytes then live in the artifact and are
+covered by its digest, which is what a grant binds to and re-consents on
+([§7.1](#71-connectors)). So there is no second digest to write down and none to
+keep in step.
+
+**A local install captures the component, exactly as a push would.** A pulled
+connector's component is safe because it is a layer of the stored artifact. A local
+install has no artifact, so [§7.1](#71-connectors) stores the bytes themselves —
+every `component` and every `filesets[].path` directory, everything a push would
+have packed — verbatim, at a digest computed over all of them. Two things follow.
+Editing `./sign-in.wasm` afterwards changes nothing: the installed connector runs
+what was captured, not what is on disk now. And reinstalling captures the new bytes
+under a new digest, which re-offers the connector and asks every grant again
+([§3.2.4](#324-installing-connecting-and-applying)).
+
+Without that, an author could swap the file under an installed connector and every
+grant would stand unasked — and because a method declaring `exec` may *only* ever
+be installed locally, that is exactly the case where the code is least bounded.
+
+A `component` MUST name one file beside the document: a relative path, non-empty,
+not home-anchored, and with no empty or `..` segment. A home-anchored `component`
+is refused for the reason a home-anchored fileset `path` is — the file is packed at
+publish, so it cannot name something on whichever machine runs the document.
+
+**The three moments.** `connect` and `revoke` run **only when a person presses a
+button** — Connect, or Disconnect. Never on a schedule, and never as a direct
+consequence of workload behaviour. A guest's request can raise the card
+([§3.2.4](#324-installing-connecting-and-applying)), so a guest can prompt a person
+to consider running this code; what it cannot do is run it. The press is the gate,
+and it is a person's. `refresh` is the one exception: it runs on a schedule
+**lns owns**. The component MUST NOT be able to request a wake-up, set its own
+interval, or shorten the interval lns chose; a reported expiry MAY inform the
+schedule but a floor lns sets bounds it, so a component reporting a one-second
+lifetime cannot produce a hot loop. Where the two disagree the **floor wins**: an
+expiry below it is honoured as a lifetime, so the values count as run out at the
+moment it names ([§4.1](#41-the-credential-definition)), but never as a wake-up.
+
+**A connect is an exchange, not a call.** A mechanism that lns implements knows
+what to ask for before it runs, so the values can be collected first and handed
+over at once. A component does not: which fields it needs, and how many rounds it
+takes, is the implementation's own decision — a device code shows a URL and then
+waits, a password grant asks twice, a token exchange asks once. So `connect`
+returns one of three answers — **ask**; **done**, with the values and scopes it
+produced, and where it has one their expiry; or **failed**, with a reason — and
+where it asked, lns collects what it asked for and calls **`resume`** with the
+state verbatim and the answers. `resume` answers the same three, so a connect runs
+for as many rounds as the implementation needs.
+
+An **ask** carries the opaque state, a **message** in the component's own words,
+and the fields it wants — each named, labelled, and marked secret or not, so lns
+knows which never to echo. A message is what makes a device code expressible: an
+ask MAY name **no** fields, which is a round that shows the user something and
+waits for them to press on.
+
+The message and every field `label` are the **ask's connector text**: words a
+connector supplies **at connect time, from code nobody can read**. The `label` and
+`help` of [§3.2.2](#322-methods) are connector-authored too, but they sit in the
+document the card already discloses, and a document is checked before it is
+installed ([§5](#5-validation-summary)). An ask's text arrives after every such check, so
+it needs a rule of its own, and one rule covers all of it.
+
+lns MUST present an ask's connector text as the connector's, attributed by that
+connector's `name`; MUST refuse an ask whose connector text exceeds a size
+ceiling, failing the connect rather than truncating, so the refusal is visible
+instead of the user reading half a sentence and trusting it; and MUST render it by
+replacing every character that does not draw in the place lns drew it — a control
+character, a line or paragraph separator, and every mark that reorders or hides
+what follows it, which is Unicode `Cc`, `Cf`, `Zl`, and `Zp` exactly — leaving no
+escape sequence as a sequence, no text reversed against the order lns laid out,
+and every line lns draws lns's. A line break is one of these, so a message is one
+paragraph lns wraps. The reason a `failed` carries is connector text under the
+same rule, wherever lns shows it.
+
+**Every name a component supplies is connector text, wherever lns shows it.** The
+host an outbound call named and the program an execution named are the component's
+words, and lns prints them back in the record of what it did
+([§7.1](#71-connectors), [cli-spec §3.6](cli-spec.md#36-lns-audit)). lns MUST
+render each by the rule above before it writes it down.
+
+A record is the one place that rule cuts rather than refuses. An ask can be failed
+because nothing has happened yet; a call that already left the machine cannot be,
+and the entry is the only record there will ever be. So lns MUST bound a record
+two ways instead, and each way answers a harm the ask rule answers by refusing:
+
+- **By length**, and a cut record MUST say in lns's own text that it was cut. A
+  shortened name that read as a whole one would enter the ledger as a name the
+  component never used — `login.example.com.attacker.example` cut to
+  `login.example.com` is a forged host in the one record that answers for the
+  component, which is worse than the long name it replaced.
+- **By count**, under a ceiling lns sets on the entries one call may write. That
+  ceiling MUST NOT be `callSeconds` or fuel: a component that spends those has
+  already written thousands of entries, which buries the neighbouring ones as
+  surely as one unbounded name would. Past it lns records that it elided the rest,
+  and that entry is lns's own.
+
+The **authority** a finished exchange reports is connector text too: the consent
+card prints it beside the disclosure
+([§3.2.4](#324-installing-connecting-and-applying)). It refuses rather than cuts,
+wherever it crosses a ceiling. A grant survives re-authentication by comparing the
+authority reported against the authority consented to, so two different authorities
+cut to one string would keep a grant nobody agreed to.
+
+Everything [§1.5](#15-one-disclosure) fixes verbatim — the disclosures, the bounds,
+the digest — is lns's own text, and a component's connector text MUST be
+surrounded by it and MUST NOT be able to occupy, redraw, or imitate it. Text that
+could forge a disclosure would forge consent, which is the one thing this section
+exists to protect.
+
+Only `connect` and `resume` may ask. `refresh` runs on a schedule with nobody there
+to answer at all. `revoke` has a person at the press, but it undoes a decision
+rather than making one, so there is nothing left to ask them.
+
+A person may also **abandon** an ask rather than answer it. lns then stops calling
+the component and drops the state, and the connect ends the way §3.2.4 already says
+an abandoned one does: nothing is stored and the offer stands
+([§3.2.4](#324-installing-connecting-and-applying)).
+
+`resume` is not a fourth moment. It is the rest of one `connect`, so the press that
+authorised the connect authorises it, a session lns did not open cannot be resumed,
+and `sessionSeconds` bounds how long the whole exchange may take. Between calls
+lns holds the state and nothing else: it is opaque to lns, is never persisted, is
+only ever handed back to the component that produced it, and — like every other
+resource this section bounds — has a size ceiling, past which the connect fails.
+
+**What lns lends a component**, and nothing else: outbound HTTP, over TLS and only
+to the hosts the method declares; random bytes, one bounded draw at a time, because
+a mechanism that cannot draw a PKCE verifier or a state parameter cannot implement
+the flows this kind exists for, and a component with no clock and no filesystem has
+nowhere else to draw unpredictable ones; and, where the method declared `exec`,
+host execution. It is lent no listener of its own, so a flow whose redirect leg
+needs one is expressed as a device code instead — the `message` of an ask is what
+makes that expressible. The moment a call is made is a parameter lns passes on
+every call, which is why a component needs no clock to be told the time.
+
+**What lns enforces**, on every call and never trusted from the component: the
+declared `hosts` and TLS for outbound calls; no filesystem, no environment, and no
+clock as capabilities of their own; the deadlines in `limits`; and fuel, memory,
+step-state, connector-text, random-draw, response-size, round-count, field-count,
+field-name, authority-count, record-length, record-count, and component-size
+ceilings. Whatever crosses one fails the call it arrived in, for the reason the
+connector-text ceiling does: a round trimmed to fit is one the user answers without
+knowing what was taken out. The two record ceilings are the exception, and the rule
+above says why one cuts and the other elides. Step state between calls, and any
+answer to a field marked secret, are secret material — a device code, a PKCE
+verifier, a password — so lns holds each in memory only, for a bounded lifetime,
+never logs it, never persists it, and drops an answer once the `resume` that
+consumed it returns.
+
+**What lns does, so a component cannot.** The component reports scopes; lns builds
+the canonical set ([§3.2.4](#324-installing-connecting-and-applying)). Where a
+renewal omits scopes, lns carries forward the ones the connection already held. A
+renewal returns the same shape a successful connect does, so this is one rule in
+one place rather than two.
+
+**A connection records no account.** It already carries a name for the sign-in it
+came from: its **label**. A mechanism suggests one and the user confirms it
+([cli-spec §3.3](cli-spec.md#33-lns-connector)), and the card discloses it beside
+the authority ([§3.2.4](#324-installing-connecting-and-applying)), so `work` and
+`jane@example.com` are both spellings a user may choose and both say which
+sign-in this is. A second name beside it would be one lns could not choose
+between, and the card would show two.
+
+**An expiry is the exception to that carry-forward, and deliberately so.** Scopes
+describe what the connection may do, which a renewal does not change; an expiry
+describes the values, which a renewal replaces. So a renewal's expiry replaces
+the recorded one whole, and a renewal that reports none leaves the connection
+with none. Carrying the old one forward would disarm the injection the moment a
+successful refresh landed, since the expiry being carried is by definition
+already past.
+
+**An expiry is what a component reports, and the only thing about the schedule it
+gets to say.** A component MAY report when the values it produced run out; the
+connection records it ([§7.1](#71-connectors)), and lns decides everything else —
+when to refresh, under the rule above, and what an expiry that passed unrefreshed
+means, which [§4.1](#41-the-credential-definition) decides for every credential and
+not only for this kind. A connection reporting no expiry is refreshed on no
+schedule at all: a value with no stated lifetime is one lns has no reason to
+believe has ended.
+
+**Host execution.** A method MAY declare `exec: true`, and then its component may
+run programs on the machine, composing the invocation itself.
+
+**lns bounds nothing about such a program.** It runs with the user's own access —
+their filesystem, their network, their credentials — so every bound above is
+advisory for a component that declares `exec`. This is stated rather than implied,
+because the disclosure depends on it ([§1.5](#15-one-disclosure)).
+
+Two rules hold the line the sandbox cannot:
+
+1. **A `code` method declaring `exec` MAY be installed only from a local path.** A
+   pulled artifact carrying one is **refused** at install. Provenance is the bound,
+   since the digest cannot be one.
+2. **Every execution is recorded**, in the durable ledger rather than a run's chain
+   — the component runs on the machine's behalf and no run can account for it
+   ([§7.1](#71-connectors)).
+
+A method that declares no `exec` earns the stronger disclosure, which is why this
+is an opt-in rather than something every `code` method carries.
+
+**One cost is worth stating plainly, because it cuts against a product
+principle.** lns is one binary with nothing to preflight, and a connector that
+drives a host tool depends on that tool being installed — the first place lns's
+behaviour turns on something outside its own binary. The principle is about what
+*lns* requires, and this requires nothing of lns: a machine without the tool simply
+fails that connect, naming it, and every other connector still works. But a
+`code` method SHOULD NOT reach for `exec` where a declarative kind or an
+`http`-only component would do, precisely because that is the line it stands on.
+
+**`code` replaces the auth block, not the connector.** Everything else stays
+declarative and is decided the same way for every kind: `serves`, `egress`,
+`credentials`, `injections`, `env`, and filesets. A `code` method obtains a value;
+[§3.2.5](#325-a-fileset-carries-the-placeholder-not-the-value) still holds, so a
+fileset carries the placeholder and never the value the component returned.
 
 ---
 
@@ -1796,7 +2136,8 @@ silently taking no effect.
 alternatives ([§3.2.2](#322-methods)), so the source is the granted method, and
 the others are not in the list at all. A grant is what puts it here; whether the
 machine still holds that connection decides only whether its credentials are armed
-([§3.2.4](#324-installing-connecting-and-applying)).
+([§3.2.4](#324-installing-connecting-and-applying)), and it is not the only thing
+that does ([§4.1](#41-the-credential-definition)).
 
 Two properties fall out of the shape:
 
@@ -1974,13 +2315,14 @@ injection covered the request proceeds untouched by this rule.
 
 What survives is a real mismatch, and there are two:
 
-- The injection is **unarmed** — declared, with no value behind it. One state
-  produces this: a [connector](#32-kind-connector) connection a run granted, on
-  a machine that no longer holds it
-  ([§3.2.4](#324-installing-connecting-and-applying)). A sandbox's or a mixin's
-  own credential still cannot reach it: a bound declaration is armed before boot,
-  and one left to a connector ([§3.1.7](#317-credentials)) declares nothing to the
-  boundary at all until the grant registers it armed.
+- The injection is **unarmed** — declared, with no value behind it. Two states
+  produce this. A [connector](#32-kind-connector) connection a run granted, on a
+  machine that no longer holds it
+  ([§3.2.4](#324-installing-connecting-and-applying)); or one the machine still
+  holds whose values have **run out**, which is the rule below. A sandbox's or a
+  mixin's own credential still cannot reach it: a bound declaration is armed before
+  boot, and one left to a connector ([§3.1.7](#317-credentials)) declares nothing to
+  the boundary at all until the grant registers it armed.
 - The placeholder is somewhere the declared kind does not reach. A
   `bearer_header` injection sets one header; the same placeholder in a request
   body is untouched by it, so it survives. Reaching a body takes a
@@ -1990,6 +2332,17 @@ Either way the request is held instead of carrying the marker onto the wire,
 because a marker on the wire tells a destination that a secret was meant to be
 here and was not — and the request it belongs to would fail anyway, less
 informatively.
+
+**A value whose lifetime lns knows disarms when that lifetime ends.** Where a
+credential's value carries an expiry — a connection's, from the mechanism that
+produced it ([§7.1](#71-connectors)) — and nothing has replaced it by then, lns
+disarms the injection through the same policy change a grant applies through
+([§3.2.4](#324-installing-connecting-and-applying)). The next request carrying
+that placeholder is then held by the rule above and raises the **connect** prompt,
+rather than carrying a value the destination will reject. The run keeps its grant:
+what ended is the authentication, not the decision. This is why an expiry is worth
+recording at all — a credential lns silently lets go stale fails at the
+destination, with no prompt and nothing to act on.
 
 Placeholder substitution is why a `placeholder` MUST be distinctive: it is the
 marker the proxy looks for. A value that could occur naturally in a stream would
@@ -2149,7 +2502,15 @@ Offline validation (`lns artifact validate`, and every load path including
   appears under `spec`; no `filesets[].hostPath`; every fileset `guestPath` is
   `~/`-anchored and a method's `inline` bytes total no more than 1 MiB
   ([§3.2.3](#323-what-a-method-may-carry)); an `auth`, where present, sets
-  a `kind`; a method declaring `credentials` declares an `auth`; every placeholder self-identifies as fake and
+  a `kind`; a `code` auth names one `component` file by a non-empty relative path
+  that is not home-anchored and has no empty or `..` segment, and a non-empty
+  `outputs` with no duplicate entry, every credential `field` in the method names
+  one of the values its `auth` produces, every `hosts` entry parses in the
+  [`match`](#42-the-egress-definition) grammar, and its `limits` are no greater
+  than `callSeconds: 30` and `sessionSeconds: 900`; no other kind declares
+  `component`, `outputs`, `hosts`, or `exec` ([§3.2.6](#326-kind-code)); a method
+  declaring `credentials` declares an
+  `auth`; every placeholder self-identifies as fake and
   is at least 16 characters; no two methods declare one `envVar` with different
   placeholders ([§4.1](#41-the-credential-definition)); and every fileset file
   with a secret-shaped name declares a placeholder **its own method** also
@@ -2191,20 +2552,21 @@ document: `lns artifact validate` cannot see it.
 
 ## 6. Publish-time transforms
 
-`lns push` publishes the document with three resolutions applied, so a consumer
-runs exactly what the author tested:
+`lns push` publishes the document with every resolution below applied, so a
+consumer runs exactly what the author tested:
 
 | Surface | Transform |
 |---|---|
 | `filesets[].path` | The directory is packed into a layer of this artifact. The entry keeps its `path` and `guestPath`; the content is now part of the artifact's digest. |
+| `methods[].auth.component` | The file is packed into a layer of this artifact. The entry keeps its `component`; the content is now part of the artifact's digest, on the same terms as a fileset `path` ([§3.2.6](#326-kind-code)). |
 | `tools[]` | A fuzzy version (`node@22`, `python@latest`) is resolved against the tool's public version index and rewritten exact. |
 | `mixins[]` local entry | The document it names publishes first, as its own artifact, and the entry is rewritten to that artifact's digest ([§6.1](#61-a-local-mixin-publishes-with-the-document-that-names-it)). A digest-pinned entry publishes untouched. |
 | `README.md` | A `README.md` beside the document is packed into a `text/markdown` layer of this artifact ([§7.2](#72-the-readme-layer)). No file, no layer; the document itself never carries it. |
 
 Each transform pins something that means one thing on the author's machine and
-another on the consumer's: a directory that exists only beside the author's file,
-a version that moves next week, and a document only the author has a copy of. Two
-surfaces stay unresolved, on purpose:
+another on the consumer's: a directory or a component file that exists only beside
+the author's document, a version that moves next week, and a document only the
+author has a copy of. Two surfaces stay unresolved, on purpose:
 
 - **A `%` share stays a share.** It resolves against the consumer's host, which
   is the entire point of writing one ([§3.1.5](#315-resources)).
@@ -2213,6 +2575,14 @@ surfaces stay unresolved, on purpose:
   read ([§3.1.11](#3111-filesets)).
 
 `workdir`, every volume, every fileset, and every other field publish unchanged.
+
+**`lns push` refuses a connector whose `code` method declares `exec`.** The push
+itself would succeed and produce an artifact **no machine may install**
+([§3.2.6](#326-kind-code)) — a published thing that is useless to every consumer of
+it. That is the same principle [§7.1](#71-connectors) applies one stage later, where
+a document that installs should be one that can be granted: each stage refuses what
+the next could only reject. The refusal at push says so, rather than leaving an
+author to discover it from a consumer.
 
 `lns push --dry-run` performs everything short of the upload and prints the
 digests that would publish, for every artifact the push would create. It stays
@@ -2280,10 +2650,13 @@ blob, and the media type names the kind:
 
 Every kind carries one layer per `filesets[].path` entry it declares
 ([§3.1.11](#3111-filesets)), plus at most one README layer
-([§7.2](#72-the-readme-layer)). Nothing else is addressable on its own, so one
+([§7.2](#72-the-readme-layer)). A `connector` carries one more: a layer per
+`methods[].auth.component` a `code` method declares, media type
+`application/vnd.lns.component.v1`, packed by the same publish-time transform
+([§6](#6-publish-time-transforms)). Nothing else is addressable on its own, so one
 reference names one complete, digest-pinned thing. A consumer correlates fileset
-layers by their media type, in manifest order, and MUST leave out any layer whose
-media type it does not consume rather than guess at it.
+and component layers by their media type, in manifest order, and MUST leave out any
+layer whose media type it does not consume rather than guess at it.
 
 A release is a reference, not a field: `lns push ghcr.io/acme/reviewer:1.4.0`
 makes that tag the release, and push records it as the artifact's
@@ -2311,15 +2684,40 @@ method again to that run: at once where the run is running, by the same blocks
 [§3.2.4](#324-installing-connecting-and-applying) lets a grant apply mid-run, and
 at its next start otherwise. It asks for a connect when a request needs a value.
 
+**A pulled connector whose `code` method declares `exec` is refused at install**
+([§3.2.6](#326-kind-code)). Only one installed from a local path may declare it.
+The refusal is at install rather than at grant, because install is where the
+machine decides what it is willing to hold, and a document that installs should be
+one that can be granted.
+
+**What a component does is recorded in the durable ledger**, not in a run's chain.
+An outbound call it makes, a program it starts, and every renewal lns schedules all
+happen on the machine's behalf, outside any run. That is not the reason a connect
+is absent from the timeline — a connect is standing state, which `lns connector
+list` shows at any time, and [cli-spec §3.6](cli-spec.md#36-lns-audit) states the
+rule that follows from that. Those three leave no state behind, so the entry is the
+only record there will ever be. `lns audit`
+merges the ledger with each run's chain, so a renewal that ran while nobody watched
+is still readable afterwards.
+
 Five things live per machine, none of them in any document:
 
 | What | Keyed by | Scope |
 |---|---|---|
-| The installed set — each connector's document, stored verbatim at the digest it came from | name | The machine |
-| Each **connection** — its label, the method `name` that produced it, the authority its `auth` reported, and the values it returned | name, then connection | The machine |
+| The installed set — each connector's document **and the bytes of every file packed beside it**: every `component` and every `filesets[].path` directory, stored verbatim at the digest computed over all of them | name | The machine |
+| Each **connection** — its label, the method `name` that produced it, the authority its `auth` reported as lns rendered it, the values it returned, and the expiry the mechanism reported, where it reported one | name, then connection | The machine |
 | Which method a run granted, the connection behind it where the method authenticates, and the authority it consented to | run, then name, digest | The run |
 | Which connectors a run declined | run, then name | The run |
 | A grant **reserved** for a name no run holds yet | run name, then connector, digest | That name, until a run takes it |
+
+**The first row's digest is computed over everything captured**, not over the
+document alone. For a pulled connector it is the artifact's, which already covers
+every layer. For a local install it is computed over the document and every file
+captured with it, so the two are exact analogues: in both cases changing any
+captured byte changes the digest. That is what makes a reinstall after an edit a
+different digest, and so a fresh offer
+([§3.2.4](#324-installing-connecting-and-applying)) rather than a swapped component
+running under a grant nobody gave again ([§3.2.6](#326-kind-code)).
 
 The second row admits many connections per connector, including many of one method
 ([§3.2.4](#324-installing-connecting-and-applying)). The third names the method a
@@ -2348,8 +2746,8 @@ changed `egress` is offered again — the user is asked to consent to the new by
 Re-consenting is cheap; signing in again is not, and making an update log the
 user out would teach them to avoid updates.
 
-Storing the document **verbatim, at its digest**, is what makes that possible: it
-is what a grant binds to.
+Storing the document and every byte captured with it **verbatim, at their digest**,
+is what makes that possible: it is what a grant binds to.
 
 Three rules follow from a connector arriving over the network:
 

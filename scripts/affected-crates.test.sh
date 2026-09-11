@@ -218,6 +218,41 @@ test_crate_makefile() {
     assert_eq "crate_makefile" "__FULL__" "$actual"
 }
 
+# Test 12: Touch a shipped connector's document → __FULL__, because lns-artifact
+# compiles connectors/github/lns.yaml into a test with include_str!.
+test_shipped_connector() {
+    dir=$(mktmp)
+    init_fixture "$dir"
+    mkdir -p connectors/github
+    echo "name: github" > connectors/github/lns.yaml
+    git add -A && git commit -q -m "add shipped connector"
+    actual=$("$SCRIPT" HEAD~1 2>/dev/null)
+    assert_eq "shipped_connector" "__FULL__" "$actual"
+}
+
+# Test 13: Touch a shipped connector's component → __FULL__, because
+# lns-service's wasm suite runs those bytes.
+test_shipped_component() {
+    dir=$(mktmp)
+    init_fixture "$dir"
+    mkdir -p connectors/github
+    echo "wasm" > connectors/github/sign-in.wasm
+    git add -A && git commit -q -m "add shipped component"
+    actual=$("$SCRIPT" HEAD~1 2>/dev/null)
+    assert_eq "shipped_component" "__FULL__" "$actual"
+}
+
+# Test 14: A shipped connector's README is prose → __NONE__.
+test_shipped_connector_readme() {
+    dir=$(mktmp)
+    init_fixture "$dir"
+    mkdir -p connectors/github
+    echo "# github" > connectors/github/README.md
+    git add -A && git commit -q -m "add shipped connector readme"
+    actual=$("$SCRIPT" HEAD~1 2>/dev/null)
+    assert_eq "shipped_connector_readme" "__NONE__" "$actual"
+}
+
 test_direct_touch
 test_docs_only
 test_github_ci
@@ -229,6 +264,9 @@ test_bogus_ref
 test_mixed_docs_and_code
 test_root_makefile
 test_crate_makefile
+test_shipped_connector
+test_shipped_component
+test_shipped_connector_readme
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

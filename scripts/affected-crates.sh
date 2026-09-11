@@ -54,6 +54,8 @@ while IFS= read -r path; do
         crates/*/Makefile)             full_triggered=1; break ;;
         crates/coverage-strip-ast/*)   full_triggered=1; break ;; # AST stripper post-processes all lcov output
         crates/e2e-tests/*)            full_triggered=1; break ;;
+        connectors/*/lns.yaml)         full_triggered=1; break ;; # lns-artifact compiles a shipped connector's document in with include_str!
+        connectors/*/*.wasm)           full_triggered=1; break ;; # lns-service's wasm suite runs the shipped component
     esac
 done <<EOF
 $changed

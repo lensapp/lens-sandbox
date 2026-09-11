@@ -14,6 +14,12 @@ pub const FILESET_LAYER_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.t
 /// The media type of the packed `README.md` layer a registry UI renders (`docs/sandbox-spec.md` §7.2).
 pub const README_LAYER_MEDIA_TYPE: &str = "text/markdown";
 
+/// The media type of the packed component a `code` method connects with (`docs/sandbox-spec.md` §7).
+pub const COMPONENT_LAYER_MEDIA_TYPE: &str = "application/vnd.lns.component.v1";
+
+/// Maximum size of a packed component. A mechanism is a token exchange, not a program the user runs.
+pub const MAX_COMPONENT_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Maximum size of a packed `README.md` layer.
 pub const MAX_README_BYTES: u64 = 1024 * 1024;
 
@@ -63,6 +69,13 @@ impl BuiltArtifact {
             .iter()
             .find(|blob| blob.media_type == README_LAYER_MEDIA_TYPE)
     }
+
+    /// The packed components, in the order the document declares the `code` methods that connect with them.
+    pub fn component_layers(&self) -> impl Iterator<Item = &Blob> {
+        self.blobs
+            .iter()
+            .filter(|blob| blob.media_type == COMPONENT_LAYER_MEDIA_TYPE)
+    }
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
@@ -74,6 +87,7 @@ pub fn build_artifact(
     doc: &[u8],
     filesets: &[Vec<FileEntry>],
     readme: Option<&[u8]>,
+    components: &[Vec<u8>],
 ) -> Result<BuiltArtifact> {
     if let Err(problems) = crate::validate::validate(doc) {
         bail!(
@@ -92,6 +106,13 @@ pub fn build_artifact(
         );
     }
     if kind == spec::Kind::Connector {
+        let declared = crate::connector::components(&crate::connector::parse(doc)?.spec).len();
+        if declared != components.len() {
+            bail!(
+                "this connector declares {declared} component(s) but {} were packed; an artifact carries one layer per `code` method",
+                components.len()
+            );
+        }
         crate::connector::parse_with_path_files(doc, &files_by_path(&packing, filesets))?;
     }
 
@@ -113,6 +134,22 @@ pub fn build_artifact(
             "size": blob.data.len(),
         }));
         blobs.push(blob);
+    }
+    for component in components {
+        if component.len() as u64 > MAX_COMPONENT_BYTES {
+            bail!("this connector's component exceeds the {MAX_COMPONENT_BYTES}-byte limit");
+        }
+        let digest = sha256_digest(component);
+        layers.push(json!({
+            "mediaType": COMPONENT_LAYER_MEDIA_TYPE,
+            "digest": digest,
+            "size": component.len(),
+        }));
+        blobs.push(Blob {
+            digest,
+            media_type: COMPONENT_LAYER_MEDIA_TYPE.to_string(),
+            data: component.clone(),
+        });
     }
     if let Some(readme) = readme {
         if readme.len() as u64 > MAX_README_BYTES {
@@ -269,12 +306,12 @@ mod tests {
 
     /// Every artifact in this module is built from a document plus the directories its `path` filesets pack; most fixtures declare none.
     fn build(doc: &[u8]) -> Result<BuiltArtifact> {
-        build_artifact(doc, &[], None)
+        build_artifact(doc, &[], None, &[])
     }
 
     #[test]
     fn a_readme_beside_the_document_becomes_a_text_markdown_layer() {
-        let built = build_artifact(&sandbox(), &[], Some(b"# hermes")).unwrap();
+        let built = build_artifact(&sandbox(), &[], Some(b"# hermes"), &[]).unwrap();
         let layer = built
             .readme_layer()
             .expect("the README travels with the artifact");
@@ -301,7 +338,7 @@ mod tests {
     #[test]
     fn a_readme_change_changes_the_artifact_digest() {
         let with = |readme: &[u8]| {
-            build_artifact(&sandbox(), &[], Some(readme))
+            build_artifact(&sandbox(), &[], Some(readme), &[])
                 .unwrap()
                 .manifest_digest
         };
@@ -323,6 +360,7 @@ mod tests {
             &with_path_filesets(&["/opt/skills"]),
             &[vec![entry("a.md", "x")]],
             Some(b"# docs"),
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -345,7 +383,7 @@ mod tests {
 
     #[test]
     fn a_readme_alone_needs_no_empty_layer() {
-        let built = build_artifact(&sandbox(), &[], Some(b"# hermes")).unwrap();
+        let built = build_artifact(&sandbox(), &[], Some(b"# hermes"), &[]).unwrap();
         assert!(
             !built
                 .blobs
@@ -358,7 +396,7 @@ mod tests {
     #[test]
     fn an_oversized_readme_refuses_the_build() {
         let oversized = vec![b'x'; MAX_README_BYTES as usize + 1];
-        let err = build_artifact(&sandbox(), &[], Some(&oversized)).unwrap_err();
+        let err = build_artifact(&sandbox(), &[], Some(&oversized), &[]).unwrap_err();
         assert!(
             format!("{err:#}").contains("README.md exceeds"),
             "a registry-rendered document has no business being megabytes; got: {err:#}"
@@ -518,6 +556,48 @@ mod tests {
         br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"path":"./some-provider","guestPath":"~/.some-provider"}]}]}}"#.to_vec()
     }
 
+    fn connector_connecting_with_code() -> Vec<u8> {
+        br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"sign-in","auth":{"kind":"code","component":"./sign-in.wasm","outputs":["access_token"]},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","field":"access_token"}]}]}}"#.to_vec()
+    }
+
+    #[test]
+    fn build_artifact_refuses_a_component_count_the_document_does_not_declare() {
+        // A component is found by its position among the code methods, so an artifact carrying the wrong number would bind a method to nothing.
+        let err = build_artifact(&connector_connecting_with_code(), &[], None, &[]).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("declares 1 component(s) but 0 were packed"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_artifact_refuses_a_component_larger_than_one_may_be() {
+        let oversized = vec![0u8; MAX_COMPONENT_BYTES as usize + 1];
+
+        let err =
+            build_artifact(&connector_connecting_with_code(), &[], None, &[oversized]).unwrap_err();
+
+        assert!(format!("{err:#}").contains("exceeds the"), "got: {err:#}");
+    }
+
+    #[test]
+    fn build_artifact_packs_the_component_a_code_method_connects_with() {
+        let built = build_artifact(
+            &connector_connecting_with_code(),
+            &[],
+            None,
+            &[b"the mechanism".to_vec()],
+        )
+        .expect("a connector carrying one component per code method");
+
+        let packed: Vec<&[u8]> = built
+            .component_layers()
+            .map(|layer| layer.data.as_slice())
+            .collect();
+        assert_eq!(packed, [b"the mechanism".as_slice()]);
+    }
+
     #[test]
     fn build_artifact_refuses_a_packed_connector_secret_carrying_no_declared_placeholder() {
         let err = build_artifact(
@@ -527,6 +607,7 @@ mod tests {
                 r#"{"token":"sk-live-real"}"#,
             )]],
             None,
+            &[],
         )
         .unwrap_err();
         assert!(
@@ -544,6 +625,7 @@ mod tests {
                 r#"{"token":"some_LNSPLACEHOLDER0000000000"}"#,
             )]],
             None,
+            &[],
         )
         .expect("a connector's fileset exists to write exactly this file");
     }
@@ -558,6 +640,7 @@ mod tests {
                 &"a".repeat(crate::connector::MAX_METHOD_FILESET_BYTES + 1),
             )]],
             None,
+            &[],
         )
         .unwrap_err();
 
@@ -580,6 +663,7 @@ mod tests {
                 mode: 0o600,
             }]],
             None,
+            &[],
         )
         .expect("a directory of exactly the ceiling still builds");
     }
@@ -609,6 +693,7 @@ mod tests {
                 entry("nested/tools.md", "tools"),
             ]],
             None,
+            &[],
         )
         .expect("a declared path fileset packs into this artifact");
         assert_eq!(built.artifact_type, "application/vnd.lns.sandbox.v1+json");
@@ -640,6 +725,7 @@ mod tests {
             &with_path_filesets(&["/first", "/second"]),
             &[vec![entry("a.md", "first")], vec![entry("b.md", "second")]],
             None,
+            &[],
         )
         .unwrap();
         let layers: Vec<Vec<String>> = built
@@ -662,6 +748,7 @@ mod tests {
                 entry("notes.md", "x"),
             ]],
             None,
+            &[],
         )
         .unwrap();
         let modes = unpacked(built.fileset_layers().next().expect("a packed layer"));
@@ -676,7 +763,7 @@ mod tests {
     fn one_directory_packs_to_one_layer_digest_however_it_is_ordered_or_republished() {
         let doc = with_path_filesets(&["/x"]);
         let digest = |entries: Vec<FileEntry>| {
-            build_artifact(&doc, &[entries], None)
+            build_artifact(&doc, &[entries], None, &[])
                 .unwrap()
                 .fileset_layers()
                 .next()
@@ -702,6 +789,7 @@ mod tests {
             &with_path_filesets(&["/x", "/y"]),
             &[vec![entry("a", "1")]],
             None,
+            &[],
         )
         .unwrap_err();
         assert!(
@@ -718,7 +806,7 @@ mod tests {
     #[test]
     fn a_mixin_carries_its_own_packed_filesets() {
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"skills","spec":{"filesets":[{"path":"./skills","guestPath":"/skills"}]}}"#;
-        let built = build_artifact(doc, &[vec![entry("a.md", "shared")]], None)
+        let built = build_artifact(doc, &[vec![entry("a.md", "shared")]], None, &[])
             .expect("sharing one directory across sandboxes is publishing a mixin that carries it");
         assert_eq!(built.fileset_layers().count(), 1);
     }

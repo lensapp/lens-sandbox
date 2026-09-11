@@ -7,7 +7,10 @@ use lns_policy::{FilePolicyStore, Policy, PolicyStore};
 use lns_service::approval_flow::{
     entries::{Entry, EntryStore, FileEntryStore},
     protocol::{GrantedPayload, HostFrame, RequestPending, Treatment},
-    session::{ApprovalSession, ConnectionChoice, ConnectorPort, Notifier, PendingPrompt},
+    session::{
+        ApprovalSession, ConnectRound, ConnectRoundPort, ConnectionChoice, ConnectorPort, Notifier,
+        PendingPrompt,
+    },
 };
 use lns_service::ledger::LedgerRecorder;
 use tempfile::TempDir;
@@ -82,7 +85,11 @@ impl PolicyStore for FlakyStore {
 }
 
 /// A connector store that says yes and opens nothing, so a grant can be taken without a real connector on the machine.
-struct GrantingPort;
+#[derive(Default)]
+pub struct GrantingPort {
+    /// The connection each grant named, because a grant naming none injects no credential.
+    pub granted_through: Mutex<Vec<Option<String>>>,
+}
 
 impl ConnectorPort for GrantingPort {
     fn connect(
@@ -100,8 +107,12 @@ impl ConnectorPort for GrantingPort {
         name: &str,
         _: &str,
         _: &str,
-        _: Option<&str>,
+        connection: Option<&str>,
     ) -> Result<GrantedPayload, String> {
+        self.granted_through
+            .lock()
+            .expect("granted lock")
+            .push(connection.map(str::to_string));
         // Opens one destination named after the connector, so a scenario can see that a grant is still in force.
         let mut egress = Policy::default();
         egress.add_rule(lns_policy::RouteRule::allow_host(format!(
@@ -120,6 +131,105 @@ impl ConnectorPort for GrantingPort {
     }
 }
 
+/// What a scripted mechanism answers one round with, so a scenario says which shape the card is driving.
+#[derive(Debug, Clone)]
+pub enum Scripted {
+    Asks {
+        message: String,
+        fields: Vec<String>,
+    },
+    Connected(String),
+    Failed(String),
+}
+
+/// A mechanism driven from a script, because what a `code` method asks for is its own decision and no document states it.
+#[derive(Default)]
+pub struct ScriptedRounds {
+    script: Mutex<std::collections::VecDeque<Scripted>>,
+    /// Handles this mechanism would still resume. One it has run out of is minted but never entered.
+    open: Mutex<std::collections::HashSet<String>>,
+    pub answered: Mutex<Vec<std::collections::BTreeMap<String, String>>>,
+    pub abandoned: Mutex<Vec<String>>,
+    minted: Mutex<usize>,
+    /// Set before a round is opened to mint a handle this mechanism will not resume, which is what an exchange that ran out looks like.
+    runs_out: Mutex<bool>,
+}
+
+impl ScriptedRounds {
+    pub fn push(&self, step: Scripted) {
+        self.script.lock().expect("script lock").push_back(step);
+    }
+
+    pub fn run_out_next(&self) {
+        *self.runs_out.lock().expect("runs out lock") = true;
+    }
+
+    fn next(&self) -> Result<ConnectRound, String> {
+        let step = self
+            .script
+            .lock()
+            .expect("script lock")
+            .pop_front()
+            .expect("the card asked for a round the script does not have");
+        Ok(match step {
+            Scripted::Asks { message, fields } => {
+                let mut minted = self.minted.lock().expect("minted lock");
+                *minted += 1;
+                let session = format!("round-{minted}");
+                if std::mem::take(&mut *self.runs_out.lock().expect("runs out lock")) {
+                    // Minted but never entered: the next answer finds nothing to resume, exactly as an exchange past `sessionSeconds` does.
+                } else {
+                    self.open.lock().expect("open lock").insert(session.clone());
+                }
+                ConnectRound::Asks {
+                    session,
+                    message,
+                    from_code: true,
+                    fields: fields
+                        .into_iter()
+                        .map(|name| lns_ipc::ConnectorFieldView {
+                            label: format!("the {name}"),
+                            name,
+                            secret: true,
+                        })
+                        .collect(),
+                }
+            }
+            Scripted::Connected(connection) => ConnectRound::Connected {
+                connection,
+                invalidated: Vec::new(),
+            },
+            Scripted::Failed(reason) => ConnectRound::Failed(reason),
+        })
+    }
+}
+
+impl ConnectRoundPort for ScriptedRounds {
+    fn begin_connect(&self, _: &str, _: &str, _: &str) -> Result<ConnectRound, String> {
+        self.next()
+    }
+
+    fn answer_connect(
+        &self,
+        session: &str,
+        values: lns_ipc::SecretValues,
+    ) -> Result<ConnectRound, String> {
+        if !self.open.lock().expect("open lock").remove(session) {
+            return Err("that connect is no longer open; run it again".to_string());
+        }
+        self.answered.lock().expect("answered lock").push(values.0);
+        self.next()
+    }
+
+    fn abandon_connect(&self, session: &str) {
+        self.open.lock().expect("open lock").remove(session);
+        self.abandoned
+            .lock()
+            .expect("abandoned lock")
+            .push(session.to_string());
+    }
+}
+
 pub struct ApprovalRig {
     pub session: Arc<ApprovalSession>,
     pub notifier: Arc<TestNotifier>,
@@ -129,6 +239,8 @@ pub struct ApprovalRig {
     pub entries_path: PathBuf,
     pub timeout: Duration,
     pub ledger: Arc<RigRecorder>,
+    pub rounds: Arc<ScriptedRounds>,
+    pub granting: Arc<GrantingPort>,
     _tempdir: TempDir,
 }
 
@@ -168,7 +280,8 @@ impl ApprovalRig {
 
     /// A run that holds an offer for `host`, which is what raises the connector card.
     pub fn offer_connector(&self, name: &str, host: &str) {
-        self.session.set_connector_port(Arc::new(GrantingPort));
+        self.session.set_connector_port(self.granting.clone());
+        self.session.set_connect_round_port(self.rounds.clone());
         self.session.hold_for_offers(vec![ConnectorView {
             name: name.to_string(),
             digest: "sha256:test".into(),
@@ -242,6 +355,8 @@ impl ApprovalRig {
             entries_path,
             timeout,
             ledger,
+            rounds: Arc::new(ScriptedRounds::default()),
+            granting: Arc::new(GrantingPort::default()),
             _tempdir: dir,
         }
     }

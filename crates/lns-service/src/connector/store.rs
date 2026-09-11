@@ -34,9 +34,12 @@ pub trait InstalledSet: Send + Sync {
         digest: &str,
         document: &[u8],
         filesets: &[Vec<u8>],
+        components: &[Vec<u8>],
     ) -> io::Result<()>;
     /// One packed fileset by its index in the document's `path` entries.
     fn fileset_layer(&self, name: &str, index: usize) -> io::Result<Vec<u8>>;
+    /// One component by its index among the document's `code` methods.
+    fn component(&self, name: &str, index: usize) -> io::Result<Vec<u8>>;
     fn remove(&self, name: &str) -> io::Result<bool>;
 }
 
@@ -52,6 +55,12 @@ impl Authority {
     }
 }
 
+/// What one authentication did. The grants it dropped are durable the moment they are dropped, so they are reported whether or not the values behind them stored.
+pub struct Recorded {
+    pub invalidated: Vec<GrantHolder>,
+    pub stored: io::Result<()>,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Connection {
     pub method: String,
@@ -59,6 +68,17 @@ pub struct Connection {
     pub authority: Authority,
     #[serde(default)]
     pub values: BTreeMap<String, String>,
+    /// When the mechanism said these values run out, where it said so (§7.1). `None` is a value lns has no reason to believe has ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_millis: Option<u64>,
+}
+
+impl Connection {
+    /// Whether the values have run out. A connection that has is held rather than armed, so the next request raises the connect prompt instead of carrying a value the destination will reject (§4.1).
+    pub fn has_run_out(&self, now_millis: u64) -> bool {
+        self.expires_at_millis
+            .is_some_and(|expiry| expiry <= now_millis)
+    }
 }
 
 impl std::fmt::Debug for Connection {
@@ -68,6 +88,7 @@ impl std::fmt::Debug for Connection {
             .field("method", &self.method)
             .field("authority", &self.authority)
             .field("values", &format_args!("<{} redacted>", self.values.len()))
+            .field("expires_at_millis", &self.expires_at_millis)
             .finish()
     }
 }
@@ -102,6 +123,33 @@ impl RunDecision {
 /// What one connector may keep, over every fileset of every method it declares. §3.2.3 caps a method, and nothing caps how many methods a document declares.
 pub const MAX_CONNECTOR_FILESET_BYTES: u64 =
     4 * lns_artifact::connector::MAX_METHOD_FILESET_BYTES as u64;
+
+/// What one connector's artifact may transfer, over every layer kind it carries. Wider than the fileset allowance because a component travels beside the filesets, and wider than one component so an oversized one is refused by name rather than by the budget.
+pub const MAX_CONNECTOR_TRANSFER_BYTES: u64 =
+    MAX_CONNECTOR_FILESET_BYTES + lns_artifact::build::MAX_COMPONENT_BYTES;
+
+/// A component is found by its position among the `code` methods, so a count that does not match would bind a method to another method's implementation.
+fn refuse_a_component_count_the_document_does_not_declare(
+    candidate: &ConnectorDefinition,
+    components: &[Vec<u8>],
+) -> Result<()> {
+    let declared = lns_artifact::connector::components(&candidate.spec).len();
+    if declared != components.len() {
+        bail!(
+            "this connector declares {declared} component(s) but {} came with it",
+            components.len()
+        );
+    }
+    for component in components {
+        if component.len() as u64 > lns_artifact::build::MAX_COMPONENT_BYTES {
+            bail!(
+                "this connector brings a component larger than the {}-byte limit",
+                lns_artifact::build::MAX_COMPONENT_BYTES
+            );
+        }
+    }
+    Ok(())
+}
 
 /// The document read against the directories its `path` entries pack, so §3.2.3's byte count and §3.2.5's content check hold at install exactly as they held at push.
 fn read_with_its_filesets(document: &[u8], filesets: &[Vec<u8>]) -> Result<ConnectorDefinition> {
@@ -246,6 +294,7 @@ fn names_connection_with_other_authority(
 /// Held across every load-mutate-save. Process-wide rather than per store, because each entry point opens a store of its own over the same three files, so a lock one instance owned would serialize nothing.
 static WRITE: Mutex<()> = Mutex::new(());
 
+#[derive(Clone, Copy)]
 pub struct ConnectorStore<'a> {
     installed: &'a dyn InstalledSet,
     values: &'a dyn DecisionStore<Connection>,
@@ -288,8 +337,10 @@ impl<'a> ConnectorStore<'a> {
         digest: &str,
         document: &[u8],
         filesets: &[Vec<u8>],
+        components: &[Vec<u8>],
     ) -> Result<ConnectorDefinition> {
         let candidate = read_with_its_filesets(document, filesets)?;
+        refuse_a_component_count_the_document_does_not_declare(&candidate, components)?;
         let _guard = self.lock();
         let (installed, unreadable) = self.installed_definitions()?;
         // An unreadable document hides its own `serves` and variables, so a conflict could not be decided and would surface as an ambiguous offer at some later launch instead.
@@ -304,7 +355,7 @@ impl<'a> ConnectorStore<'a> {
             bail!("{conflict}");
         }
         self.installed
-            .put(&candidate.name, digest, document, filesets)
+            .put(&candidate.name, digest, document, filesets, components)
             .map_err(anyhow::Error::from)?;
         Ok(candidate)
     }
@@ -312,6 +363,11 @@ impl<'a> ConnectorStore<'a> {
     /// One packed fileset of an installed connector, by its index in the document's `path` entries.
     pub fn fileset_layer(&self, name: &str, index: usize) -> io::Result<Vec<u8>> {
         self.installed.fileset_layer(name, index)
+    }
+
+    /// One component of an installed connector, by its index among the document's `code` methods.
+    pub fn component(&self, name: &str, index: usize) -> io::Result<Vec<u8>> {
+        self.installed.component(name, index)
     }
 
     /// Removes every connection the connector held, then the connector, and leaves what runs granted untouched (§7.1).
@@ -343,7 +399,7 @@ impl<'a> ConnectorStore<'a> {
         name: &str,
         label: &str,
         connection: Connection,
-    ) -> io::Result<Vec<GrantHolder>> {
+    ) -> io::Result<Recorded> {
         let _guard = self.lock();
         let mut grants = self.grants.load()?;
         let invalidated = grants_invalidated_by(&grants, name, label, &connection.authority);
@@ -354,10 +410,15 @@ impl<'a> ConnectorStore<'a> {
             self.grants.save(&grants)?;
         }
 
-        let mut values = self.values.load()?;
-        values.insert(connection_key(name, label), connection);
-        self.values.save(&values)?;
-        Ok(invalidated)
+        // The grants are already dropped, so the caller is told which even where the values behind them will not store.
+        let stored = self.values.load().and_then(|mut values| {
+            values.insert(connection_key(name, label), connection);
+            self.values.save(&values)
+        });
+        Ok(Recorded {
+            invalidated,
+            stored,
+        })
     }
 
     /// Drops one connection, or every connection of a connector when `label` is absent. The connector stays installed and grants naming it stay (§3.3 `disconnect`).
@@ -578,6 +639,7 @@ mod tests {
         entries: StdMutex<Vec<Installed>>,
         fail_put: StdMutex<bool>,
         layers: StdMutex<std::collections::BTreeMap<String, Vec<Vec<u8>>>>,
+        components: StdMutex<Vec<Vec<u8>>>,
     }
 
     impl InstalledSet for FakeSet {
@@ -591,7 +653,9 @@ mod tests {
             digest: &str,
             document: &[u8],
             filesets: &[Vec<u8>],
+            components: &[Vec<u8>],
         ) -> io::Result<()> {
+            *self.components.lock().unwrap() = components.to_vec();
             if *self.fail_put.lock().unwrap() {
                 return Err(io::Error::other("disk full"));
             }
@@ -617,6 +681,15 @@ mod tests {
                 .and_then(|layers| layers.get(index))
                 .cloned()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such fileset layer"))
+        }
+
+        fn component(&self, _name: &str, index: usize) -> io::Result<Vec<u8>> {
+            self.components
+                .lock()
+                .unwrap()
+                .get(index)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("no such component"))
         }
 
         fn remove(&self, name: &str) -> io::Result<bool> {
@@ -674,7 +747,7 @@ mod tests {
             })
             .collect();
         let doc = br#"{"apiVersion":"lns.run/v1","kind":"mixin","name":"seed","spec":{"filesets":[{"path":"./seed","guestPath":"/seed"}]}}"#;
-        lns_artifact::build::build_artifact(doc, &[entries], None)
+        lns_artifact::build::build_artifact(doc, &[entries], None, &[])
             .expect("a packable directory")
             .fileset_layers()
             .next()
@@ -693,6 +766,7 @@ mod tests {
                 "sha256:abc",
                 &packing("some-provider", "./seed"),
                 std::slice::from_ref(&layer),
+                &[],
             )
             .expect("a connector packing one directory");
 
@@ -718,6 +792,7 @@ mod tests {
                 "sha256:abc",
                 &packing("some-provider", "./seed"),
                 &[oversized],
+                &[],
             )
             .unwrap_err();
 
@@ -757,7 +832,7 @@ mod tests {
 
         let err = rig
             .store()
-            .install("sha256:abc", &doc, &layers)
+            .install("sha256:abc", &doc, &layers, &[])
             .unwrap_err();
 
         assert!(
@@ -798,7 +873,7 @@ mod tests {
 
         let err = rig
             .store()
-            .install("sha256:abc", &doc, &layers)
+            .install("sha256:abc", &doc, &layers, &[])
             .unwrap_err();
 
         assert!(
@@ -830,7 +905,7 @@ mod tests {
 
         let err = rig
             .store()
-            .install("sha256:abc", &doc, &[smuggled, benign])
+            .install("sha256:abc", &doc, &[smuggled, benign], &[])
             .unwrap_err();
 
         assert!(
@@ -845,10 +920,93 @@ mod tests {
         let rig = Rig::new();
         let err = rig
             .store()
-            .install("sha256:abc", &packing("some-provider", "./seed"), &[])
+            .install("sha256:abc", &packing("some-provider", "./seed"), &[], &[])
             .unwrap_err();
         assert!(
             format!("{err:#}").contains("declares 1 packed fileset(s) but 0 came with it"),
+            "got: {err:#}"
+        );
+    }
+
+    fn connecting_with_code(methods: usize) -> Vec<u8> {
+        let methods: Vec<serde_json::Value> = (0..methods)
+            .map(|n| {
+                serde_json::json!({
+                    "name": format!("sign-in-{n}"),
+                    "auth": {
+                        "kind": "code",
+                        "component": format!("./sign-in-{n}.wasm"),
+                        "outputs": ["access_token"],
+                    },
+                    "credentials": [{
+                        "envVar": format!("SOME_TOKEN_{n}"),
+                        "placeholder": format!("some_LNSPLACEHOLDER000000000{n}"),
+                        "field": "access_token",
+                    }],
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": { "serves": ["api.some-provider.example"], "methods": methods },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn installing_hands_the_components_to_the_set_in_declaration_order() {
+        // A component is found by its position among the code methods, so the order it is kept in is the order it was declared in.
+        let rig = Rig::new();
+
+        rig.store()
+            .install(
+                "sha256:abc",
+                &connecting_with_code(2),
+                &[],
+                &[b"first".to_vec(), b"second".to_vec()],
+            )
+            .expect("a connector carrying one component per code method");
+
+        assert_eq!(rig.set.component("some-provider", 0).unwrap(), b"first");
+        assert_eq!(rig.set.component("some-provider", 1).unwrap(), b"second");
+    }
+
+    #[test]
+    fn installing_refuses_a_component_count_the_document_does_not_declare() {
+        // A component is found by its position among the code methods, so a mismatched count would bind a method to another method's implementation.
+        let rig = Rig::new();
+
+        let err = rig
+            .store()
+            .install(
+                "sha256:abc",
+                &connecting_with_code(2),
+                &[],
+                &[b"only one".to_vec()],
+            )
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("declares 2 component(s) but 1 came with it"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn installing_refuses_a_component_larger_than_one_may_be() {
+        let rig = Rig::new();
+        let oversized = vec![0u8; lns_artifact::build::MAX_COMPONENT_BYTES as usize + 1];
+
+        let err = rig
+            .store()
+            .install("sha256:abc", &connecting_with_code(1), &[], &[oversized])
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("larger than the"),
             "got: {err:#}"
         );
     }
@@ -861,7 +1019,12 @@ mod tests {
 
         let err = rig
             .store()
-            .install("sha256:abc", &packing("some-provider", "./seed"), &[layer])
+            .install(
+                "sha256:abc",
+                &packing("some-provider", "./seed"),
+                &[layer],
+                &[],
+            )
             .unwrap_err();
 
         assert!(
@@ -896,6 +1059,7 @@ mod tests {
             method: "token".to_string(),
             authority,
             values: [("SOME_TOKEN".to_string(), "real-secret".to_string())].into(),
+            expires_at_millis: None,
         }
     }
 
@@ -917,6 +1081,7 @@ mod tests {
                 "sha256:abc",
                 &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
                 &[],
+                &[],
             )
             .unwrap();
         assert_eq!(installed.name, "some-provider");
@@ -930,7 +1095,7 @@ mod tests {
         let rig = Rig::new();
         assert!(
             rig.store()
-                .install("sha256:abc", b"not a document", &[])
+                .install("sha256:abc", b"not a document", &[], &[])
                 .is_err()
         );
         assert!(rig.store().installed().unwrap().is_empty());
@@ -945,12 +1110,14 @@ mod tests {
                 "sha256:abc",
                 &document("some-provider", "*.some-provider.example", "SOME_TOKEN"),
                 &[],
+                &[],
             )
             .unwrap();
         let err = store
             .install(
                 "sha256:def",
                 &document("other-provider", "api.some-provider.example", "OTHER_TOKEN"),
+                &[],
                 &[],
             )
             .unwrap_err()
@@ -964,8 +1131,8 @@ mod tests {
         let rig = Rig::new();
         let store = rig.store();
         let doc = document("some-provider", "api.some-provider.example", "SOME_TOKEN");
-        store.install("sha256:old", &doc, &[]).unwrap();
-        store.install("sha256:new", &doc, &[]).unwrap();
+        store.install("sha256:old", &doc, &[], &[]).unwrap();
+        store.install("sha256:new", &doc, &[], &[]).unwrap();
         let installed = store.installed().unwrap();
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].digest, "sha256:new");
@@ -981,6 +1148,7 @@ mod tests {
                     "sha256:abc",
                     &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
                     &[],
+                    &[],
                 )
                 .is_err()
         );
@@ -991,13 +1159,14 @@ mod tests {
         // Its `serves` and its variables are invisible while it cannot be parsed, so an overlapping connector would install cleanly and the ambiguous offer would surface at some later launch instead.
         let rig = Rig::new();
         rig.set
-            .put("mystery", "sha256:xyz", b"not a document", &[])
+            .put("mystery", "sha256:xyz", b"not a document", &[], &[])
             .unwrap();
         let err = rig
             .store()
             .install(
                 "sha256:abc",
                 &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                &[],
                 &[],
             )
             .unwrap_err()
@@ -1010,7 +1179,7 @@ mod tests {
         // Refusing the install must not brick the machine: removing the offender needs no parse.
         let rig = Rig::new();
         rig.set
-            .put("mystery", "sha256:xyz", b"not a document", &[])
+            .put("mystery", "sha256:xyz", b"not a document", &[], &[])
             .unwrap();
         assert!(rig.store().uninstall("mystery").unwrap());
         assert!(
@@ -1018,6 +1187,7 @@ mod tests {
                 .install(
                     "sha256:abc",
                     &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                    &[],
                     &[],
                 )
                 .is_ok()
@@ -1033,6 +1203,7 @@ mod tests {
             .install(
                 "sha256:abc",
                 &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                &[],
                 &[],
             )
             .unwrap();
@@ -1316,7 +1487,8 @@ mod tests {
             .unwrap();
         let invalidated = store
             .record_authentication("some-provider", "work", connection(authority))
-            .unwrap();
+            .unwrap()
+            .invalidated;
         assert!(invalidated.is_empty());
         assert!(store.decision(&a_run(), "some-provider").unwrap().is_some());
     }
@@ -1338,7 +1510,8 @@ mod tests {
                 "work",
                 connection(Authority::of(["repo:read", "repo:write"])),
             )
-            .unwrap();
+            .unwrap()
+            .invalidated;
         assert_eq!(invalidated.len(), 1);
         assert_eq!(
             store.decision(&a_run(), "some-provider").unwrap(),
@@ -1370,6 +1543,7 @@ mod tests {
                     connection(Authority::of(["repo:read"]))
                 )
                 .unwrap()
+                .invalidated
                 .len(),
             1
         );
@@ -1407,7 +1581,8 @@ mod tests {
                 "work",
                 connection(Authority::of(["admin"])),
             )
-            .unwrap();
+            .unwrap()
+            .invalidated;
 
         assert_eq!(invalidated.len(), 1);
         assert!(
@@ -1444,6 +1619,7 @@ mod tests {
                     connection(Authority::of(["admin"]))
                 )
                 .unwrap()
+                .invalidated
                 .is_empty()
         );
     }
@@ -1463,6 +1639,7 @@ mod tests {
                     connection(Authority::of(["admin"]))
                 )
                 .unwrap()
+                .invalidated
                 .is_empty()
         );
         assert_eq!(
@@ -1475,10 +1652,52 @@ mod tests {
     fn a_values_write_that_fails_surfaces_rather_than_reporting_a_stored_connection() {
         let rig = Rig::new();
         *rig.values.fail_save.lock().unwrap() = true;
+
+        let recorded = rig
+            .store()
+            .record_authentication("some-provider", "work", connection(Authority::default()))
+            .expect("the grants half is answerable either way");
+
+        assert!(recorded.stored.is_err());
         assert!(
             rig.store()
-                .record_authentication("some-provider", "work", connection(Authority::default()))
-                .is_err()
+                .connections_of("some-provider")
+                .unwrap()
+                .is_empty(),
+            "a connection that did not store is not one the machine holds"
+        );
+    }
+
+    #[test]
+    fn a_grant_this_dropped_is_reported_even_where_the_values_behind_it_will_not_store() {
+        // The grants file is written first, so those runs must decide again whether or not the values land — and nobody is watching a renewal.
+        let rig = Rig::new();
+        rig.store()
+            .decide(
+                &a_run(),
+                "some-provider",
+                granted("sha256:abc", Some("work"), Authority::of(["repo:read"])),
+            )
+            .expect("a run that granted this connection");
+        *rig.values.fail_save.lock().unwrap() = true;
+
+        let recorded = rig
+            .store()
+            .record_authentication(
+                "some-provider",
+                "work",
+                connection(Authority::of(["admin"])),
+            )
+            .expect("the grants half is answerable either way");
+
+        assert!(recorded.stored.is_err());
+        assert_eq!(recorded.invalidated.len(), 1);
+        assert!(
+            rig.store()
+                .decision(&a_run(), "some-provider")
+                .unwrap()
+                .is_none(),
+            "and the grant really is gone, which is why it has to be reported"
         );
     }
 
@@ -1549,6 +1768,7 @@ mod tests {
                 "some-provider",
                 "sha256:abc",
                 &document("some-provider", "api.some-provider.example", "SOME_TOKEN"),
+                &[],
                 &[],
             )
             .unwrap();
@@ -1648,7 +1868,8 @@ mod tests {
                 "work",
                 connection(Authority::of(["admin"])),
             )
-            .expect("store the connection");
+            .expect("store the connection")
+            .invalidated;
 
         assert!(invalidated.is_empty(), "nothing this build can name");
         for key in &stale {

@@ -145,11 +145,15 @@ pub enum Request {
         name: String,
     },
     ListConnectors,
-    /// The values an authentication returned, keyed by the credential they belong to. The caller collects them because only it has a terminal to ask at.
-    ConnectConnector {
+    /// Begin a connect. What it asks for is the mechanism's decision, not the method's, so the caller learns the fields from the service rather than reading them off the document (sandbox-spec §3.2.6).
+    BeginConnect {
         name: String,
         method: String,
         connection: String,
+    },
+    /// Answer what the service last asked for. The caller collects the values because only it has a terminal to ask at; `session` is the handle the service gave it.
+    AnswerConnect {
+        session: String,
         values: SecretValues,
     },
     DisconnectConnector {
@@ -357,6 +361,19 @@ pub enum Response {
     ConnectorUnknown {
         name: String,
     },
+    /// The mechanism is waiting to be told these, in this order. `message` is the connector author's own words and is shown as theirs; it is empty where the mechanism is one lns implements (§3.2.6).
+    ConnectorAsks {
+        session: String,
+        message: String,
+        fields: Vec<ConnectorFieldView>,
+        /// Whether the message and the field labels are a component's words rather than the document's. The document is disclosed on the card and checked before it installs; an ask's text is not, so lns attributes it (§3.2.6).
+        from_code: bool,
+    },
+    /// The connect ended without a connection, and the offer stands. The reason is the mechanism's, already bounded and scrubbed by the service.
+    ConnectorConnectFailed {
+        name: String,
+        reason: String,
+    },
     /// `invalidated` names the project directories whose grant the returned authority no longer matches, so each is asked again.
     ConnectorConnected {
         name: String,
@@ -425,6 +442,12 @@ pub struct ConnectorMethodView {
     pub credentials: Vec<String>,
     /// Each `auth` output a connect must supply a value for, deduplicated: two credentials drawing on one output are one value to ask for, and it is this key the grant reads the value back under (§4.1).
     pub asks: Vec<String>,
+    /// The hosts a `code` method's component may contact, empty where it declares none — which is a disclosure, not an absence (§3.2.6).
+    pub hosts: Vec<String>,
+    /// Whether a `code` method may run programs on this machine. It decides which of the two code disclosures the card carries, and they are not interchangeable (§1.5).
+    pub runs_programs: bool,
+    /// True where this method's mechanism is code lns cannot read, so the card discloses bounds instead of behaviour.
+    pub carries_code: bool,
     /// The connector author's own words about where to get the value (§3.2.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
@@ -432,6 +455,25 @@ pub struct ConnectorMethodView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrides: Option<Vec<String>>,
 }
+
+/// What a card MUST say about a method whose mechanism is code nobody can read, verbatim, because a paraphrase would let what the user reads drift from what lns enforces (cli-spec §3.3).
+pub const BOUNDED_CODE_DISCLOSURE: &str = "lns cannot show what this code does. It can only bound where it runs, what it reaches, and how long it has.";
+
+/// What it says instead where the method declares host execution. This does not add a warning to the sentence above — it withdraws the guarantee that sentence makes.
+pub const UNBOUNDED_CODE_DISCLOSURE: &str = "lns cannot show what this code does, and it runs programs on your machine with your own access. lns cannot bound what those reach.";
+
+/// Says whose words a message is, before any of it is read. A component supplies it at connect time, from code nobody can read, so every surface that shows one attributes it the same way (sandbox-spec §3.2.6).
+pub fn connector_says(connector: &str, message: &str) -> String {
+    format!("{connector} says: {message}")
+}
+
+/// The same, for the field labels beside it: they are the connector's too, and attributing only the message would leave them reading as lns's own prompts.
+pub fn connector_asks(connector: &str) -> String {
+    format!("{connector} asks, in its own words:")
+}
+
+/// What the card prints where the host list would go and the method declares none.
+pub const NO_HOSTS_DISCLOSURE: &str = "it may contact no hosts.";
 
 impl ConnectorMethodView {
     /// Every variable applying this method sets, which §3.2.4 requires the card and `grant` to name: its plain `env`, and the variable each credential fills.
@@ -455,6 +497,14 @@ impl ConnectorView {
         }
         candidate
     }
+}
+
+/// One value a mechanism is waiting for. `secret` decides whether the caller echoes what is typed, so it travels rather than being guessed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorFieldView {
+    pub name: String,
+    pub label: String,
+    pub secret: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1176,10 +1226,8 @@ mod secret_tests {
     #[test]
     fn a_debug_of_a_connect_request_cannot_print_the_value_it_carries() {
         // `Request` derives Debug and is formatted in panic and log paths, so a plaintext token must not be reachable through it.
-        let request = Request::ConnectConnector {
-            name: "some-provider".into(),
-            method: "token".into(),
-            connection: "work".into(),
+        let request = Request::AnswerConnect {
+            session: "some-provider/sign-in".into(),
             values: SecretValues([("SOME_TOKEN".to_string(), "sk-live-real".to_string())].into()),
         };
         let rendered = format!("{request:?}");
@@ -1218,6 +1266,9 @@ mod tests {
             asks: Vec::new(),
             help: None,
             overrides: None,
+            hosts: Vec::new(),
+            runs_programs: false,
+            carries_code: false,
         }
     }
 

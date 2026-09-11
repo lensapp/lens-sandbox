@@ -110,13 +110,14 @@ Feature: lns connector, on this machine
     Then the connector command fails
     And the connector error says "No flag answers it"
 
-  Scenario: an empty token connects nothing
+  Scenario: a value the mechanism refuses connects nothing, and says whose refusal it is
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
     And the service connects "some-provider" as "token"
+    And the mechanism refuses what it is answered, saying "token was not given a value"
     And the user types ""
     When the user runs connector command "connect some-provider --method token"
     Then the connector command fails
-    And the connector error says "nothing was connected"
+    And the connector error says "token was not given a value"
 
   Scenario: granting discloses the whole payload before it asks
     Given the service holds the connector "some-provider" serving "api.some-provider.example"
@@ -291,3 +292,70 @@ Feature: lns connector, on this machine
     When the user runs connector command "forget some-provider --run reviewer"
     Then the connector command succeeds
     And the output says it forgot the decision
+
+  Scenario: a mechanism that asks in its own words says whose words they are
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service connects "some-provider" as "token"
+    And the mechanism is code lns cannot read
+    And the mechanism asks in its own words, saying "open the workspace picker first"
+    And the user types ""
+    And the user types "sk-live-real"
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command succeeds
+    And the prompt says "some-provider says: open the workspace picker first"
+
+  Scenario: a component asking with no words of its own still has its questions attributed
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service connects "some-provider" as "token"
+    And the mechanism is code lns cannot read
+    And the mechanism asks for "confirm your login password", which it does not mark secret
+    And the user types ""
+    And the user types "acme"
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command succeeds
+    And the prompt attributes "confirm your login password" to "some-provider" before it asks it
+
+  Scenario: a message of its own does not let a component's questions pass as lns's
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service connects "some-provider" as "token"
+    And the mechanism is code lns cannot read
+    And the mechanism asks in its own words, saying "signing you in"
+    And the mechanism asks for "confirm your login password", which it does not mark secret
+    And the user types ""
+    And the user types "acme"
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command succeeds
+    And the prompt says "some-provider says: signing you in"
+    And the prompt attributes "confirm your login password" to "some-provider" before it asks it
+
+  Scenario: a field the mechanism does not mark secret is asked for plainly
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service connects "some-provider" as "token"
+    And the mechanism asks for "which workspace", which it does not mark secret
+    And the user types ""
+    And the user types "acme"
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command succeeds
+    And the prompt says "which workspace: "
+    And the prompt does not say "not shown"
+    And the prompt does not say "some-provider asks"
+
+  Scenario: a round that collects nothing waits for the user to press on
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service connects "some-provider" as "token"
+    And the mechanism is code lns cannot read
+    And the mechanism asks in its own words, saying "go to example.test/device and enter WDJB-MJHT"
+    And the mechanism asks for nothing at all
+    And the user types ""
+    And the user types ""
+    When the user runs connector command "connect some-provider --method token"
+    Then the connector command succeeds
+    And the prompt says "press enter when you have done that: "
+
+  Scenario: a method carrying no code discloses nothing about code
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the service grants "some-provider" the method "token"
+    And the user types "y"
+    When the user runs connector command "grant some-provider --run reviewer --method token"
+    Then the connector command succeeds
+    And the disclosure does not say "lns cannot show what this code does"

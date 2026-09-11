@@ -30,6 +30,9 @@ fn view(name: &str, serves: &str, connections: Vec<&str>) -> ConnectorView {
                 asks: vec!["token".to_string()],
                 help: Some("Create one under Settings then Tokens.".to_string()),
                 overrides: None,
+                hosts: Vec::new(),
+                runs_programs: false,
+                carries_code: false,
             },
             ConnectorMethodView {
                 name: "open".to_string(),
@@ -43,6 +46,9 @@ fn view(name: &str, serves: &str, connections: Vec<&str>) -> ConnectorView {
                 asks: Vec::new(),
                 help: None,
                 overrides: None,
+                hosts: Vec::new(),
+                runs_programs: false,
+                carries_code: false,
             },
         ],
         connections: connections
@@ -61,6 +67,10 @@ struct FakeConnectorService {
     installed: Option<ConnectorView>,
     installed_name: Option<String>,
     connected: Option<String>,
+    connect_refused: Option<String>,
+    asks_message: String,
+    asks_fields: Option<Vec<(String, String, bool)>>,
+    asks_from_code: bool,
     granted: Option<(String, Option<String>)>,
     disconnected: Option<usize>,
     forgot: Option<bool>,
@@ -72,6 +82,8 @@ struct FakeConnectorService {
     refuse_grant_message: Option<String>,
     unreachable: bool,
     requests: Arc<Mutex<Vec<Request>>>,
+    /// The connector and label of the connect the CLI is part-way through, so the answer can finish what the begin started.
+    connecting: Mutex<Option<(String, String)>>,
 }
 
 impl FakeConnectorService {
@@ -81,6 +93,10 @@ impl FakeConnectorService {
             installed: rig.installed.clone(),
             installed_name: rig.installed_name.clone(),
             connected: rig.connected.clone(),
+            connect_refused: rig.connect_refused.clone(),
+            asks_message: rig.asks_message.clone(),
+            asks_fields: rig.asks_fields.clone(),
+            asks_from_code: rig.asks_from_code,
             granted: rig.granted.clone(),
             disconnected: rig.disconnected,
             forgot: rig.forgot,
@@ -92,6 +108,7 @@ impl FakeConnectorService {
             refuse_grant_message: rig.refuse_grant_message.clone(),
             unreachable: rig.unreachable,
             requests: rig.requests.clone(),
+            connecting: Mutex::new(None),
         }
     }
 
@@ -128,13 +145,56 @@ impl FakeConnectorService {
                 }
                 _ => Response::ConnectorUnknown { name: name.clone() },
             },
-            Request::ConnectConnector {
-                name, connection, ..
-            } => Response::ConnectorConnected {
-                name: name.clone(),
-                connection: self.connected.clone().unwrap_or_else(|| connection.clone()),
-                invalidated: Vec::new(),
-            },
+            Request::BeginConnect {
+                name,
+                method,
+                connection,
+            } => {
+                *self.connecting.lock().unwrap() = Some((name.clone(), connection.clone()));
+                Response::ConnectorAsks {
+                    session: format!("{name}/{method}/1"),
+                    message: self.asks_message.clone(),
+                    from_code: self.asks_from_code,
+                    fields: self.asks_fields.clone().map_or_else(
+                        || {
+                            vec![lns_ipc::ConnectorFieldView {
+                                name: "token".to_string(),
+                                label: "token".to_string(),
+                                secret: true,
+                            }]
+                        },
+                        |fields| {
+                            fields
+                                .into_iter()
+                                .map(|(name, label, secret)| lns_ipc::ConnectorFieldView {
+                                    name,
+                                    label,
+                                    secret,
+                                })
+                                .collect()
+                        },
+                    ),
+                }
+            }
+            Request::AnswerConnect { .. } => {
+                let (name, connection) = self
+                    .connecting
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("a connect must have begun");
+                if let Some(reason) = &self.connect_refused {
+                    return Some(Response::ConnectorConnectFailed {
+                        name,
+                        reason: reason.clone(),
+                    });
+                }
+                Response::ConnectorConnected {
+                    name,
+                    connection: self.connected.clone().unwrap_or(connection),
+                    invalidated: Vec::new(),
+                }
+            }
             Request::DisconnectConnector { name, .. } => Response::ConnectorDisconnected {
                 name: name.clone(),
                 dropped: self.disconnected.unwrap_or(0),
@@ -451,6 +511,31 @@ fn service_connects(world: &mut BehaviourWorld, _name: String, connection: Strin
     world.connector.connected = Some(connection);
 }
 
+#[given(expr = "the mechanism asks in its own words, saying {string}")]
+fn mechanism_says(world: &mut BehaviourWorld, message: String) {
+    world.connector.asks_message = message;
+}
+
+#[given(expr = "the mechanism is code lns cannot read")]
+fn mechanism_is_code(world: &mut BehaviourWorld) {
+    world.connector.asks_from_code = true;
+}
+
+#[given(expr = "the mechanism asks for {string}, which it does not mark secret")]
+fn mechanism_asks_plainly(world: &mut BehaviourWorld, label: String) {
+    world.connector.asks_fields = Some(vec![("workspace".to_string(), label, false)]);
+}
+
+#[given(expr = "the mechanism asks for nothing at all")]
+fn mechanism_asks_for_nothing(world: &mut BehaviourWorld) {
+    world.connector.asks_fields = Some(Vec::new());
+}
+
+#[given(expr = "the mechanism refuses what it is answered, saying {string}")]
+fn mechanism_refuses(world: &mut BehaviourWorld, reason: String) {
+    world.connector.connect_refused = Some(reason);
+}
+
 #[given(expr = "the service reports the grant unchanged for {string}")]
 fn service_grant_unchanged(world: &mut BehaviourWorld, _name: String) {
     world.connector.grant_unchanged = true;
@@ -727,6 +812,64 @@ fn prompt_names_the_authentication(world: &mut BehaviourWorld, authentication: S
         "the ask names the sign-in the value comes from, which is what the user pastes: {}",
         run.output
     );
+}
+
+#[then(expr = "the disclosure says {string}")]
+fn disclosure_says(world: &mut BehaviourWorld, said: String) {
+    let run = run_of(world);
+    assert!(run.output.contains(&said), "got: {}", run.output);
+}
+
+#[then(expr = "the disclosure does not say {string}")]
+fn disclosure_does_not_say(world: &mut BehaviourWorld, said: String) {
+    let run = run_of(world);
+    assert!(!run.output.contains(&said), "got: {}", run.output);
+}
+
+#[then(expr = "the disclosure names the digest the connector is installed at")]
+fn disclosure_names_digest(world: &mut BehaviourWorld) {
+    let digest = world.connector.held[0].digest.clone();
+    let run = run_of(world);
+    assert!(
+        !digest.is_empty() && run.output.contains(&digest),
+        "the digest covers the component's bytes and is what a grant binds to; got: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the prompt says {string}")]
+fn prompt_says(world: &mut BehaviourWorld, said: String) {
+    let run = run_of(world);
+    assert!(run.output.contains(&said), "got: {}", run.output);
+}
+
+/// The attribution has to come before the question: a name printed after it attributes nothing the user has already read.
+#[then(expr = "the prompt attributes {string} to {string} before it asks it")]
+fn prompt_attributes_before_asking(
+    world: &mut BehaviourWorld,
+    question: String,
+    connector: String,
+) {
+    let run = run_of(world);
+    let attributed = run
+        .output
+        .find(&format!("{connector} asks"))
+        .unwrap_or_else(|| panic!("nothing attributed the question: {}", run.output));
+    let asked = run
+        .output
+        .find(&question)
+        .unwrap_or_else(|| panic!("the question was never asked: {}", run.output));
+    assert!(
+        attributed < asked,
+        "a question a component wrote must not reach the user as lns's own: {}",
+        run.output
+    );
+}
+
+#[then(expr = "the prompt does not say {string}")]
+fn prompt_does_not_say(world: &mut BehaviourWorld, said: String) {
+    let run = run_of(world);
+    assert!(!run.output.contains(&said), "got: {}", run.output);
 }
 
 #[then(expr = "the prompt says the value is not shown")]

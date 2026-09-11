@@ -19,3 +19,12 @@ Feature: connecting a connector and granting what it holds
     When the machine connects "token" with "sk-live"
     And the run "1a2b3c4d" grants "token" through that connection
     Then the run is supplied "Bearer sk-live" for "SOME_TOKEN"
+
+  Scenario: a connection whose values have run out arms nothing
+    Given the connector "some-provider" serves "api.some-provider.example"
+    And its method "token" draws "SOME_TOKEN" from the auth output "token"
+    And the machine installs the connector
+    When the machine connects "token" with "sk-live"
+    And the run "1a2b3c4d" grants "token" through that connection
+    And the values that connection holds run out
+    Then "SOME_TOKEN" is left unarmed

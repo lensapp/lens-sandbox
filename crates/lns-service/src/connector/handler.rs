@@ -13,13 +13,45 @@ pub async fn install<S: ConnectorSource + ?Sized>(
     source: &S,
     operand: &str,
 ) -> Result<ConnectorView> {
-    let fetched = source.fetch(&Source::of(operand)?).await?;
-    let definition = store.install(&fetched.digest, &fetched.document, &fetched.filesets)?;
+    let named = Source::of(operand)?;
+    let fetched = source.fetch(&named).await?;
+    refuse_host_execution_from_a_registry(&named, &fetched.document)?;
+    let definition = store.install(
+        &fetched.digest,
+        &fetched.document,
+        &fetched.filesets,
+        &fetched.components,
+    )?;
     Ok(view_of(
         &definition,
         &fetched.digest,
         &store.connections_of(&definition.name)?,
     ))
+}
+
+/// A `code` method may run programs on this machine, and lns can bound none of it, so provenance is the bound: a pulled document declaring it is refused and a local path may (§3.2.6).
+fn refuse_host_execution_from_a_registry(named: &Source, document: &[u8]) -> Result<()> {
+    let Source::Reference(reference) = named else {
+        return Ok(());
+    };
+    let Ok(definition) = lns_artifact::connector::parse(document) else {
+        return Ok(());
+    };
+    for method in &definition.spec.methods {
+        let declares_exec = method
+            .auth
+            .as_ref()
+            .and_then(lns_artifact::connector::Auth::code)
+            .and_then(Result::ok)
+            .is_some_and(|code| code.exec);
+        if declares_exec {
+            anyhow::bail!(
+                "method {} of {reference} runs programs on this machine with your own access, and lns can bound none of what those reach. A digest cannot stand in for that, so it may only be installed from a local path you can read first.",
+                method.name
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn uninstall(store: &ConnectorStore<'_>, name: &str) -> Result<Option<usize>> {
@@ -63,27 +95,35 @@ fn view_of(
             .spec
             .methods
             .iter()
-            .map(|method| ConnectorMethodView {
-                name: method.name.clone(),
-                label: method.label().to_string(),
-                auth_label: method.auth.as_ref().map(|auth| auth.label().to_string()),
-                offerable: can_apply(method),
-                opens: opened_by(method),
-                writes: method
-                    .filesets
-                    .iter()
-                    .map(|fileset| lns_artifact::connector::guest_directory(&fileset.guest_path))
-                    .collect(),
-                env: method.env.keys().cloned().collect(),
-                credentials: method
-                    .credentials
-                    .iter()
-                    .map(|credential| credential.owner().to_string())
-                    .collect(),
-                asks: asked_of(method),
-                help: method.auth.as_ref().and_then(|auth| auth.help.clone()),
-                // Filled where a run's document is in hand; the store alone cannot say what a method overrides.
-                overrides: None,
+            .map(|method| {
+                let code = code_of(method);
+                ConnectorMethodView {
+                    name: method.name.clone(),
+                    label: method.label().to_string(),
+                    auth_label: method.auth.as_ref().map(|auth| auth.label().to_string()),
+                    offerable: can_apply(method),
+                    opens: opened_by(method),
+                    writes: method
+                        .filesets
+                        .iter()
+                        .map(|fileset| {
+                            lns_artifact::connector::guest_directory(&fileset.guest_path)
+                        })
+                        .collect(),
+                    hosts: code.clone().map(|code| code.hosts).unwrap_or_default(),
+                    runs_programs: code.as_ref().is_some_and(|code| code.exec),
+                    carries_code: code.is_some(),
+                    env: method.env.keys().cloned().collect(),
+                    credentials: method
+                        .credentials
+                        .iter()
+                        .map(|credential| credential.owner().to_string())
+                        .collect(),
+                    asks: asked_of(method),
+                    help: method.auth.as_ref().and_then(|auth| auth.help.clone()),
+                    // Filled where a run's document is in hand; the store alone cannot say what a method overrides.
+                    overrides: None,
+                }
             })
             .collect(),
         connections: connection_views(connections),
@@ -121,6 +161,15 @@ fn opened_by(method: &lns_artifact::connector::Method) -> Vec<String> {
         .collect()
 }
 
+/// The `code` block a method connects with, where it has one and it reads (§3.2.6).
+fn code_of(method: &lns_artifact::connector::Method) -> Option<lns_artifact::connector::CodeAuth> {
+    method
+        .auth
+        .as_ref()
+        .and_then(lns_artifact::connector::Auth::code)
+        .and_then(Result::ok)
+}
+
 fn connection_views(connections: &BTreeMap<String, Connection>) -> Vec<ConnectorConnectionView> {
     connections
         .iter()
@@ -151,46 +200,45 @@ pub struct Granted {
     pub unchanged: bool,
 }
 
-/// Store what an authentication returned as a connection. A method with no `auth` has nothing to connect and is granted instead (cli-spec §3.3).
-pub fn connect(
-    store: &ConnectorStore<'_>,
-    name: &str,
-    method: &str,
-    label: &str,
-    values: std::collections::BTreeMap<String, String>,
-) -> Result<Connected> {
-    let definition = definition_of(store, name)?;
-    let method = offerable_method(&definition, method)?;
-    if method.auth.is_none() {
-        anyhow::bail!(
-            "method {} of {name} has no authentication, so there is nothing to connect; grant it instead",
-            method.name
-        );
-    }
-    let invalidated = store.record_authentication(
-        name,
-        label,
-        super::store::Connection {
-            method: method.name.clone(),
-            // A `kind: token` exchange reports no authority (§3.2.4).
-            authority: super::store::Authority::default(),
-            values,
-        },
-    )?;
-    Ok(Connected {
-        connection: label.to_string(),
-        invalidated,
-    })
-}
-
 /// Drop one connection, or every connection of a connector. The connector stays installed and grants naming a dropped connection stay (cli-spec §3.3).
+///
+/// The press authorises `revoke`, so each connection being dropped is told to its mechanism first — and a value lns cannot revoke is one it must still stop holding, so nothing here decides whether the drop happens (§3.2.6).
 pub fn disconnect(
     store: &ConnectorStore<'_>,
+    mechanisms: Option<&dyn super::mechanism::traits::Mechanisms>,
     name: &str,
     connection: Option<&str>,
+    now_millis: u64,
 ) -> Result<usize> {
     installed_entry(store, name)?;
+    for (label, held) in store.connections_of(name)? {
+        if connection.is_some_and(|only| only != label) {
+            continue;
+        }
+        if let Err(e) = revoked(store, mechanisms, name, &held, now_millis) {
+            crate::log::warn!("could not tell {name} that {label} is revoked: {e:#}");
+        }
+    }
     Ok(store.drop_connections(name, connection)?)
+}
+
+fn revoked(
+    store: &ConnectorStore<'_>,
+    mechanisms: Option<&dyn super::mechanism::traits::Mechanisms>,
+    name: &str,
+    held: &Connection,
+    now_millis: u64,
+) -> Result<()> {
+    let Some(mechanisms) = mechanisms else {
+        anyhow::bail!("this machine has no mechanism to tell");
+    };
+    let installed = installed_entry(store, name)?;
+    let definition = lns_artifact::connector::parse(&installed.document)?;
+    let method = offerable_method(&definition, &held.method)?;
+    let prepared = super::connect::prepare(store, mechanisms, name, &definition, method)?;
+    prepared
+        .mechanism
+        .revoke(&prepared.host, &held.values, now_millis)
 }
 
 /// Record one run's grant of one method, replacing whatever it decided before.
@@ -246,16 +294,24 @@ pub fn forget(store: &ConnectorStore<'_>, name: &str, holder: &GrantHolder) -> R
     Ok(store.forget(holder, name)?)
 }
 
+/// What the card knew when it was raised: the bytes it disclosed, the paths the run counted at boot, and the moment the person answered.
+pub struct AsRaised<'a> {
+    pub digest: &'a str,
+    pub counted_at_boot: Option<&'a [String]>,
+    pub now_millis: u64,
+}
+
 /// Grants a method from the card, refusing bytes other than the ones the card disclosed, and answers with what the guest is to be given (§3.2.4).
 pub fn grant_disclosed(
     store: &ConnectorStore<'_>,
     name: &str,
-    disclosed_digest: &str,
     holder: &GrantHolder,
     method: &str,
     connection: Option<&str>,
-    counted_at_boot: Option<&[String]>,
+    raised: &AsRaised<'_>,
 ) -> Result<(Granted, crate::approval_flow::protocol::GrantedPayload)> {
+    let (disclosed_digest, counted_at_boot, now_millis) =
+        (raised.digest, raised.counted_at_boot, raised.now_millis);
     let entry = installed_entry(store, name)?;
     if entry.digest != disclosed_digest {
         anyhow::bail!(
@@ -264,7 +320,13 @@ pub fn grant_disclosed(
     }
     // The connection `grant` settled on, not the one asked for: a caller naming none still gets the only account held, and the payload must be armed with that one.
     let settled = grant(store, name, holder, method, connection, counted_at_boot)?;
-    let payload = supplied_by(store, &entry, method, settled.connection.as_deref())?;
+    let payload = supplied_by(
+        store,
+        &entry,
+        method,
+        settled.connection.as_deref(),
+        now_millis,
+    )?;
     Ok((settled, payload))
 }
 
@@ -277,7 +339,7 @@ fn refuse_a_path_another_connector_writes(
     method: &str,
 ) -> Result<()> {
     let taken = paths_written_by_other_connectors(store, holder, name)?;
-    for path in written_paths(&supplied_by(store, entry, method, None)?) {
+    for path in written_paths(&supplied_by(store, entry, method, None, ANY_MOMENT)?) {
         if let Some(writer) = taken.get(&path) {
             anyhow::bail!(
                 "{writer} already writes {path} in this run: two connectors writing one file would leave the guest with neither, so disconnect {writer} from this run first"
@@ -298,7 +360,7 @@ fn refuse_a_path_this_run_never_counted(
     let Some(counted) = counted_at_boot else {
         return Ok(());
     };
-    for path in written_paths(&supplied_by(store, entry, method, None)?) {
+    for path in written_paths(&supplied_by(store, entry, method, None, ANY_MOMENT)?) {
         if !counted.iter().any(|claim| claim == &path) {
             anyhow::bail!(
                 "{name} writes {path}, and this run did not count it when it booted — the connector was installed since. Restart the run to grant it."
@@ -308,13 +370,16 @@ fn refuse_a_path_this_run_never_counted(
     Ok(())
 }
 
+/// Which paths a method writes is decided by its filesets, and no value behind it can change that — so a caller that only wants the paths reads them at a moment where nothing has run out.
+const ANY_MOMENT: u64 = 0;
+
 fn paths_written_by_other_connectors(
     store: &ConnectorStore<'_>,
     holder: &GrantHolder,
     granting: &str,
 ) -> Result<BTreeMap<String, String>> {
     let mut taken = BTreeMap::new();
-    for (connector, payload) in granted_supply(store, holder)? {
+    for (connector, payload) in granted_supply(store, holder, ANY_MOMENT)? {
         if connector == granting {
             continue;
         }
@@ -350,6 +415,7 @@ pub fn undecided(
 pub fn granted_supply(
     store: &ConnectorStore<'_>,
     holder: &GrantHolder,
+    now_millis: u64,
 ) -> Result<BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>> {
     let mut supplied = BTreeMap::new();
     for entry in store.installed()? {
@@ -366,7 +432,7 @@ pub fn granted_supply(
         if digest != entry.digest {
             continue;
         }
-        match supplied_by(store, &entry, &method, connection.as_deref()) {
+        match supplied_by(store, &entry, &method, connection.as_deref(), now_millis) {
             Ok(payload) => {
                 supplied.insert(entry.name.clone(), payload);
             }
@@ -407,6 +473,7 @@ fn supplied_by(
     entry: &Installed,
     method: &str,
     connection: Option<&str>,
+    now_millis: u64,
 ) -> Result<crate::approval_flow::protocol::GrantedPayload> {
     let definition = lns_artifact::connector::parse(&entry.document)?;
     let method = offerable_method(&definition, method)?;
@@ -414,6 +481,8 @@ fn supplied_by(
         Some(label) => store
             .connections_of(&entry.name)?
             .remove(label)
+            // A connection whose values have run out supplies none, so the placeholder is left unarmed and the next request raises the connect prompt (§4.1).
+            .filter(|held| !held.has_run_out(now_millis))
             .map(|held| lns_ipc::SecretValues(held.values))
             .unwrap_or_default(),
         None => lns_ipc::SecretValues::default(),
@@ -510,20 +579,12 @@ fn displaced_method(decision: super::store::RunDecision) -> Option<String> {
     }
 }
 
-fn installed_entry(store: &ConnectorStore<'_>, name: &str) -> Result<Installed> {
+pub(super) fn installed_entry(store: &ConnectorStore<'_>, name: &str) -> Result<Installed> {
     store
         .installed()?
         .into_iter()
         .find(|entry| entry.name == name)
         .ok_or_else(|| anyhow::anyhow!("no connector named {name} is installed on this machine"))
-}
-
-fn definition_of(
-    store: &ConnectorStore<'_>,
-    name: &str,
-) -> Result<lns_artifact::connector::ConnectorDefinition> {
-    let entry = installed_entry(store, name)?;
-    lns_artifact::connector::parse(&entry.document)
 }
 
 /// What this version can deliver, which is narrower than what a document may declare: install keeps a packed fileset's bytes, but nothing reads them back into the files a grant sends, so a method writing one cannot be applied yet (§3.2.2).
@@ -536,7 +597,7 @@ fn can_apply(method: &lns_artifact::connector::Method) -> bool {
 }
 
 /// The named method, refused when this version cannot deliver it — the card could not either (§3.2.2).
-fn offerable_method<'a>(
+pub(super) fn offerable_method<'a>(
     definition: &'a lns_artifact::connector::ConnectorDefinition,
     method: &str,
 ) -> Result<&'a lns_artifact::connector::Method> {
@@ -610,6 +671,7 @@ mod tests {
     struct FakeSet {
         entries: Mutex<Vec<Installed>>,
         layers: Mutex<BTreeMap<String, Vec<Vec<u8>>>>,
+        components: Mutex<Vec<Vec<u8>>>,
     }
 
     impl InstalledSet for FakeSet {
@@ -622,7 +684,9 @@ mod tests {
             digest: &str,
             document: &[u8],
             filesets: &[Vec<u8>],
+            components: &[Vec<u8>],
         ) -> std::io::Result<()> {
+            *self.components.lock().unwrap() = components.to_vec();
             let mut held = self.entries.lock().unwrap();
             held.retain(|e| e.name != name);
             held.push(Installed {
@@ -647,6 +711,15 @@ mod tests {
                     std::io::Error::new(std::io::ErrorKind::NotFound, "no such fileset layer")
                 })
         }
+        fn component(&self, _name: &str, index: usize) -> std::io::Result<Vec<u8>> {
+            self.components
+                .lock()
+                .unwrap()
+                .get(index)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("no such component"))
+        }
+
         fn remove(&self, name: &str) -> std::io::Result<bool> {
             let mut held = self.entries.lock().unwrap();
             let before = held.len();
@@ -660,6 +733,7 @@ mod tests {
         digest: String,
         document: Vec<u8>,
         filesets: Vec<Vec<u8>>,
+        components: Vec<Vec<u8>>,
         asked: Mutex<Vec<Source>>,
     }
 
@@ -670,6 +744,7 @@ mod tests {
                 digest: self.digest.clone(),
                 document: self.document.clone(),
                 filesets: self.filesets.clone(),
+                components: self.components.clone(),
             })
         }
     }
@@ -715,6 +790,7 @@ mod tests {
             digest: "sha256:abc".to_string(),
             document: document(name, host),
             filesets: Vec::new(),
+            components: Vec::new(),
             asked: Mutex::new(Vec::new()),
         }
     }
@@ -742,6 +818,7 @@ mod tests {
             digest: "sha256:abc".to_string(),
             document: doc,
             filesets: vec![layer.clone()],
+            components: Vec::new(),
             asked: Mutex::new(Vec::new()),
         };
 
@@ -758,6 +835,131 @@ mod tests {
             rig.store().fileset_layer("some-provider", 1).is_err(),
             "an index nothing packed is not a layer"
         );
+    }
+
+    #[tokio::test]
+    async fn installing_keeps_the_component_the_source_brought() {
+        // A grant binds to a digest over these bytes, so the bytes have to be here when the method is connected (§3.2.6).
+        let rig = Rig::new();
+        let doc = serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "sign-in",
+                    "auth": {
+                        "kind": "code",
+                        "component": "./sign-in.wasm",
+                        "outputs": ["access_token"],
+                    },
+                    "credentials": [{
+                        "envVar": "SOME_TOKEN",
+                        "placeholder": "some_LNSPLACEHOLDER0000000000",
+                        "field": "access_token",
+                    }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        let src = FakeSource {
+            digest: "sha256:abc".to_string(),
+            document: doc,
+            filesets: Vec::new(),
+            components: vec![b"the mechanism".to_vec()],
+            asked: Mutex::new(Vec::new()),
+        };
+
+        install(&rig.store(), &src, "ghcr.io/acme/some-provider:1")
+            .await
+            .expect("install accepts a connector carrying a component");
+
+        assert_eq!(
+            rig.set.component("some-provider", 0).unwrap(),
+            b"the mechanism",
+            "install passes the source's components to the store, or the method has nothing to connect with"
+        );
+    }
+
+    fn declaring_host_execution() -> Vec<u8> {
+        serde_json::json!({
+            "apiVersion": "lns.run/v1",
+            "kind": "connector",
+            "name": "some-provider",
+            "spec": {
+                "serves": ["api.some-provider.example"],
+                "methods": [{
+                    "name": "sign-in",
+                    "auth": {
+                        "kind": "code",
+                        "component": "./sign-in.wasm",
+                        "outputs": ["access_token"],
+                        "exec": true,
+                    },
+                    "credentials": [{
+                        "envVar": "SOME_TOKEN",
+                        "placeholder": "some_LNSPLACEHOLDER0000000000",
+                        "field": "access_token",
+                    }],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn bringing(document: Vec<u8>) -> FakeSource {
+        FakeSource {
+            digest: "sha256:abc".to_string(),
+            document,
+            filesets: Vec::new(),
+            components: vec![b"the mechanism".to_vec()],
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pulled_connector_that_runs_programs_on_this_machine_is_refused() {
+        // lns bounds nothing a host program reaches, so provenance is the bound a digest cannot be (§3.2.6).
+        let rig = Rig::new();
+        let src = bringing(declaring_host_execution());
+
+        let err = install(&rig.store(), &src, "ghcr.io/acme/some-provider:1")
+            .await
+            .unwrap_err();
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("sign-in"), "{rendered}");
+        assert!(rendered.contains("local path"), "{rendered}");
+        assert!(
+            rig.store().installed().unwrap().is_empty(),
+            "nothing is kept from a refused install"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pulled_document_that_will_not_parse_is_refused_where_it_is_read_rather_than_here() {
+        // The exec check reads a parsed document; one that will not parse has no declaration to read, and install refuses it for that instead.
+        let rig = Rig::new();
+        let src = bringing(b"not a document".to_vec());
+
+        install(&rig.store(), &src, "ghcr.io/acme/some-provider:1")
+            .await
+            .expect_err("bytes that are not a connector are not installed");
+
+        assert!(rig.store().installed().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_same_connector_installs_from_a_local_path() {
+        let rig = Rig::new();
+        let src = bringing(declaring_host_execution());
+
+        install(&rig.store(), &src, "/work/some-provider")
+            .await
+            .expect("a path is one the user can read before they install it");
     }
 
     #[tokio::test]
@@ -869,6 +1071,7 @@ mod tests {
                         method: "token".to_string(),
                         authority: Authority::default(),
                         values: Default::default(),
+                        expires_at_millis: None,
                     },
                 )
                 .unwrap();
@@ -900,6 +1103,7 @@ mod tests {
                     method: "token".to_string(),
                     authority: Authority::of(["repo:read"]),
                     values: Default::default(),
+                    expires_at_millis: None,
                 },
             )
             .unwrap();
@@ -927,7 +1131,7 @@ mod tests {
         // `install` refuses while one of these is present, so `list` is how the user finds out which to uninstall.
         let rig = Rig::new();
         rig.set
-            .put("mystery", "sha256:xyz", b"not a document", &[])
+            .put("mystery", "sha256:xyz", b"not a document", &[], &[])
             .unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(listed.len(), 1);
@@ -950,49 +1154,41 @@ mod tests {
         [("SOME_TOKEN".to_string(), "real-secret".to_string())].into()
     }
 
-    #[tokio::test]
-    async fn connecting_stores_a_connection_the_machine_then_holds() {
-        let rig = Rig::new();
-        installed(&rig).await;
-        let connected = connect(&rig.store(), "some-provider", "token", "work", values())
-            .expect("token is an offerable method that authenticates");
-        assert_eq!(connected.connection, "work");
-        assert!(connected.invalidated.is_empty());
-        assert_eq!(
-            rig.store().connections_of("some-provider").unwrap()["work"].method,
-            "token"
-        );
+    /// A connection the machine already holds. What produces one is `connector::connect`, tested there; these tests are about what the other verbs do beside one.
+    /// The machine's own mechanisms, lending nothing that leaves this process.
+    fn mechanisms() -> crate::connector::mechanism::real::RealMechanisms {
+        let parts = crate::connector::mechanism::tests::Parts::new();
+        crate::connector::mechanism::real::RealMechanisms::lending(
+            parts.http,
+            parts.exec,
+            std::sync::Arc::new(crate::connector::mechanism::tests::Counting),
+            parts.recorder,
+        )
+        .expect("the component runtime starts")
     }
 
-    #[tokio::test]
-    async fn connecting_a_method_that_does_not_authenticate_is_refused_and_names_granting() {
-        // cli-spec §3.3: a method with no `auth` has nothing to connect, so it is granted instead.
-        let rig = Rig::new();
-        installed(&rig).await;
-        let err = connect(&rig.store(), "some-provider", "open", "work", values())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("nothing to connect"), "{err}");
-        assert!(err.contains("grant it instead"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn connecting_names_the_connector_that_is_not_installed() {
-        let rig = Rig::new();
-        let err = connect(&rig.store(), "absent", "token", "work", values())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("absent"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn connecting_a_method_the_connector_does_not_declare_is_refused() {
-        let rig = Rig::new();
-        installed(&rig).await;
-        let err = connect(&rig.store(), "some-provider", "mystery", "work", values())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("no method named mystery"), "{err}");
+    fn connect(
+        store: &ConnectorStore<'_>,
+        name: &str,
+        method: &str,
+        label: &str,
+        values: std::collections::BTreeMap<String, String>,
+    ) -> Result<Connected> {
+        Ok(Connected {
+            connection: label.to_string(),
+            invalidated: store
+                .record_authentication(
+                    name,
+                    label,
+                    Connection {
+                        method: method.to_string(),
+                        authority: Authority::default(),
+                        values,
+                        expires_at_millis: None,
+                    },
+                )?
+                .invalidated,
+        })
     }
 
     #[tokio::test]
@@ -1003,10 +1199,20 @@ mod tests {
         connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
 
         assert_eq!(
-            disconnect(&rig.store(), "some-provider", Some("work")).unwrap(),
+            disconnect(
+                &rig.store(),
+                Some(&mechanisms()),
+                "some-provider",
+                Some("work"),
+                0
+            )
+            .unwrap(),
             1
         );
-        assert_eq!(disconnect(&rig.store(), "some-provider", None).unwrap(), 1);
+        assert_eq!(
+            disconnect(&rig.store(), Some(&mechanisms()), "some-provider", None, 0).unwrap(),
+            1
+        );
         assert_eq!(
             rig.store().installed().unwrap().len(),
             1,
@@ -1019,7 +1225,10 @@ mod tests {
         // The caller exits 1 on this, so it must be an answer rather than an error.
         let rig = Rig::new();
         installed(&rig).await;
-        assert_eq!(disconnect(&rig.store(), "some-provider", None).unwrap(), 0);
+        assert_eq!(
+            disconnect(&rig.store(), Some(&mechanisms()), "some-provider", None, 0).unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1152,7 +1361,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
         let err = grant(
             &rig.store(),
@@ -1206,6 +1415,7 @@ mod tests {
                 "sha256:abc",
                 &two_token_methods("some-provider"),
                 &[],
+                &[],
             )
             .unwrap();
         connect(&rig.store(), "some-provider", "token", "personal", values()).unwrap();
@@ -1236,6 +1446,7 @@ mod tests {
                 "some-provider",
                 "sha256:abc",
                 &two_token_methods("some-provider"),
+                &[],
                 &[],
             )
             .unwrap();
@@ -1299,7 +1510,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
 
         let listed = list(&rig.store()).unwrap();
@@ -1336,7 +1547,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(
@@ -1370,7 +1581,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
         let listed = list(&rig.store()).unwrap();
         assert_eq!(listed[0].methods[0].opens, ["allowed.example"]);
@@ -1382,7 +1593,7 @@ mod tests {
 
     fn installed_as(rig: &Rig, name: &str, host: &str, digest: &str) {
         rig.set
-            .put(name, digest, &document(name, host), &[])
+            .put(name, digest, &document(name, host), &[], &[])
             .unwrap();
     }
 
@@ -1491,7 +1702,13 @@ mod tests {
         // A run must launch beside a connector this build cannot read; holding nothing is the safe direction, since a destination is asked about only when an offer could follow.
         let rig = Rig::new();
         rig.set
-            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}", &[])
+            .put(
+                "broken",
+                "sha256:abc",
+                b"{\"kind\":\"connector\"}",
+                &[],
+                &[],
+            )
             .unwrap();
         installed_as(
             &rig,
@@ -1541,7 +1758,13 @@ mod tests {
         // Deciding before parsing keeps the warning true: a declined connector is not one this run failed to read.
         let rig = Rig::new();
         rig.set
-            .put("broken", "sha256:abc", b"{\"kind\":\"connector\"}", &[])
+            .put(
+                "broken",
+                "sha256:abc",
+                b"{\"kind\":\"connector\"}",
+                &[],
+                &[],
+            )
             .unwrap();
         rig.store()
             .decide(&a_run(), "broken", RunDecision::Declined)
@@ -1575,17 +1798,20 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
 
         let (_, payload) = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:abc",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:abc",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect("grant");
 
@@ -1634,6 +1860,7 @@ mod tests {
                 "sha256:abc",
                 &writing("some-provider", "~/.some-provider"),
                 &[],
+                &[],
             )
             .unwrap();
 
@@ -1671,6 +1898,7 @@ mod tests {
                 "sha256:abc",
                 &writing("some-provider", "~/.some-provider"),
                 &[],
+                &[],
             )
             .unwrap();
 
@@ -1694,6 +1922,7 @@ mod tests {
                 "sha256:abc",
                 &writing("some-provider", "~/.some-provider"),
                 &[],
+                &[],
             )
             .unwrap();
 
@@ -1710,6 +1939,7 @@ mod tests {
                 "sha256:abc",
                 &writing("some-provider", "~/.some-provider"),
                 &[],
+                &[],
             )
             .unwrap();
 
@@ -1722,11 +1952,14 @@ mod tests {
         let (_, payload) = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:abc",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:abc",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect("grant");
         assert_eq!(
@@ -1744,30 +1977,42 @@ mod tests {
         // Two entries claiming one path reach the guest as two creates. The second fails, the batch rolls back, and every granted file for the run goes with it.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"), &[])
+            .put(
+                "alpha",
+                "sha256:a",
+                &writing("alpha", "~/.shared"),
+                &[],
+                &[],
+            )
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[])
+            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[], &[])
             .unwrap();
         grant_disclosed(
             &rig.store(),
             "alpha",
-            "sha256:a",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:a",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect("first");
 
         let err = grant_disclosed(
             &rig.store(),
             "beta",
-            "sha256:b",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:b",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect_err("the second grant claims a path the first already writes");
 
@@ -1786,10 +2031,16 @@ mod tests {
         // `lns connector grant` reaches `grant` without passing the card, so a check only the card ran would let the CLI record what the card refuses.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", &writing("alpha", "~/.shared"), &[])
+            .put(
+                "alpha",
+                "sha256:a",
+                &writing("alpha", "~/.shared"),
+                &[],
+                &[],
+            )
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[])
+            .put("beta", "sha256:b", &writing("beta", "~/.shared"), &[], &[])
             .unwrap();
         grant(&rig.store(), "alpha", &a_run(), "open", None, None).expect("first");
 
@@ -1811,10 +2062,10 @@ mod tests {
         // A grant is per connector, so one unreadable connector must not take the rest of the run's grants with it — the run would start with no egress it was promised and no card to ask again.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", b"not a document", &[])
+            .put("alpha", "sha256:a", b"not a document", &[], &[])
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/.beta"), &[])
+            .put("beta", "sha256:b", &writing("beta", "~/.beta"), &[], &[])
             .unwrap();
         for (name, digest) in [("alpha", "sha256:a"), ("beta", "sha256:b")] {
             rig.store()
@@ -1833,8 +2084,8 @@ mod tests {
 
         let mut supplied = BTreeMap::new();
         let messages = crate::test_env::captured_messages(|| {
-            supplied =
-                granted_supply(&rig.store(), &a_run()).expect("the store itself is readable");
+            supplied = granted_supply(&rig.store(), &a_run(), ANY_MOMENT)
+                .expect("the store itself is readable");
         });
 
         assert_eq!(
@@ -1853,10 +2104,22 @@ mod tests {
         // `.` is a legal guestPath segment, so a second connector could name a file the first already writes and be refused by neither guard.
         let rig = Rig::new();
         rig.set
-            .put("alpha", "sha256:a", &writing("alpha", "~/shared/x"), &[])
+            .put(
+                "alpha",
+                "sha256:a",
+                &writing("alpha", "~/shared/x"),
+                &[],
+                &[],
+            )
             .unwrap();
         rig.set
-            .put("beta", "sha256:b", &writing("beta", "~/shared/./x"), &[])
+            .put(
+                "beta",
+                "sha256:b",
+                &writing("beta", "~/shared/./x"),
+                &[],
+                &[],
+            )
             .unwrap();
         grant(&rig.store(), "alpha", &a_run(), "open", None, None).expect("first");
 
@@ -1879,7 +2142,7 @@ mod tests {
             ("gamma", "sha256:g", vec!["~/.own"]),
         ] {
             rig.set
-                .put(name, digest, &writing_all(name, &paths), &[])
+                .put(name, digest, &writing_all(name, &paths), &[], &[])
                 .unwrap();
             rig.store()
                 .decide(
@@ -1897,7 +2160,7 @@ mod tests {
 
         let mut supplied = BTreeMap::new();
         let messages = crate::test_env::captured_messages(|| {
-            supplied = granted_supply(&rig.store(), &a_run()).unwrap();
+            supplied = granted_supply(&rig.store(), &a_run(), ANY_MOMENT).unwrap();
         });
 
         assert_eq!(
@@ -1917,7 +2180,7 @@ mod tests {
         let rig = Rig::new();
         for (name, digest) in [("alpha", "sha256:a"), ("beta", "sha256:b")] {
             rig.set
-                .put(name, digest, &writing(name, "~/.shared"), &[])
+                .put(name, digest, &writing(name, "~/.shared"), &[], &[])
                 .unwrap();
             rig.store()
                 .decide(
@@ -1935,7 +2198,7 @@ mod tests {
 
         let mut supplied = BTreeMap::new();
         let messages = crate::test_env::captured_messages(|| {
-            supplied = granted_supply(&rig.store(), &a_run()).unwrap();
+            supplied = granted_supply(&rig.store(), &a_run(), ANY_MOMENT).unwrap();
         });
 
         assert_eq!(
@@ -1971,7 +2234,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
 
         let offered = offerable(&rig.store(), &a_run()).expect("offerable");
@@ -1983,11 +2246,14 @@ mod tests {
         let err = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:abc",
             &a_run(),
             "token",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:abc",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect_err("and granting it is refused for the same reason");
         assert!(format!("{err:#}").contains("newer lns"), "{err:#}");
@@ -2007,11 +2273,14 @@ mod tests {
         let err = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:the-one-the-card-showed",
             &a_run(),
             "open",
             None,
-            None,
+            &AsRaised {
+                digest: "sha256:the-one-the-card-showed",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect_err("the bytes changed under the card");
 
@@ -2048,7 +2317,7 @@ mod tests {
         .to_string()
         .into_bytes();
         rig.set
-            .put("some-provider", "sha256:abc", &doc, &[])
+            .put("some-provider", "sha256:abc", &doc, &[], &[])
             .unwrap();
         // Keyed by what the method's own view asks for, because a test that guessed the key would pass while the CLI and the card asked under another one.
         let asked = list(&rig.store()).expect("list")[0].methods[0].asks.clone();
@@ -2067,11 +2336,14 @@ mod tests {
         let (_, payload) = grant_disclosed(
             &rig.store(),
             "some-provider",
-            "sha256:abc",
             &a_run(),
             "token",
             Some("work"),
-            None,
+            &AsRaised {
+                digest: "sha256:abc",
+                counted_at_boot: None,
+                now_millis: ANY_MOMENT,
+            },
         )
         .expect("grant");
 

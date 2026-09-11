@@ -149,7 +149,7 @@ fn preflight_readmes<F: Fs + ?Sized>(
     Ok(())
 }
 
-/// Build the artifact a push uploads: the document, one layer per `path` fileset it declares, and the README beside it.
+/// Build the artifact a push uploads: the document, one layer per `path` fileset it declares, the component each `code` method connects with, and the README beside it.
 fn build<F: Fs + ?Sized>(
     fs: &F,
     cwd: &Path,
@@ -159,8 +159,33 @@ fn build<F: Fs + ?Sized>(
     let layers: Vec<Vec<lns_artifact::build::FileEntry>> =
         packed.iter().map(|dir| dir.files.clone()).collect();
     let readme = read_readme(fs, cwd)?;
-    let built = lns_artifact::build::build_artifact(doc, &layers, readme.as_deref())?;
+    let components = pack_components(fs, cwd, doc)?;
+    let built = lns_artifact::build::build_artifact(doc, &layers, readme.as_deref(), &components)?;
     Ok((built, packed))
+}
+
+/// A `code` method's component travels as a layer of the same artifact, so what a publisher pushed and what an installer runs share one digest (§3.2.6).
+fn pack_components<F: Fs + ?Sized>(fs: &F, cwd: &Path, doc: &[u8]) -> Result<Vec<Vec<u8>>> {
+    if lns_artifact::spec::read_kind(doc)? != lns_artifact::spec::Kind::Connector {
+        return Ok(Vec::new());
+    }
+    let connector = lns_artifact::connector::parse(doc)?;
+    lns_artifact::connector::components(&connector.spec)
+        .into_iter()
+        .map(|(method, path)| {
+            let at = cwd.join(path);
+            let bytes = fs
+                .read_limited(&at, lns_artifact::build::MAX_COMPONENT_BYTES)
+                .with_context(|| format!("method {method} connects with {path}"))?;
+            if bytes.len() as u64 > lns_artifact::build::MAX_COMPONENT_BYTES {
+                bail!(
+                    "component {path} exceeds the {}-byte limit one component may be",
+                    lns_artifact::build::MAX_COMPONENT_BYTES
+                );
+            }
+            Ok(bytes)
+        })
+        .collect()
 }
 
 /// What the publisher sees for each directory that became a layer: the entry they wrote, and the digest its content published under.
@@ -976,6 +1001,48 @@ mod tests {
     }
 
     const CONNECTOR_WITH_A_PATH_FILESET: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"token","auth":{"kind":"token"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}],"filesets":[{"path":"./some-provider","guestPath":"~/.some-provider"}]}]}}"#;
+
+    const CONNECTOR_CONNECTING_WITH_CODE: &[u8] = br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.some-provider.example"],"methods":[{"name":"sign-in","auth":{"kind":"code","component":"./sign-in.wasm","outputs":["access_token"]},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","field":"access_token"}]}]}}"#;
+
+    #[test]
+    fn push_packs_the_component_a_code_method_connects_with() {
+        // The bytes travel as a layer of the same artifact, so what was pushed and what is installed share one digest (§3.2.6).
+        let fs = MapFs::with(&[("/work/sign-in.wasm", "the mechanism")]);
+
+        let (built, _packed) =
+            build(&fs, cwd(), CONNECTOR_CONNECTING_WITH_CODE).expect("a connector carrying code");
+
+        let layers: Vec<&[u8]> = built
+            .component_layers()
+            .map(|layer| layer.data.as_slice())
+            .collect();
+        assert_eq!(layers, [b"the mechanism".as_slice()]);
+    }
+
+    #[test]
+    fn push_refuses_a_component_larger_than_one_may_be_and_names_the_path() {
+        let oversized = "a".repeat(lns_artifact::build::MAX_COMPONENT_BYTES as usize + 1);
+        let fs = MapFs::with(&[("/work/sign-in.wasm", &oversized)]);
+
+        let err = build(&fs, cwd(), CONNECTOR_CONNECTING_WITH_CODE)
+            .expect_err("a component past the ceiling is refused before it is packed");
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("./sign-in.wasm"), "{rendered}");
+        assert!(rendered.contains("exceeds the"), "{rendered}");
+    }
+
+    #[test]
+    fn push_names_the_method_whose_component_is_not_beside_the_document() {
+        let fs = MapFs::default();
+
+        let err = build(&fs, cwd(), CONNECTOR_CONNECTING_WITH_CODE)
+            .expect_err("the method names an implementation this project does not carry");
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("sign-in"), "{rendered}");
+        assert!(rendered.contains("./sign-in.wasm"), "{rendered}");
+    }
 
     #[test]
     fn packing_reads_a_connectors_secret_shaped_file_so_push_can_check_its_content() {

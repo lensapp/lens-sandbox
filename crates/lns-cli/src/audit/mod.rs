@@ -46,6 +46,7 @@ pub enum KindArg {
     Bind,
     Approval,
     Connector,
+    Mechanism,
     Tool,
 }
 
@@ -59,6 +60,7 @@ impl KindArg {
             KindArg::Bind => "bind",
             KindArg::Approval => "approval",
             KindArg::Connector => "connector",
+            KindArg::Mechanism => "mechanism",
             KindArg::Tool => "tool",
         }
     }
@@ -212,7 +214,64 @@ mod tests {
         assert_eq!(KindArg::Bind.label(), "bind");
         assert_eq!(KindArg::Approval.label(), "approval");
         assert_eq!(KindArg::Connector.label(), "connector");
+        assert_eq!(KindArg::Mechanism.label(), "mechanism");
         assert_eq!(KindArg::Tool.label(), "tool");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn a_renewal_nobody_watched_is_reachable_by_the_kind_that_names_it() {
+        // It is recorded nowhere else, so a `--kind` that cannot select it leaves the only account of it unreachable.
+        let home = tempfile::TempDir::new().unwrap();
+        write_mechanism_ledger(home.path());
+        let _env = home_env(home.path());
+
+        let mut out = Vec::new();
+        let code = dispatch_argv(&["lns", "audit", "--kind", "mechanism"], &mut out)
+            .await
+            .unwrap();
+
+        assert_eq!(code, 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("auth.some-provider.example"), "{text}");
+        assert!(
+            !text.contains("api.some-vendor.example"),
+            "the approval beside it is another kind, so the filter kept nothing of it: {text}"
+        );
+    }
+
+    /// A renewal and, beside it, an approval of another kind, so a filter that answered everything could not pass.
+    fn write_mechanism_ledger(home: &std::path::Path) {
+        let events = [
+            lns_ocsf::mechanism(
+                &octx("", "2026-06-29T14:02:11Z"),
+                "some-provider",
+                "renewed",
+                "auth.some-provider.example",
+                false,
+            ),
+            lns_ocsf::approval(
+                &octx("5e6f7a8b0000000000000000000000bb", "2026-06-29T14:03:11Z"),
+                "network",
+                "api.some-vendor.example:443",
+                "allow_always",
+                None,
+            ),
+        ];
+        let dir = home.join(".lns");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut chain = lns_ipc::AuditChain::new();
+        let mut lines = Vec::new();
+        for event in events {
+            lines.extend(chain.augment(&event.to_string()).unwrap());
+            lines.push(b'\n');
+        }
+        std::fs::write(dir.join("ledger.jsonl"), lines).unwrap();
+        std::fs::write(
+            dir.join("ledger.anchor"),
+            chain.anchor().expect("chain has events").to_line(),
+        )
+        .unwrap();
     }
 
     #[tokio::test]

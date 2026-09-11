@@ -929,12 +929,29 @@ fn grant_form(
     let method = method.clone();
     ui.add_space(8.0);
     crate::tray::render_connection_choice(ui, offer, &method, draft);
-    crate::tray::render_disclosure(ui, &method);
+    crate::tray::render_disclosure(ui, offer, &method);
+    if signs_in_elsewhere(&method, draft) {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(crate::tray::SIGN_IN_ELSEWHERE)
+                .size(FS_LABEL)
+                .color(STATUS_WARNING),
+        );
+        return None;
+    }
     ui.add_space(10.0);
     let ready = crate::tray::ready_to_grant(&method, draft);
     ui.add_enabled(ready, egui::Button::new("Grant to this sandbox"))
         .clicked()
         .then(|| RowAction::Grant(method.name.clone(), crate::tray::connection_choice(draft)))
+}
+
+/// A sign-in runs over rounds, and this row grants in one press. The card drives rounds and the terminal does; this row names them rather than starting an exchange it cannot finish.
+fn signs_in_elsewhere(
+    method: &lns_ipc::ConnectorMethodView,
+    draft: &crate::tray::OfferDraft,
+) -> bool {
+    method.carries_code && draft.connecting
 }
 
 fn toggle(state: &mut DashboardState, id: &str) {
@@ -1755,6 +1772,42 @@ mod tests {
 
     fn asked_about(host: &str) -> Entry {
         answered(host, EntryState::Undecided)
+    }
+
+    fn method_that(carries_code: bool) -> lns_ipc::ConnectorMethodView {
+        lns_ipc::ConnectorMethodView {
+            name: "sign-in".into(),
+            label: "sign-in".into(),
+            auth_label: Some("sign-in".into()),
+            offerable: true,
+            opens: Vec::new(),
+            writes: Vec::new(),
+            env: Vec::new(),
+            credentials: Vec::new(),
+            asks: Vec::new(),
+            help: None,
+            overrides: None,
+            hosts: Vec::new(),
+            runs_programs: false,
+            carries_code,
+        }
+    }
+
+    #[test]
+    fn this_row_grants_in_one_press_so_a_sign_in_over_rounds_happens_elsewhere() {
+        // The card drives rounds and the terminal does; this row would start an exchange it has no way to finish.
+        let mut making_one = crate::tray::OfferDraft::default();
+        making_one.connecting = true;
+
+        assert!(signs_in_elsewhere(&method_that(true), &making_one));
+        assert!(
+            !signs_in_elsewhere(&method_that(false), &making_one),
+            "a mechanism lns implements asks for what the document declares, which this row can collect"
+        );
+        assert!(
+            !signs_in_elsewhere(&method_that(true), &crate::tray::OfferDraft::default()),
+            "and naming a connection this machine already holds needs no sign-in at all"
+        );
     }
 
     fn answered(host: &str, state: EntryState) -> Entry {

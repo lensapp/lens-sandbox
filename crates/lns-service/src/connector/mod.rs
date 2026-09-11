@@ -3,13 +3,17 @@
 
 pub mod claims;
 pub mod conflicts;
+pub mod connect;
 pub mod dir;
 pub mod handler;
 pub mod layer;
+pub mod mechanism;
 pub mod offer;
 pub mod payload;
 pub mod real;
+pub mod refresh;
 mod registry;
+pub mod session;
 pub mod source;
 pub mod store;
 pub mod writes;

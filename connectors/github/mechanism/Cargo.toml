@@ -1,0 +1,33 @@
+# Not a workspace member: it builds for wasm32-wasip2, and the built component
+# is committed beside the document so installing the connector needs no wasm
+# toolchain. Rebuild with ./build.sh after changing this crate or
+# crates/lns-service/wit.
+[package]
+name = "github-mechanism"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen = "0.46"
+
+# One build per method, because a method declares what it produces and a
+# component is told nothing about which one invoked it. No default: a build
+# that named neither would silently be one of them.
+[features]
+sign-in = []
+oauth-sign-in = []
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

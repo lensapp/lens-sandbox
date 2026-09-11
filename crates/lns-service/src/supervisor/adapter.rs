@@ -119,6 +119,12 @@ async fn decision_delivery_loop(
             RequestAction::Grant { method, connection } => {
                 session.grant_offer(&delivery.id, &method, connection);
             }
+            RequestAction::BeginConnect { method, label } => {
+                session.begin_connect(&delivery.id, &method, &label);
+            }
+            RequestAction::AnswerConnect { values } => {
+                session.answer_connect(&delivery.id, values);
+            }
             RequestAction::Decline => {
                 session.decline_offer(&delivery.id);
             }
@@ -189,10 +195,12 @@ fn read_connector_state(session: &Arc<ApprovalSession>, run_id: &str, microvm: &
     for (connector, supply) in crate::connector::real::granted_supply_for(run_id) {
         session.apply_granted_egress(&connector, supply);
     }
-    session.set_connector_port(Arc::new(crate::connector::real::RealConnectorPort::new(
+    let port = Arc::new(crate::connector::real::RealConnectorPort::new(
         run_id.to_string(),
         microvm.to_string(),
-    )));
+    ));
+    session.set_connect_round_port(port.clone());
+    session.set_connector_port(port);
 }
 
 pub(super) async fn start(
@@ -405,6 +413,47 @@ mod tests {
         assert!(
             frame_rx.try_recv().is_err(),
             "neither answer decides the held request: no connector is offered on these prompts, so nothing was granted or declined"
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_delivery_loop_routes_each_round_of_a_sign_in_to_the_session() {
+        // A round is neither a decision about the request nor a grant; routing one to either would answer a question the developer is still being asked.
+        use crate::approval_flow::protocol::RequestPending;
+        let (session, mut frame_rx) = fixture_session();
+        let (tx, rx) = mpsc::unbounded_channel::<DecisionDelivery>();
+        session.submit_pending(
+            RequestPending {
+                id: "r1".into(),
+                host: "api.some-provider.example".into(),
+                action: "CONNECT api.some-provider.example:443".into(),
+                treatment: Default::default(),
+                reason: "policy-ambiguous".into(),
+            },
+            std::time::Instant::now(),
+        );
+        tx.send(DecisionDelivery {
+            id: "r1".into(),
+            action: RequestAction::BeginConnect {
+                method: "sign-in".into(),
+                label: "work".into(),
+            },
+        })
+        .unwrap();
+        tx.send(DecisionDelivery {
+            id: "r1".into(),
+            action: RequestAction::AnswerConnect {
+                values: lns_ipc::SecretValues::default(),
+            },
+        })
+        .unwrap();
+        drop(tx);
+
+        decision_delivery_loop(Arc::downgrade(&session), rx).await;
+
+        assert!(
+            frame_rx.try_recv().is_err(),
+            "no connector is offered on this prompt, so neither round decided the held request"
         );
     }
 

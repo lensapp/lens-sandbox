@@ -18,10 +18,13 @@ pub enum Call {
     Install(String),
     Uninstall(String),
     List,
-    Connect {
+    Begin {
         name: String,
         method: String,
         connection: String,
+    },
+    Answer {
+        session: String,
         values: std::collections::BTreeMap<String, String>,
     },
     Disconnect {
@@ -39,6 +42,69 @@ pub enum Call {
         name: String,
         run: String,
     },
+}
+
+/// The same turn, for the card rather than the wire: it holds the connector it is drawing already, and a finished round names its own connection.
+fn one_round(turn: super::connect::Connecting) -> crate::approval_flow::session::ConnectRound {
+    use crate::approval_flow::session::ConnectRound;
+    match turn {
+        super::connect::Connecting::Asks {
+            session,
+            message,
+            fields,
+            from_code,
+        } => ConnectRound::Asks {
+            session,
+            message,
+            from_code,
+            fields: fields
+                .into_iter()
+                .map(|field| lns_ipc::ConnectorFieldView {
+                    name: field.name,
+                    label: field.label,
+                    secret: field.secret,
+                })
+                .collect(),
+        },
+        super::connect::Connecting::Connected(connected) => ConnectRound::Connected {
+            connection: connected.connection,
+            invalidated: named_holders(connected.invalidated),
+        },
+        super::connect::Connecting::Failed(reason) => ConnectRound::Failed(reason),
+    }
+}
+
+/// One turn of a connect, as the caller sees it.
+fn one_turn(name: &str, turn: super::connect::Connecting) -> Response {
+    match turn {
+        super::connect::Connecting::Asks {
+            session,
+            message,
+            fields,
+            from_code,
+        } => Response::ConnectorAsks {
+            session,
+            message,
+            from_code,
+            fields: fields
+                .into_iter()
+                .map(|field| lns_ipc::ConnectorFieldView {
+                    name: field.name,
+                    label: field.label,
+                    secret: field.secret,
+                })
+                .collect(),
+        },
+        super::connect::Connecting::Connected(connected) => Response::ConnectorConnected {
+            name: name.to_string(),
+            connection: connected.connection,
+            invalidated: named_holders(connected.invalidated),
+        },
+        super::connect::Connecting::Failed(reason) => Response::ConnectorConnectFailed {
+            name: name.to_string(),
+            reason,
+        },
+    }
 }
 
 /// Who a `--run` handle names: the run it resolves to, or — where it is a name no run holds — the reservation waiting for it (§3.2.4). The service decides this because only the service holds the registry.
@@ -125,6 +191,46 @@ impl RealConnectorPort {
     }
 }
 
+impl crate::approval_flow::session::ConnectRoundPort for RealConnectorPort {
+    fn begin_connect(
+        &self,
+        name: &str,
+        method: &str,
+        label: &str,
+    ) -> Result<crate::approval_flow::session::ConnectRound, String> {
+        self.with_store(|store| {
+            // A component's own compute runs synchronously and may spend its whole deadline, so it steps off the runtime thread rather than holding a worker.
+            let turn = super::mechanism::real::off_the_runtime_thread(|| {
+                super::mechanism::real::driver(*store)?.begin(name, method, label)
+            })?;
+            Ok(one_round(turn))
+        })
+    }
+
+    fn answer_connect(
+        &self,
+        session: &str,
+        values: lns_ipc::SecretValues,
+    ) -> Result<crate::approval_flow::session::ConnectRound, String> {
+        self.with_store(|store| {
+            let turn = super::mechanism::real::off_the_runtime_thread(|| {
+                super::mechanism::real::driver(*store)?.answer(session, values.0)
+            })?;
+            Ok(one_round(turn.connecting))
+        })
+    }
+
+    fn abandon_connect(&self, session: &str) {
+        let dropped = self.with_store(|store| {
+            super::mechanism::real::driver(*store)?.abandon_handle(session);
+            Ok(())
+        });
+        if let Err(why) = dropped {
+            crate::log::warn!("dropping an abandoned connect round: {why}");
+        }
+    }
+}
+
 impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
     fn connect(
         &self,
@@ -135,7 +241,12 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
     ) -> Result<Vec<String>, String> {
         self.with_store(|store| {
             Ok(named_holders(
-                handler::connect(store, name, method, label, values.0)?.invalidated,
+                super::mechanism::real::off_the_runtime_thread(|| {
+                    super::mechanism::real::driver(*store)?
+                        .with_values(name, method, label, values.0)
+                })?
+                .finished()?
+                .invalidated,
             ))
         })
     }
@@ -151,11 +262,14 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
             handler::grant_disclosed(
                 store,
                 name,
-                digest,
                 &self.holder,
                 method,
                 connection,
-                paths_counted_at_boot_for(&self.holder).as_deref(),
+                &handler::AsRaised {
+                    digest,
+                    counted_at_boot: paths_counted_at_boot_for(&self.holder).as_deref(),
+                    now_millis: super::mechanism::real::now_millis(),
+                },
             )
         })?;
         // A grant that changed nothing decided nothing, and a line for it would let the chain count re-runs of a command as decisions.
@@ -438,7 +552,23 @@ fn values_a_granted_method_sets(
 }
 
 fn read_granted_supply(holder: &GrantHolder) -> Result<BTreeMap<String, GrantedPayload>> {
-    with_run_store(holder, handler::granted_supply)
+    with_run_store(holder, |store, holder| {
+        handler::granted_supply(store, holder, super::mechanism::real::now_millis())
+    })
+}
+
+/// Every connector this machine holds, one at a time, against the three stores. A connector that fails does not take the others with it.
+pub fn with_every_connector(
+    mut f: impl FnMut(&ConnectorStore<'_>, &str) -> Result<()>,
+) -> Result<()> {
+    with_stores(|store| {
+        for entry in store.installed()? {
+            if let Err(e) = f(store, &entry.name) {
+                crate::log::warn!("{}: {e:#}", entry.name);
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Opens the three stores against the holder a grant is keyed by.
@@ -469,21 +599,37 @@ pub async fn answer(call: Call) -> Result<Response> {
         Call::List => Ok(Response::ConnectorList {
             connectors: handler::list(&store)?,
         }),
-        Call::Connect {
+        // A component's own compute runs synchronously and may spend its whole deadline, so it steps off the runtime thread rather than holding a worker.
+        Call::Begin {
             name,
             method,
             connection,
-            values,
         } => {
-            let connected = handler::connect(&store, &name, &method, &connection, values)?;
-            Ok(Response::ConnectorConnected {
-                name,
-                connection: connected.connection,
-                invalidated: named_holders(connected.invalidated),
-            })
+            let turn = super::mechanism::real::off_the_runtime_thread(|| {
+                super::mechanism::real::driver(store)?.begin(&name, &method, &connection)
+            })?;
+            Ok(one_turn(&name, turn))
+        }
+        Call::Answer { session, values } => {
+            let turn = super::mechanism::real::off_the_runtime_thread(|| {
+                super::mechanism::real::driver(store)?.answer(&session, values)
+            })?;
+            Ok(one_turn(&turn.connector, turn.connecting))
         }
         Call::Disconnect { name, connection } => Ok(Response::ConnectorDisconnected {
-            dropped: handler::disconnect(&store, &name, connection.as_deref())?,
+            // A revoke is a component call, so it is spent off the thread every component deadline is measured in.
+            // A machine that cannot start a component runtime still drops what the user pressed Disconnect on; it just has nobody to tell.
+            dropped: super::mechanism::real::off_the_runtime_thread(|| {
+                handler::disconnect(
+                    &store,
+                    super::mechanism::real::mechanisms()
+                        .ok()
+                        .map(|ready| ready as &dyn super::mechanism::traits::Mechanisms),
+                    &name,
+                    connection.as_deref(),
+                    super::mechanism::real::now_millis(),
+                )
+            })?,
             name,
         }),
         Call::Grant {
@@ -561,6 +707,60 @@ mod tests {
 
     const RUN: &str = "1a2b3c4d0000000000000000000000aa";
     const OTHER_RUN: &str = "9f8e7d6c0000000000000000000000bb";
+
+    #[tokio::test]
+    #[serial(env, global_runs)]
+    async fn one_connector_that_cannot_be_looked_at_does_not_take_the_others_with_it() {
+        // The refresh pass runs beside the tick that spends component deadlines, so one broken connector must not stop the sweep.
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        let project = tempfile::tempdir().expect("tempdir");
+        for name in ["alpha", "beta"] {
+            std::fs::write(
+                project.path().join("lns.yaml"),
+                serde_json::json!({
+                    "apiVersion": "lns.run/v1",
+                    "kind": "connector",
+                    "name": name,
+                    "spec": {
+                        "serves": [format!("api.{name}.example")],
+                        "methods": [{ "name": "token", "auth": { "kind": "token" } }],
+                    },
+                })
+                .to_string(),
+            )
+            .expect("write");
+            answer(Call::Install(project.path().display().to_string()))
+                .await
+                .expect("install");
+        }
+
+        let mut looked_at = Vec::new();
+        with_every_connector(|_store, name| {
+            looked_at.push(name.to_string());
+            anyhow::bail!("this one cannot be looked at")
+        })
+        .expect("one connector's failure is not the pass's");
+
+        assert_eq!(looked_at, ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn a_connect_that_did_not_finish_answers_the_caller_rather_than_faulting() {
+        // A mechanism refusing is an answer: the offer stands and the caller is told whose refusal it is.
+        let answered = one_turn(
+            "some-provider",
+            super::super::connect::Connecting::Failed("the provider said no".to_string()),
+        );
+
+        assert_eq!(
+            answered,
+            Response::ConnectorConnectFailed {
+                name: "some-provider".to_string(),
+                reason: "the provider said no".to_string(),
+            }
+        );
+    }
 
     #[test]
     #[serial(env, global_runs)]
@@ -847,6 +1047,29 @@ mod tests {
     fn connector_state_this_build_cannot_reach_holds_nothing_rather_than_failing_the_run() {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
         assert!(offers_for_run(RUN).is_empty());
+    }
+
+    use crate::approval_flow::session::ConnectRound;
+
+    /// The handle and fields of a round still asking, and nothing for one that is not.
+    fn asking(round: &ConnectRound) -> Option<(&str, &[lns_ipc::ConnectorFieldView])> {
+        match round {
+            ConnectRound::Asks {
+                session, fields, ..
+            } => Some((session, fields)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_mechanism_that_refused_reaches_the_card_as_its_own_refusal() {
+        // §3.2.6 separates the three answers: a `failed` is the mechanism's word about the sign-in, not lns failing to run it, and a card that showed them alike would blame the wrong party.
+        assert_eq!(
+            one_round(crate::connector::connect::Connecting::Failed(
+                "GitHub returned no refresh token".to_string()
+            )),
+            ConnectRound::Failed("GitHub returned no refresh token".to_string())
+        );
     }
 
     fn install_connectable(home: &Path) {
@@ -1813,6 +2036,87 @@ mod tests {
     fn connector_state_that_cannot_be_read_supplies_nothing_rather_than_failing_the_run() {
         let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
         assert!(granted_supply_for(RUN).is_empty());
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
+    fn a_card_drives_a_connect_one_round_at_a_time() {
+        use crate::approval_flow::session::ConnectRoundPort;
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        let port = RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string());
+
+        let round = port
+            .begin_connect("some-provider", "token", "work")
+            .expect("the mechanism asks");
+
+        let (session, fields) = asking(&round).expect("this mechanism asks first");
+        assert_eq!(fields[0].name, "token");
+        let session = session.to_string();
+        let answered = port
+            .answer_connect(
+                &session,
+                lns_ipc::SecretValues(std::collections::BTreeMap::from([(
+                    "token".to_string(),
+                    "abc".to_string(),
+                )])),
+            )
+            .expect("the answer finishes it");
+        assert!(
+            asking(&answered).is_none(),
+            "a finished round is not one to answer again"
+        );
+        assert_eq!(
+            answered,
+            ConnectRound::Connected {
+                connection: "work".to_string(),
+                invalidated: Vec::new(),
+            },
+            "the card learns the connection it just made, so it can grant through it"
+        );
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
+    fn a_card_that_walked_away_from_a_round_leaves_it_answering_nobody() {
+        use crate::approval_flow::session::ConnectRoundPort;
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", home.path());
+        install_connectable(home.path());
+        let port = RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string());
+        let opened = port
+            .begin_connect("some-provider", "token", "work")
+            .expect("the mechanism asks");
+        let (session, _) = asking(&opened).expect("this mechanism asks first");
+
+        port.abandon_connect(session);
+
+        assert!(
+            port.answer_connect(session, lns_ipc::SecretValues::default())
+                .expect_err("the round is gone")
+                .contains("no longer open")
+        );
+    }
+
+    #[test]
+    #[serial(env, global_runs)]
+    fn a_card_round_that_cannot_reach_the_store_says_so_rather_than_panicking() {
+        use crate::approval_flow::session::ConnectRoundPort;
+        let _guard = crate::test_env::EnvVarGuard::set("LNS_HOME", "relative/dir");
+        let port = RealConnectorPort::new(RUN.to_string(), "calm-finch".to_string());
+
+        assert!(
+            port.begin_connect("some-provider", "token", "work")
+                .expect_err("no home resolves")
+                .contains("locating the connector store")
+        );
+        assert!(
+            port.answer_connect("a-handle", lns_ipc::SecretValues::default())
+                .expect_err("no home resolves")
+                .contains("locating the connector store")
+        );
+        port.abandon_connect("a-handle");
     }
 
     #[test]

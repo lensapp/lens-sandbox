@@ -320,9 +320,9 @@ lns connector forget <ID> --run <RUN>
 | `install <REF\|PATH>` | Make a published or local connector available on this machine. Installing grants nothing: no destination opens, no file is written, and no real value is supplied. It does lend its `placeholder` to a variable a sandbox itself declared and left to it. It also reaches the runs you start afterwards. Each counts the paths this connector's methods would write when it decides how to mount its binds. A run that binds a directory a method writes into needs that path in the bind's `exclude`, or it refuses to start and names both. Refused when a method carries a block a connector may not, when the document's `serves` overlaps an installed connector's, or when it claims a variable one already claims. |
 | `uninstall <ID>`      | Remove it from this machine, with every connection it held. A run that already granted a method keeps that decision, and reinstalling the same bytes resumes it. |
 | `list`                | List what is installed: what each connector serves, each method and what it still needs (`ready to grant`, `connect first`, or that this `lns` cannot offer it), and the connections this machine holds. |
-| `connect <ID>`        | Ask for each value the method's authentication produces, at the terminal and without echoing it, and keep the result as a named connection. A `kind: token` authentication produces one value, so one method asks one question however many credentials draw on it. `--as` names it; otherwise `lns` suggests the first free name and you confirm, so a suggested name never replaces a connection you already hold. A name you give yourself — with `--as` or at the prompt — that a connection already uses re-authenticates that connection in place. Grants nothing: a run still decides whether to use it. Refused for a method with no `auth` — grant that instead. |
+| `connect <ID>`        | Ask at the terminal for each value the method's mechanism asks for, and keep the result as a named connection. The mechanism decides what to ask and how many rounds it takes, so a `kind: token` method asks one question however many credentials draw on its one value, while a method carrying code may ask more than once, may show you something and collect nothing, and may ask for a value it does not mark secret — which is echoed as you type it. Anything it marks secret is not. `--as` names it; otherwise `lns` suggests the first free name and you confirm, so a suggested name never replaces a connection you already hold. A name you give yourself — with `--as` or at the prompt — that a connection already uses re-authenticates that connection in place. Grants nothing: a run still decides whether to use it. Refused for a method with no `auth` — grant that instead. Where the mechanism refuses, `lns` reports its refusal and nothing is kept. |
 | `disconnect <ID>`     | Drop one connection, or every connection of the connector when `--connection` is absent. Exits `1` when it holds none. The connector stays installed, and runs that granted a dropped connection keep their grants. |
-| `grant <ID>`          | Let one run use one method. `--run` names it — its id, its name, or a unique id prefix — and is required. Prints what that method opens, writes and sets, and the authority of each connection the method can use, then asks. `--yes` answers the disclosure on the command line, so a dispatcher reserves a grant for the run name it is about to use, with no prompt and no card. It still prints the disclosure, and it still refuses to choose: name the method with `--method` and the connection with `--connection` where more than one is offerable. Where `--run` names no run, the disclosure says so and your answer reserves the decision for the run you next create with that name. An id or id prefix that resolves to nothing is an error, not a reservation. Exits `1` when you decline, and `1` when that run already granted that method and connection. A method that writes a file is refused for a run that started before the connector was installed: only a boot works out where the file lands, so restart the run and grant it there. |
+| `grant <ID>`          | Let one run use one method. `--run` names it — its id, its name, or a unique id prefix — and is required. Prints what that method opens, writes and sets, and the authority of each connection the method can use, then asks. A method whose mechanism is code lns cannot read discloses bounds instead of behaviour: the hosts its component may contact — or that it may contact none — the digest the connector is installed at, and one of two fixed sentences, the blunter of which says lns cannot bound what a program that component starts may reach. `--yes` answers the disclosure on the command line, so a dispatcher reserves a grant for the run name it is about to use, with no prompt and no card. It still prints the disclosure, and it still refuses to choose: name the method with `--method` and the connection with `--connection` where more than one is offerable. Where `--run` names no run, the disclosure says so and your answer reserves the decision for the run you next create with that name. An id or id prefix that resolves to nothing is an error, not a reservation. Exits `1` when you decline, and `1` when that run already granted that method and connection. A method that writes a file is refused for a run that started before the connector was installed: only a boot works out where the file lands, so restart the run and grant it there. |
 | `forget <ID>`         | Clear one run's decision about one connector, granted or declined, so its next start asks again. It also clears a reservation waiting for a name. Exits `1` when there was nothing to clear. |
 
 `install` takes either a published reference or a local path — a directory
@@ -342,24 +342,24 @@ connector declares more than one method this version can offer — `lns` refuses
 rather than choosing for you.
 
 ```console
-$ lns connector grant github --run task-42 --yes
-granting github to task-42 would give it:
+$ lns connector grant forge --run task-42 --yes
+granting forge to task-42 would give it:
   method   Personal access token
-  opens    github.com, api.github.com, codeload.github.com
+  opens    forge.example, api.forge.example, codeload.forge.example
   writes   nothing
-  sets     GH_TOKEN
-  connection gh auth token (no authority reported)
+  sets     FORGE_TOKEN
+  connection forge auth token (no authority reported)
   no run is named task-42. This reserves the decision for the run you next create with that name.
-reserved github with token as gh auth token for task-42
+reserved forge with token as forge auth token for task-42
 ```
 
 Without a terminal and without the flag, `grant` refuses and names both ways
 out:
 
 ```console
-$ lns connector grant github --run task-45
-error: granting github shows what it opens and asks you to confirm, and there is no terminal to ask at.
-       Run `lns connector grant github --run task-45` from a terminal, or pass --yes to answer here.
+$ lns connector grant forge --run task-45
+error: granting forge shows what it opens and asks you to confirm, and there is no terminal to ask at.
+       Run `lns connector grant forge --run task-45` from a terminal, or pass --yes to answer here.
 ```
 
 You do not have to grant anything ahead of time. When a run reaches a destination
@@ -370,6 +370,14 @@ use or connect a new one. Answering it applies the method to the
 running sandbox: the destination opens and the credential is injected on the
 wire. The variables the method sets reach the next workload of that run, not the
 workload already running, and the grant applies on every later start of it.
+
+A method that signs in through its own code signs in on the card. Press **Sign
+in**, and the card shows the round the connector's code is waiting on — its own
+words, named as the connector's, with the fields it asked for. Answer, and the
+card shows the next round. Some rounds ask for nothing: they show you a URL and
+a code, and **Continue** tells the connector you have entered it. The last round
+finishes the connection and grants it, on the disclosure the card already
+showed. Closing the card mid-sign-in drops what you typed.
 
 A method that packs a directory into a fileset is not offered yet, and neither
 the card nor `grant` will apply one: install keeps the packed fileset beside
@@ -437,8 +445,8 @@ unknown sandbox prints `No audit events for sandbox …` and exits `0`.
 Filters compose:
 
 - `--kind <kind>` — one of `launch`, `egress`, `env`, `volume`, `bind`,
-  `approval`, `connector`, `tool`.
-- `--connector <id>` — only what one connector was decided about.
+  `approval`, `connector`, `mechanism`, `tool`.
+- `--connector <id>` — only the lines about one connector, whichever kind they are.
 - `--format jsonl` — one raw JSON event per line instead of the table.
 
 A `connector` event is what one run decided: `granted`, `declined`, or `forgot`. A
@@ -446,6 +454,11 @@ grant records the method, the account behind it, and the digest it bound to.
 Connecting records nothing — a connection belongs to the machine and to no run, so
 no run's timeline could account for it. A grant reserved for a name no run holds yet
 shows with no run against it, and stays that way once a run takes the reservation.
+
+A `mechanism` event is what a connector's own code did: a host it reached, a
+program it started, and a renewal `lns` ran on its schedule. These happen on the
+machine's behalf, outside any run, and they leave no state behind — a renewal that
+ran while nobody watched is readable here and nowhere else.
 
 Integrity is checked automatically as the log is read: if a hash chain has been altered,
 truncated, or can't be verified against its anchor, `lns audit` prints an inline

@@ -204,17 +204,80 @@ fn collect_feature_phrases(dir: &Path) -> Vec<String> {
         }
         let src =
             fs::read_to_string(&entry).unwrap_or_else(|e| panic!("read {}: {e}", entry.display()));
+        let tables = tables(&src);
         for line in src.lines() {
             let trimmed = line.trim_start();
             for kw in KEYWORDS {
                 if let Some(rest) = trimmed.strip_prefix(kw) {
-                    out.push(rest.trim_end().to_string());
+                    out.extend(filled_in(rest.trim_end(), &tables));
                     break;
                 }
             }
         }
     }
     out
+}
+
+/// Every table in one file, each as its own header and rows. A `Scenario Outline`'s step is a template, so the phrase a step definition must match is the filled-in one.
+struct Table {
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+fn tables(src: &str) -> Vec<Table> {
+    let mut out: Vec<Table> = Vec::new();
+    let mut open = false;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        let Some(row) = trimmed.strip_prefix('|').and_then(|r| r.strip_suffix('|')) else {
+            // A table ends at the first line that is not one, so two blocks cannot borrow each other's columns.
+            open = false;
+            continue;
+        };
+        let cells: Vec<String> = row.split('|').map(|cell| cell.trim().to_string()).collect();
+        if open {
+            out.last_mut().expect("a table was opened").rows.push(cells);
+            continue;
+        }
+        open = true;
+        out.push(Table {
+            header: cells,
+            rows: Vec::new(),
+        });
+    }
+    out
+}
+
+/// One phrase per row of the first table whose columns cover every placeholder the phrase carries, and the phrase itself where it carries none. Row-aligned, because a row is what one example is.
+fn filled_in(phrase: &str, tables: &[Table]) -> Vec<String> {
+    let wanted: Vec<String> = tables
+        .iter()
+        .flat_map(|table| table.header.iter())
+        .filter(|column| phrase.contains(&format!("<{column}>")))
+        .cloned()
+        .collect();
+    if wanted.is_empty() {
+        return vec![phrase.to_string()];
+    }
+    let Some(table) = tables
+        .iter()
+        .find(|table| wanted.iter().all(|column| table.header.contains(column)))
+    else {
+        return vec![phrase.to_string()];
+    };
+    table
+        .rows
+        .iter()
+        .map(|row| {
+            table
+                .header
+                .iter()
+                .zip(row)
+                .fold(phrase.to_string(), |filled, (column, cell)| {
+                    filled.replace(&format!("<{column}>"), cell)
+                })
+        })
+        .collect()
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {
@@ -306,6 +369,77 @@ mod tests {
                 "cucumber accepts {accepted:?} as a float, so this audit must too"
             );
         }
+    }
+
+    #[test]
+    fn an_outlines_step_is_read_filled_in_rather_than_as_a_template() {
+        // A step definition matches `uses the token mechanism`, never `uses the <mechanism> mechanism`, so an unexpanded outline reads as dead.
+        let feature = "\
+  Scenario Outline: one story per mechanism
+    Given its method uses the <mechanism> mechanism
+
+    Examples:
+      | mechanism |
+      | token     |
+      | code      |
+";
+        let filled = filled_in(
+            "its method uses the <mechanism> mechanism",
+            &tables(feature),
+        );
+
+        assert_eq!(
+            filled,
+            [
+                "its method uses the token mechanism",
+                "its method uses the code mechanism"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_phrase_with_two_placeholders_is_filled_row_by_row_rather_than_crossed() {
+        // Two columns crossed would invent "the token mechanism produces access_token" from rows that never say it, and a dead step could then match a phrase no scenario runs.
+        let feature = "\
+      | mechanism | output       |
+      | token     | token        |
+      | code      | access_token |
+";
+
+        assert_eq!(
+            filled_in(
+                "the <mechanism> mechanism produces <output>",
+                &tables(feature)
+            ),
+            [
+                "the token mechanism produces token",
+                "the code mechanism produces access_token"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_phrase_is_filled_from_the_table_that_covers_it_rather_than_the_first_one() {
+        let feature = "\
+      | other |
+      | x     |
+
+      | mechanism |
+      | token     |
+";
+
+        assert_eq!(
+            filled_in("uses the <mechanism> mechanism", &tables(feature)),
+            ["uses the token mechanism"]
+        );
+    }
+
+    #[test]
+    fn a_step_carrying_no_placeholder_is_read_as_written() {
+        assert_eq!(
+            filled_in("its method is a code method", &tables("| a |\n| b |")),
+            ["its method is a code method"]
+        );
     }
 
     #[test]
