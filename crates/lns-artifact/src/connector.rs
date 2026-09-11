@@ -725,21 +725,40 @@ mod tests {
                 .expect("the shipped document is YAML");
         let parsed = parse(&serde_json::to_vec(&shipped).expect("a document re-encodes"))
             .expect("the shipped document is a connector this version accepts");
-        let auth = parsed.spec.methods[0].auth.as_ref().expect("an auth");
-        let code = auth.code().expect("a code auth").expect("a valid one");
-        // What the grant card discloses about it, which no edit to the example may quietly widen.
-        assert_eq!(code.hosts, ["github.com"]);
-        assert!(!code.exec);
-        // The file the wasm suite runs by literal path, so renaming one side without the other fails here rather than at install.
-        assert_eq!(code.component.as_deref(), Some("./sign-in.wasm"));
-        assert_eq!(code.limits().call_seconds, 15);
-        assert_eq!(code.limits().session_seconds, 900);
+        // A method dropped from the document is a method nothing then tests, so the count is pinned before anything reads by index.
+        assert_eq!(parsed.spec.methods.len(), 2);
+        let app = shipped_code(&parsed, 0, "sign-in");
+        let oauth = shipped_code(&parsed, 1, "oauth-sign-in");
         // The join between the two halves of the example: dropping an output the component still produces parses, and then stores a connection with a hole nothing reports until a renewal fails.
         assert_eq!(
-            code.outputs,
+            app.outputs,
             ["access_token", "refresh_token", "client_id"],
-            "the outputs the shipped component is pinned to produce"
+            "what the GitHub App component is pinned to produce"
         );
+        assert_eq!(
+            oauth.outputs,
+            ["access_token"],
+            "an OAuth App's token never expires, so there is nothing else to keep"
+        );
+    }
+
+    /// One shipped method's bounds, which no edit to the example may quietly widen, and the component path the wasm suite runs by literal path.
+    fn shipped_code(parsed: &ConnectorDefinition, at: usize, name: &str) -> CodeAuth {
+        let method = &parsed.spec.methods[at];
+        assert_eq!(method.name, name);
+        let code = method
+            .auth
+            .as_ref()
+            .expect("an auth")
+            .code()
+            .expect("a code auth")
+            .expect("a valid one");
+        assert_eq!(code.hosts, ["github.com"]);
+        assert!(!code.exec);
+        assert_eq!(code.component.as_deref(), Some(&*format!("./{name}.wasm")));
+        assert_eq!(code.limits().call_seconds, 15);
+        assert_eq!(code.limits().session_seconds, 900);
+        code
     }
 
     fn code_method(auth: &str, credentials: &str) -> Vec<u8> {

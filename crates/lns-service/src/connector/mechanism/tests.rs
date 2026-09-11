@@ -51,6 +51,8 @@ impl Recorder for Spy {
 #[derive(Default)]
 pub struct Reachable {
     pub seen: Mutex<Vec<String>>,
+    /// What each call carried, for a component whose request body is part of what it was asked to do.
+    pub sent: Mutex<Vec<Vec<u8>>>,
     /// The deadline the call carried, because an epoch tick cannot interrupt a host call already in flight.
     pub within: Mutex<std::time::Duration>,
     /// What the network did, rather than what the bound decided: a mechanism has to tell the two apart.
@@ -84,6 +86,10 @@ impl Http for Reachable {
             .lock()
             .expect("http lock")
             .push(request.url.clone());
+        self.sent
+            .lock()
+            .expect("http lock")
+            .push(request.body.clone());
         if *self.unreachable.lock().expect("http lock") {
             return Err(CallError::Failed("the network is down".to_string()));
         }
