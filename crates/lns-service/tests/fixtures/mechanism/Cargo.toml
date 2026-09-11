@@ -36,6 +36,9 @@ hurrying = []
 refusing = []
 keeping = []
 clinging = []
+boasting = []
+sprawling = []
+swarming = []
 
 [profile.release]
 opt-level = "z"
