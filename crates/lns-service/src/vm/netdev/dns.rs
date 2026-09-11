@@ -1,15 +1,15 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
+use futures_util::stream::FuturesUnordered;
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 
 pub const PORT: u16 = 53;
-
-/// How long one upstream has to answer before the next one is asked.
-pub const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The host's resolver list is read again this often, so a VPN coming up mid-run is picked up.
 pub const REFRESH_AFTER: Duration = Duration::from_secs(30);
@@ -50,6 +50,7 @@ pub struct Resolvers {
     refresh_after: Duration,
     cached: Arc<Mutex<Cached>>,
     refreshing: Arc<AtomicBool>,
+    demotions: Demotions,
 }
 
 struct Cached {
@@ -68,7 +69,13 @@ impl Resolvers {
                 read_at: Instant::now(),
             })),
             refreshing: Arc::new(AtomicBool::new(false)),
+            demotions: Demotions::default(),
         }
+    }
+
+    /// Which of the run's upstreams answered nothing lately, so a query is not slowed by them again.
+    pub fn demotions(&self) -> &Demotions {
+        &self.demotions
     }
 
     /// The servers that answer for `name`: every resolver whose domain matches it longest, else the default ones.
@@ -154,17 +161,107 @@ pub fn question_name(query: &[u8]) -> Option<String> {
     Some(message.queries.first()?.name().to_string())
 }
 
-/// The guest's query, asked of each server in turn. Nobody answering is a SERVFAIL, never silence.
-pub async fn relay(query: &[u8], servers: &[SocketAddr], upstream: &dyn Upstream) -> Vec<u8> {
-    let mut refusal = None;
-    for server in servers {
-        match ask(query, *server, upstream).await {
-            Some(answer) if answers(&answer) => return answer,
-            Some(refused) => refusal = Some(refused),
-            None => {}
+/// A server that answered nothing is asked last for a while, so the next query does not wait on it again.
+#[derive(Default)]
+pub struct Demotions(Mutex<HashMap<SocketAddr, tokio::time::Instant>>);
+
+impl Demotions {
+    fn order(&self, servers: &[SocketAddr]) -> Vec<SocketAddr> {
+        let demoted = self.0.lock().expect("demotions poisoned");
+        let now = tokio::time::Instant::now();
+        let (mut first, last): (Vec<SocketAddr>, Vec<SocketAddr>) = servers
+            .iter()
+            .copied()
+            .partition(|server| demoted.get(server).is_none_or(|until| *until <= now));
+        first.extend(last);
+        first
+    }
+
+    fn silent(&self, servers: &[SocketAddr]) {
+        let now = tokio::time::Instant::now();
+        let mut demoted = self.0.lock().expect("demotions poisoned");
+        demoted.retain(|_, until| *until > now);
+        for server in servers {
+            demoted.insert(*server, now + DEMOTED_FOR);
         }
     }
-    refusal.unwrap_or_else(|| servfail(query))
+
+    fn answered(&self, server: SocketAddr) {
+        self.0.lock().expect("demotions poisoned").remove(&server);
+    }
+}
+
+/// The whole search fits under the 2 s the guest's own stub waits (lens-sandbox-core `dns::UPSTREAM_TIMEOUT`).
+const QUERY_BUDGET: Duration = Duration::from_millis(1800);
+
+/// A server silent this long is not waited for alone: the next one is asked while it stays pending.
+const HEDGE_AFTER: Duration = Duration::from_millis(700);
+
+/// How long a server that answered nothing is asked last.
+const DEMOTED_FOR: Duration = Duration::from_secs(30);
+
+/// The guest's query, put to one server after another without waiting for the silent ones. Nobody answering is a SERVFAIL, never silence.
+pub async fn relay(
+    query: &[u8],
+    servers: &[SocketAddr],
+    upstream: &dyn Upstream,
+    demotions: &Demotions,
+) -> Vec<u8> {
+    search(query, &demotions.order(servers), upstream, demotions)
+        .await
+        .unwrap_or_else(|| servfail(query))
+}
+
+/// The next server is asked while the one before it stays pending, and the first server that answers wins.
+async fn search(
+    query: &[u8],
+    servers: &[SocketAddr],
+    upstream: &dyn Upstream,
+    demotions: &Demotions,
+) -> Option<Vec<u8>> {
+    let mut unasked = servers.iter().copied();
+    let mut asking = FuturesUnordered::new();
+    let mut pending: Vec<SocketAddr> = Vec::new();
+    let mut refusal = None;
+    let budget = tokio::time::sleep(QUERY_BUDGET);
+    tokio::pin!(budget);
+    loop {
+        if let Some(server) = unasked.next() {
+            pending.push(server);
+            asking.push(asked(query, server, upstream));
+        } else if asking.is_empty() {
+            return refusal;
+        }
+        tokio::select! {
+            Some((server, reply)) = asking.next() => {
+                pending.retain(|asked| *asked != server);
+                match reply {
+                    Some(answer) if answers(&answer) => {
+                        demotions.answered(server);
+                        return Some(answer);
+                    }
+                    Some(refused) => {
+                        demotions.answered(server);
+                        refusal = Some(refused);
+                    }
+                    None => {}
+                }
+            }
+            () = tokio::time::sleep(HEDGE_AFTER) => demotions.silent(&pending),
+            () = &mut budget => {
+                demotions.silent(&pending);
+                return refusal;
+            }
+        }
+    }
+}
+
+async fn asked(
+    query: &[u8],
+    server: SocketAddr,
+    upstream: &dyn Upstream,
+) -> (SocketAddr, Option<Vec<u8>>) {
+    (server, ask(query, server, upstream).await)
 }
 
 /// SERVFAIL, REFUSED and NOTIMP are a server saying "not me", so the next one is asked; NXDOMAIN is an answer.
@@ -178,19 +275,11 @@ fn answers(reply: &[u8]) -> bool {
 }
 
 async fn ask(query: &[u8], server: SocketAddr, upstream: &dyn Upstream) -> Option<Vec<u8>> {
-    let over_udp = upstream.over_udp(server, query.to_vec());
-    let answer = tokio::time::timeout(UPSTREAM_TIMEOUT, over_udp)
-        .await
-        .ok()?
-        .ok()?;
+    let answer = upstream.over_udp(server, query.to_vec()).await.ok()?;
     if !truncated(&answer) {
         return Some(answer);
     }
-    let over_tcp = upstream.over_tcp(server, query.to_vec());
-    tokio::time::timeout(UPSTREAM_TIMEOUT, over_tcp)
-        .await
-        .ok()?
-        .ok()
+    upstream.over_tcp(server, query.to_vec()).await.ok()
 }
 
 fn truncated(answer: &[u8]) -> bool {
@@ -347,6 +436,7 @@ mod tests {
         tcp: Mutex<Vec<SocketAddr>>,
         answering: Option<SocketAddr>,
         saying: Vec<(SocketAddr, ResponseCode)>,
+        pending: Vec<SocketAddr>,
         truncate_udp: bool,
     }
 
@@ -357,6 +447,7 @@ mod tests {
                 tcp: Mutex::new(Vec::new()),
                 answering: Some(server),
                 saying: Vec::new(),
+                pending: Vec::new(),
                 truncate_udp: false,
             }
         }
@@ -367,6 +458,7 @@ mod tests {
                 tcp: Mutex::new(Vec::new()),
                 answering: None,
                 saying: Vec::new(),
+                pending: Vec::new(),
                 truncate_udp: false,
             }
         }
@@ -386,6 +478,9 @@ mod tests {
             query: Vec<u8>,
         ) -> BoxFuture<'static, std::io::Result<Vec<u8>>> {
             self.udp.lock().unwrap().push(server);
+            if self.pending.contains(&server) {
+                return Box::pin(std::future::pending());
+            }
             let reply = self.reply_of(server, &query, self.truncate_udp);
             Box::pin(async move { reply.ok_or_else(|| std::io::Error::other("no answer")) })
         }
@@ -545,7 +640,13 @@ mod tests {
         let upstream = FakeUpstream::answering(server("1.1.1.1"));
         let query = question("example.com.", RecordType::MX);
 
-        let reply = relay(&query, &[server("1.1.1.1")], &upstream).await;
+        let reply = relay(
+            &query,
+            &[server("1.1.1.1")],
+            &upstream,
+            &Demotions::default(),
+        )
+        .await;
 
         let reply = Message::from_vec(&reply).expect("the upstream's own answer comes back");
         assert_eq!(reply.metadata.id, 0x4242);
@@ -567,7 +668,13 @@ mod tests {
         upstream.truncate_udp = true;
         let query = question("example.com.", RecordType::A);
 
-        let reply = relay(&query, &[server("1.1.1.1")], &upstream).await;
+        let reply = relay(
+            &query,
+            &[server("1.1.1.1")],
+            &upstream,
+            &Demotions::default(),
+        )
+        .await;
 
         assert!(
             !Message::from_vec(&reply).unwrap().metadata.truncation,
@@ -587,7 +694,13 @@ mod tests {
         let query = question("example.com.", RecordType::A);
         let servers = [server("1.1.1.1")];
 
-        let reply = relay(&query, &servers, &TcpRefusing(upstream)).await;
+        let reply = relay(
+            &query,
+            &servers,
+            &TcpRefusing(upstream),
+            &Demotions::default(),
+        )
+        .await;
 
         assert_eq!(
             Message::from_vec(&reply).unwrap().metadata.response_code,
@@ -621,7 +734,7 @@ mod tests {
         let servers = [server("1.1.1.1"), server("8.8.8.8"), server("9.9.9.9")];
         let query = question("example.com.", RecordType::A);
 
-        let reply = relay(&query, &servers, &upstream).await;
+        let reply = relay(&query, &servers, &upstream, &Demotions::default()).await;
 
         assert_eq!(
             Message::from_vec(&reply).unwrap().metadata.response_code,
@@ -640,7 +753,7 @@ mod tests {
         let servers = [server("1.1.1.1"), server("8.8.8.8"), server("9.9.9.9")];
         let query = question("example.com.", RecordType::A);
 
-        let reply = relay(&query, &servers, &upstream).await;
+        let reply = relay(&query, &servers, &upstream, &Demotions::default()).await;
 
         let reply = Message::from_vec(&reply).unwrap();
         assert_eq!(
@@ -662,7 +775,7 @@ mod tests {
         let servers = [server("1.1.1.1"), server("9.9.9.9")];
         let query = question("nothing.example.com.", RecordType::A);
 
-        let reply = relay(&query, &servers, &upstream).await;
+        let reply = relay(&query, &servers, &upstream, &Demotions::default()).await;
 
         assert_eq!(
             Message::from_vec(&reply).unwrap().metadata.response_code,
@@ -685,7 +798,7 @@ mod tests {
         let servers = [server("1.1.1.1"), server("8.8.8.8")];
         let query = question("example.com.", RecordType::A);
 
-        let reply = relay(&query, &servers, &upstream).await;
+        let reply = relay(&query, &servers, &upstream, &Demotions::default()).await;
 
         let reply = Message::from_vec(&reply).unwrap();
         assert_eq!(reply.metadata.response_code, ResponseCode::NotImp);
@@ -695,11 +808,86 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_server_does_not_hold_up_the_one_that_can_answer() {
+        let mut upstream = FakeUpstream::answering(server("9.9.9.9"));
+        upstream.pending = vec![server("1.1.1.1")];
+        let servers = [server("1.1.1.1"), server("9.9.9.9")];
+        let query = question("example.com.", RecordType::A);
+        let asked_at = tokio::time::Instant::now();
+
+        let reply = relay(&query, &servers, &upstream, &Demotions::default()).await;
+
+        assert_eq!(
+            Message::from_vec(&reply).unwrap().metadata.response_code,
+            ResponseCode::NoError
+        );
+        assert!(
+            asked_at.elapsed() < Duration::from_secs(1),
+            "the guest's own stub gives up at 2 s; this took {:?}",
+            asked_at.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_query_every_server_is_silent_about_fails_within_the_budget() {
+        let mut upstream = FakeUpstream::silent();
+        upstream.pending = vec![server("1.1.1.1"), server("9.9.9.9")];
+        let servers = [server("1.1.1.1"), server("9.9.9.9")];
+        let query = question("example.com.", RecordType::A);
+        let asked_at = tokio::time::Instant::now();
+
+        let reply = relay(&query, &servers, &upstream, &Demotions::default()).await;
+
+        assert_eq!(
+            Message::from_vec(&reply).unwrap().metadata.response_code,
+            ResponseCode::ServFail
+        );
+        assert!(
+            asked_at.elapsed() <= QUERY_BUDGET,
+            "the search stops at its own budget; this took {:?}",
+            asked_at.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_that_answered_nothing_is_asked_last_until_its_demotion_runs_out() {
+        let mut upstream = FakeUpstream::answering(server("9.9.9.9"));
+        upstream.pending = vec![server("1.1.1.1")];
+        let servers = [server("1.1.1.1"), server("9.9.9.9")];
+        let query = question("example.com.", RecordType::A);
+        let demotions = Demotions::default();
+
+        relay(&query, &servers, &upstream, &demotions).await;
+        relay(&query, &servers, &upstream, &demotions).await;
+
+        assert_eq!(
+            upstream.udp.lock().unwrap().as_slice(),
+            &[server("1.1.1.1"), server("9.9.9.9"), server("9.9.9.9")],
+            "the second query is answered without waiting on the silent server at all"
+        );
+
+        tokio::time::advance(DEMOTED_FOR + Duration::from_secs(1)).await;
+        relay(&query, &servers, &upstream, &demotions).await;
+
+        assert_eq!(
+            upstream.udp.lock().unwrap()[3..],
+            [server("1.1.1.1"), server("9.9.9.9")],
+            "a demotion runs out, and the server is asked first again"
+        );
+    }
+
     #[tokio::test]
     async fn a_query_no_upstream_answers_is_a_server_failure_not_silence() {
         let query = question("example.com.", RecordType::A);
 
-        let reply = relay(&query, &[server("1.1.1.1")], &FakeUpstream::silent()).await;
+        let reply = relay(
+            &query,
+            &[server("1.1.1.1")],
+            &FakeUpstream::silent(),
+            &Demotions::default(),
+        )
+        .await;
 
         let reply = Message::from_vec(&reply).unwrap();
         assert_eq!(reply.metadata.response_code, ResponseCode::ServFail);
@@ -713,7 +901,7 @@ mod tests {
     async fn a_guest_with_no_resolver_configured_still_gets_an_answer() {
         let query = question("example.com.", RecordType::A);
 
-        let reply = relay(&query, &[], &FakeUpstream::silent()).await;
+        let reply = relay(&query, &[], &FakeUpstream::silent(), &Demotions::default()).await;
 
         assert_eq!(
             Message::from_vec(&reply).unwrap().metadata.response_code,

@@ -987,7 +987,13 @@ async fn relay_query(
 /// One question put to the host's own resolvers. A failure nobody answered makes the next query read the host's configuration again.
 async fn resolved(gateway: &Gateway, query: &[u8], name: &str) -> Vec<u8> {
     let servers = gateway.resolvers.servers_for(name);
-    let answer = dns::relay(query, &servers, gateway.upstream.as_ref()).await;
+    let answer = dns::relay(
+        query,
+        &servers,
+        gateway.upstream.as_ref(),
+        gateway.resolvers.demotions(),
+    )
+    .await;
     if answer == dns::servfail(query) {
         gateway.resolvers.stale();
     }
