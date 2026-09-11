@@ -1334,6 +1334,8 @@ spec:
 | `kind` | Produces | Notes |
 |---|---|---|
 | `token` | `token` | The user supplies one value. |
+| `oauth_device` | `access_token` | Native public-client device authorization ([§3.2.7](#327-native-oauth)). |
+| `oauth_authorization_code` | `access_token` | Native public-client authorization code with S256 PKCE ([§3.2.7](#327-native-oauth)). |
 | `code` | what its `outputs` name | The connector carries the mechanism itself ([§3.2.6](#326-kind-code)). |
 
 **`code` is the one kind whose `Produces` column the document fills in.** Every
@@ -1990,6 +1992,151 @@ declarative and is decided the same way for every kind: `serves`, `egress`,
 `credentials`, `injections`, `env`, and filesets. A `code` method obtains a value;
 [§3.2.5](#325-a-fileset-carries-the-placeholder-not-the-value) still holds, so a
 fileset carries the placeholder and never the value the component returned.
+
+---
+
+#### 3.2.7 Native OAuth
+
+`oauth_device` and `oauth_authorization_code` are mechanisms lns implements in
+native code, with shared token parsing and renewal. Neither requires a component
+or initializes Wasmtime. `code` remains available for exceptions; its WIT contract
+and required explicit outputs are unchanged.
+
+Both produce exactly one public credential output, `access_token`. A credential
+may select it explicitly or omit `field`. `refresh_token` is private state and
+MUST NOT be selected by a workload credential.
+
+| Common field | Rules |
+|---|---|
+| `clientId` | REQUIRED nonempty public client identifier, at most 4096 bytes; no whitespace or control characters. |
+| `tokenEndpoint` | REQUIRED absolute HTTPS URL. |
+| `scopes` | Optional list, at most 128 nonempty individual OAuth scope tokens of at most 256 bytes each, per RFC 6749 §3.3. Elements are joined with one space, never split implicitly. |
+| `label`, `help` | The common presentation fields in §3.2.2. |
+
+Only public clients are supported. A publisher may register an application and
+publish its public ID; a customer may install a local connector with their own
+registered public ID. There is no second registration override mechanism.
+`clientSecret` is refused with an explanation that confidential clients are not
+yet supported. Secrets are neither bundled nor interpolated from the environment.
+The provider's registration, enabled grants, approval, and registered callbacks
+remain setup work. A public ID conveys no publisher trust and changes no install,
+digest, disclosure, or grant rule.
+
+Every endpoint MUST have a host and MUST NOT carry userinfo, a query, a fragment,
+whitespace, or backslashes. Endpoint strings are bounded to 8192 bytes. Protocol
+parameters are URL/form encoded. Device and token requests use form bodies and
+`Accept: application/json`; HTTP redirects are never followed. Authentication
+destinations do not grant workload egress. These kinds accept only their own
+fields: `component`, `outputs`, `hosts`, `exec`, `limits`, arbitrary parameters,
+and every unknown field are refused.
+
+**Device authorization (RFC 8628).** Additional fields:
+
+| Field | Rules |
+|---|---|
+| `deviceAuthorizationEndpoint` | REQUIRED HTTPS endpoint under the common URL rules. |
+| `verificationHosts` | REQUIRED nonempty list of at most 128 explicit hosts with optional ports; no wildcards, userinfo, paths, query, or fragments. An omitted port permits HTTPS port 443 only. |
+
+An explicit Connect starts the device request. lns shows the returned verification
+destination and user code, even when opening a complete verification URL. Both
+verification URLs must use HTTPS and match `verificationHosts`; they may carry a
+query but no userinfo or fragment. Browser navigation afterwards belongs to the
+browser. The device code is never displayed, logged, or sent through IPC.
+No callback listener is created for this flow.
+
+The service polls automatically, no sooner than the provider's interval (five
+seconds when omitted). `authorization_pending` retains that interval;
+`slow_down` adds five seconds to every subsequent interval. Transport timeouts
+back off exponentially. Denial, provider expiry, malformed responses, and other
+terminal errors end the operation distinctly. The earlier of provider expiry
+and lns's deadline ends polling.
+
+**Authorization code (RFC 8252 and RFC 7636).** Additional fields:
+
+| Field | Rules |
+|---|---|
+| `authorizationEndpoint` | REQUIRED HTTPS endpoint under the common URL rules. |
+| `redirect` | REQUIRED map accepting only `kind`, `path`, and `port`. |
+| `redirect.kind` | REQUIRED `loopback`; no other redirect kind is supported. |
+| `redirect.path` | Defaults to `/callback`. Normalized absolute path, at most 1024 bytes, with no query, fragment, percent escapes, backslashes, empty interior segments, or `.` / `..` segments. |
+| `redirect.port` | Optional integer 1–65535. Omitted allocates an ephemeral port; explicit uses exactly that port. |
+
+The callback listener binds `127.0.0.1` only. An occupied explicit port fails with
+an actionable message; it MUST NOT silently change the registered URI. Setup
+shows `http://127.0.0.1:<port><path>` as the URI to register; an ephemeral port
+requires a provider registration that permits variable loopback ports. The same
+actual URI is sent in authorization and token exchange.
+
+Each operation draws fresh unpredictable state and a PKCE verifier from the host
+entropy source, using at least 32 random bytes each. PKCE S256 is mandatory, with
+no implicit flow or downgrade. The listener belongs to that live operation and
+accepts one GET callback at its exact configured path with the matching state.
+Duplicate parameters, mismatched state, ambiguous code/error, expired ownership,
+and replay cannot complete it. An authenticated `access_denied` callback is a
+denial; unrelated traffic leaves the operation waiting. No issuer discovery is
+performed; an `iss` parameter is refused because no issuer identifier has been
+configured against which to validate it. Provider extensions requiring an issuer
+contract remain a `code` concern until explicitly specified.
+
+The one-time code is exchanged with the original verifier, public client ID, and
+actual redirect URI. Callback resources are released on completion, cancellation,
+failure, and deadline. Browser pages use generic text, never code or state, and
+remove callback parameters from browser history where practical. Codes, state,
+verifiers, token bodies, and authorization URLs carrying them are redacted from
+logs and debug representations.
+
+**Bounds and interaction.** lns owns the bounds: 30 seconds per HTTP call,
+15 minutes per interactive operation, eight active operations per service and
+two per connector, 64 KiB per request, response, and private session, 8 KiB per
+callback request, and 16 KiB per token. Public user codes are at most 256 bytes
+and contain no control or hidden formatting characters. A rejected response is
+failed whole rather than truncated. Completed status records contain no secrets
+and expire with the original operation deadline.
+
+CLI and Rust approval UI share structured device-authorization, waiting-for-browser,
+completed, canceled, expired, and failed states. The service owns polling and
+callback completion in bounded background work; a status request only reads state,
+never drives token exchange or consumes an answer handle. IPC workers do not wait
+for the entire login. Status requests do not consume the eight-round budget used
+for noninteractive Wasm exchanges. Connect without an interactive client fails
+before browser or device work starts. Existing already-collected token flows keep
+their behavior.
+
+The CLI waits automatically and Ctrl-C cancels. The approval UI advances
+automatically, offers Open browser / Copy code / Cancel as applicable, and cancels
+on close. lns presents the provider destinations and requested scopes as its own
+structured disclosure; the Wasm-specific unreadable-code attribution does not
+apply. Notifications contain only minimal status, never credentials or sensitive
+authorization URLs. Connecting and granting stay separate; sign-in-and-grant
+applies only while its requesting run and operation remain valid and that grant
+was authorized.
+
+**Token lifecycle (RFC 6749).** Only nonempty Bearer access tokens are accepted.
+Token bytes must fit the Bearer credential grammar. A supplied `expires_in` must
+be a nonnegative integer whose conversion to an absolute millisecond deadline
+does not overflow. Omission means unknown expiry, never an invented lifetime.
+An omitted scope at connect uses the requested scope; at refresh it retains the
+previous scope. A supplied scope is parsed as the standard space-delimited list
+and compared as actual authority, preserving the existing regrant rule.
+
+Refresh tokens are optional and private. A connection without one is saved but
+never scheduled for native renewal; known expiry still disarms it on time.
+A rotated token replaces the prior refresh token; omission retains the prior one.
+Access and private renewal state are saved atomically. Transient failures keep the
+old connection and its original expiry, with a minimum 60-second retry interval
+and exponential backoff capped at 15 minutes. Terminal invalid-grant or revoked
+credentials require reconnect and disarm the value; a scheduler never opens a
+browser or starts another interaction.
+
+Network work runs outside store locks. Connect and refresh commit conditionally
+against the installed digest and the connection/operation generation that began
+them. Disconnect, cancellation, uninstall, and superseding connects invalidate
+that generation, so a late result cannot recreate credentials. Disconnect removes
+local credentials and cancels work; it does not revoke provider-side access.
+
+No hosted broker, confidential-client secret, dynamic registration, discovery,
+custom URI, OIDC/ID-token handling, client-credentials grant, resource parameter,
+response-mapping DSL, or provider-name branch is part of this contract.
 
 ---
 
@@ -2737,6 +2884,23 @@ A connector that is installed and neither granted nor declined by a run holds no
 row of its own, and still changes that run in two ways. Its `serves` destinations
 ask ([§3.2.1](#321-serves)), and a declaration it can still answer holds its
 `placeholder` ([§3.1.7](#317-credentials)).
+
+**Private native OAuth state.** The host credential store keeps an optional
+`oauth` object beside each connection's public `values`, under the same access
+protections. It records `client_id`, `token_endpoint`, the originating OAuth
+`kind`, optional `refresh_token`, and whether reconnect is required. Each stored
+connection also records a monotonic `generation` for conditional replacement.
+This is internal machine state, not a document field. Private state is never
+exported through IPC views, artifacts, run documents, logs, or workload data.
+The absence of a refresh token is represented by absence, never an empty token.
+
+The registration and token endpoint are captured at connect. Renewal uses those
+captured values; installing a connector with another client identity, mechanism,
+or token endpoint cannot redirect an existing refresh token. Such a change
+requires reconnect before renewal. Updates that change only payload retain their
+connection, subject to the existing digest-bound grant rule. A save replaces the
+whole connection, so readers cannot pair a new access token with old renewal
+state after a partial write.
 
 **The two keys differ deliberately.** A connection's key starts with the connector
 name and survives an update; a grant is keyed by the digest too and does not, and
