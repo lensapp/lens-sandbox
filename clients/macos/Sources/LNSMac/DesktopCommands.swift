@@ -4,9 +4,21 @@ import SwiftUI
 @MainActor
 struct DesktopCommands: Commands {
     @ObservedObject var model: AppModel
+    @ObservedObject private var dashboard: DashboardModel
     @Environment(\.openWindow) private var openWindow
 
+    init(model: AppModel) {
+        self.model = model
+        dashboard = model.dashboard
+    }
+
     var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Sandbox…") {
+                show(.sandboxes)
+                dashboard.creatingSandbox = true
+            }.keyboardShortcut("n").disabled(!dashboard.canCreateSandbox)
+        }
         CommandMenu("Navigate") {
             Button("Sandboxes") { show(.sandboxes) }.keyboardShortcut("4")
             Button("Connectors") { show(.connectors) }.keyboardShortcut("5")

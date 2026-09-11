@@ -16,6 +16,13 @@ struct SandboxList: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack {
+                Text("Sandboxes").font(.title2.weight(.semibold))
+                Spacer()
+                Button { model.creatingSandbox = true } label: { Label("New Sandbox…", systemImage: "plus") }
+                    .buttonStyle(.borderedProminent).disabled(!model.canCreateSandbox)
+                    .help(model.creation == nil ? "Creating sandboxes requires the app bundle containing the lns helper." : "Run a local sandbox definition or a published reference")
+            }.padding(.horizontal, 16).padding(.top, 16)
             HStack(spacing: 16) {
                 TextField("Find a sandbox", text: $search).textFieldStyle(.roundedBorder)
                 Picker("Status", selection: $status) {
@@ -71,7 +78,10 @@ struct SandboxList: View {
                         Text(model.connected ? "No sandboxes to show" : "Waiting for the service…").font(.headline)
                         Text(model.currentSandboxes.isEmpty ? "Sandboxes you run appear here. Stopped sandboxes stay until you remove them." : "Try another name or status.")
                             .multilineTextAlignment(.center).frame(maxWidth: 340)
-                    }.foregroundStyle(.secondary).allowsHitTesting(false)
+                        if model.currentSandboxes.isEmpty {
+                            Button("New Sandbox…") { model.creatingSandbox = true }.disabled(!model.canCreateSandbox)
+                        }
+                    }.foregroundStyle(.secondary)
                 }
             }
             if model.management.busy {

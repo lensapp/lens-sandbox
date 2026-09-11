@@ -31,6 +31,9 @@ bundle_stage=$(mktemp -d "$bundle_output/.lns-build.XXXXXX")
 trap 'rm -rf "$bundle_stage"' EXIT HUP INT TERM
 bundle_app="$bundle_stage/LNS.app"
 mkdir -p "$bundle_app/Contents/MacOS"
+mkdir -p "$bundle_app/Contents/Resources"
+install -m 644 "$bundle_scripts/../../../crates/lns-service/assets/lnsTemplate@2x.png" "$bundle_app/Contents/Resources/lnsTemplate@2x.png"
+install -m 644 "$bundle_scripts/../Assets/LNS.icns" "$bundle_app/Contents/Resources/LNS.icns"
 install -m 755 "$bundle_source" "$bundle_app/Contents/MacOS/LNS"
 sed -e "s/@VERSION@/$bundle_version/g" -e "s/@BUILD_NUMBER@/$bundle_number/g" \
     "$bundle_scripts/../Info.plist" > "$bundle_app/Contents/Info.plist"

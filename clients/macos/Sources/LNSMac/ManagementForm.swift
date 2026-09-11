@@ -24,6 +24,7 @@ struct ManagementForm: View {
     @State private var source = ""
     @State private var label = ""
     @State private var values: [String: String] = [:]
+    @State private var access = ""
 
     private var offer: ConnectorOffer? { sheet.offer }
     private var method: ConnectorMethod? { offer?.methods.first { $0.name == selection.method } }
@@ -59,8 +60,9 @@ struct ManagementForm: View {
         .interactiveDismissDisabled(busy)
         .onAppear { selection.run = sheet.run }
         .onChange(of: selection.method) { _ in
-            selection.connection = ""; label = ""; values = [:]
+            if sheet.kind == .connect { label = ""; values = [:] }
         }
+        .onChange(of: access) { id in if let offer { selection.choose(id, in: offer) } }
         .onDisappear { values = [:] }
     }
 
@@ -87,20 +89,23 @@ struct ManagementForm: View {
             }
         case .grant:
             sandboxPicker
-            methodPicker(connecting: false)
+            Picker("Access", selection: $access) {
+                Text("Choose a connection or direct access").tag("")
+                ForEach(offer?.grantOptions ?? []) { option in Text(option.label).tag(option.id) }
+            }
+            if offer?.methods.contains(where: { $0.offerable && $0.auth_label != nil }) == true {
+                Button("Add Connection…") {
+                    model.managementSheet = ManagementSheet(kind: .connect, offer: offer, run: selection.run, returnToGrant: true)
+                }.disabled(busy)
+            }
+            if offer?.grantOptions.isEmpty == true {
+                Text("Connect an account first, then choose it here to grant access.").font(.callout).foregroundStyle(.secondary)
+            }
             if let method, method.offerable {
                 if method.auth_label != nil {
-                    Picker("Connection", selection: $selection.connection) {
-                        Text("Choose a connection").tag("")
-                        ForEach(connections) { connection in Text(connection.label).tag(connection.label) }
-                    }
                     if let connection = connections.first(where: { $0.label == selection.connection }) {
                         DisclosureLine(title: "Connection authority", entries: connection.authority)
                     }
-                    Button("Add Connection…") {
-                        model.managementSheet = ManagementSheet(kind: .connect, offer: offer, run: selection.run, returnToGrant: true)
-                    }.disabled(busy)
-                    if connections.isEmpty { Text("Connect an account first, then review its authority here.").font(.callout).foregroundStyle(.secondary) }
                 }
                 Divider()
                 Text("This sandbox will receive").font(.headline)
@@ -112,7 +117,7 @@ struct ManagementForm: View {
                 } else {
                     Text("Deny-rule overrides could not be checked for this sandbox.").font(.callout).foregroundStyle(.orange)
                 }
-                Text("A sandbox holds one grant per connector. Granting another method or connection replaces its previous grant.")
+                Text("A sandbox holds one grant per connector. Granting another connection or access option replaces its previous grant.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         case .forget:

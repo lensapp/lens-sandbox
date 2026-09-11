@@ -65,6 +65,11 @@ public struct GrantSelection {
     public var method = ""
     public var connection = ""
     public init() {}
+    public mutating func choose(_ id: String, in offer: ConnectorOffer) {
+        let option = offer.grantOptions.first { $0.id == id }
+        method = option?.method ?? ""
+        connection = option?.connection ?? ""
+    }
     public func command(offer: ConnectorOffer, sandboxes: [DashboardSandbox]) -> ManagementCommand? {
         guard sandboxes.contains(where: { $0.id == run && $0.controllable }),
               let selected = offer.methods.first(where: { $0.name == method && $0.offerable }) else { return nil }
@@ -72,6 +77,26 @@ public struct GrantSelection {
             guard offer.connections.contains(where: { $0.label == connection && $0.method == method }) else { return nil }
         }
         return .grant(offer.name, run: run, method: method, connection: selected.auth_label == nil ? nil : connection)
+    }
+}
+
+public struct ConnectorGrantOption: Identifiable {
+    public let id: String
+    public let label: String
+    public let method: String
+    public let connection: String?
+}
+
+extension ConnectorOffer {
+    public var grantOptions: [ConnectorGrantOption] {
+        let accounts = connections.compactMap { connection -> ConnectorGrantOption? in
+            guard methods.contains(where: { $0.name == connection.method && $0.offerable && $0.auth_label != nil }) else { return nil }
+            return ConnectorGrantOption(id: "connection:\(connection.label)", label: connection.label, method: connection.method, connection: connection.label)
+        }
+        let direct = methods.filter { $0.offerable && $0.auth_label == nil }.map {
+            ConnectorGrantOption(id: "method:\($0.name)", label: "\($0.label) (no account needed)", method: $0.name, connection: nil)
+        }
+        return accounts + direct
     }
 }
 

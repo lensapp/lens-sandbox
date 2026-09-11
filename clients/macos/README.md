@@ -21,6 +21,15 @@ sandboxes. Start or stop a sandbox, open its activity or approvals, or choose
 sandbox asks first and deletes its writable layer and decisions. Removed
 sandboxes remain available in audit history but are excluded from the controls.
 
+**New Sandbox…** (⌘N) starts a fresh sandbox from a local `lns.yaml`, a folder
+containing one, or a published reference. Give it an optional name and choose
+**Start Sandbox**. The app shows launch details and returns to the list once the
+workload is ready. Startup failures keep their details visible for review.
+The setup checkbox accepts the definition's declared installers, scripts,
+mounts, and host access, using the CLI's `--yes` behavior. It starts unchecked;
+when consent is required, review the reported details before enabling it and
+retrying. Creating a sandbox requires the bundle containing CLI/service helpers.
+
 **Connectors** shows installed connectors as cards, including each method's
 readiness and saved connections with their authority. Install a registry
 reference or choose a local connector document. **Connect…** saves a named
@@ -28,7 +37,8 @@ connection using the method's credential fields; it does not grant a sandbox
 access. Connection names must be new, so adding an account cannot replace an
 existing connection by accident.
 
-**Grant Access…** asks for a sandbox, method, and, when needed, a saved connection.
+**Grant Access…** asks for a sandbox and a saved connection; the connection
+determines its method. Options that need no account appear alongside connections.
 The form discloses destinations, files, variables, and connection authority before
 you grant. **Add Connection…** returns to the grant form after connecting. A grant
 replaces that sandbox's previous grant for the connector. The app rechecks the
@@ -45,6 +55,8 @@ client.
 Use **Navigate → Audit** (⌘1), **Approvals** (⌘2), or **Live Requests** (⌘3).
 **Sandboxes** (⌘4) and **Connectors** (⌘5) are also available from Navigate and the
 menu-bar interface.
+The Dock and menu bar use the original LNS logo. The menu-bar image remains a
+template so macOS adapts its color to the current appearance.
 ⌘F focuses audit search and ⌘R refreshes the dashboard. Escape clears a focused
 search or closes focused event details. Standard macOS window controls and ⌘W
 close a window without stopping the service; the menu-bar interface stays open.
@@ -187,9 +199,11 @@ coordinated app/service updates are still required before shipping it.
 ## Verification
 
 `make -C clients/macos test` tests framing, dashboard replacement and filtering,
-history requests, management commands and outcomes, explicit grant selection,
+history requests, management commands and outcomes, sandbox creation, explicit grant selection,
 stale connector disclosures, duplicate actions, reconnect state, and shared
 Rust/Swift wire fixtures.
+`make -C clients/macos launch-smoke` checks the bundled CLI invocation and drains
+both output streams through real subprocesses, including a failed launch.
 Those Foundation-only tests also run on Linux with Swift installed. CI runs
 `verify` on macOS when the native client or its service contract changes.
 
