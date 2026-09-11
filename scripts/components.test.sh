@@ -9,13 +9,17 @@ SCRIPT="${LNS_COMPONENTS_SCRIPT:-$SCRIPT_DIR/components.sh}"
 PASS=0
 FAIL=0
 FAILURES=""
-ROOT=$(mktemp -d)
+# One directory down, so a case can put something beside the suite and assert
+# that nothing the suite runs reaches it.
+OUTSIDE=$(mktemp -d)
+ROOT="$OUTSIDE/suite"
 
 cleanup() {
-    rm -rf "$ROOT"
+    rm -rf "$OUTSIDE"
     test_lib_cleanup
 }
 trap cleanup EXIT
+mkdir "$ROOT"
 
 assert_eq() {
     test_name=$1
@@ -33,9 +37,24 @@ assert_eq() {
 }
 
 # A stub in place of a real build script, so this suite needs no wasm toolchain.
+# It sits one directory below the component it writes, which is the real scripts'
+# shape and keeps every scan inside the directory the case owns.
 stub() {
-    path="$ROOT/$1"
+    dir="$ROOT/$1"
+    mkdir -p "$dir/mechanism"
+    path="$dir/mechanism/build.sh"
     printf '#!/bin/sh\necho "%s ran $*"\nexit %s\n' "$1" "$2" > "$path"
+    chmod +x "$path"
+    printf '%s' "${3:-/rustc/8bab26f4/library/core/src/fmt/mod.rs}" > "$dir/component.wasm"
+    echo "$path"
+}
+
+# A build script whose components are not where it writes them.
+stub_writing_nothing() {
+    dir="$ROOT/$1"
+    mkdir -p "$dir/mechanism"
+    path="$dir/mechanism/build.sh"
+    printf '#!/bin/sh\nexit 0\n' > "$path"
     chmod +x "$path"
     echo "$path"
 }
@@ -116,6 +135,81 @@ test_a_skip_in_ci_is_a_dead_step() {
         "$(without_the_target in_ci "$(stub first 0)")"
 }
 
+# Test 8: a committed component that embeds the path this machine keeps its
+# registry at is bytes no other machine rebuilds, so `cmp` agrees here and
+# nowhere else. The step fails and names the file.
+test_a_component_that_embeds_this_machine_fails() {
+    script=$(stub leaky 0 'x/root/dev/.cargo/registry/src/serde.rs')
+    out=$(env -u CI "$SCRIPT" "$script" 2>&1 || true)
+    case "$out" in
+        *component.wasm*) named="named" ;;
+        *) named="$out" ;;
+    esac
+    assert_eq "a_component_that_embeds_this_machine_is_named" "named" "$named"
+    assert_eq "a_component_that_embeds_this_machine_fails" "1" "$(status_of "$script")"
+}
+
+# Test 9: the paths a component legitimately carries are the toolchain's own,
+# which every host running the pin writes identically. The guard leaves them be.
+test_the_toolchain_s_own_paths_pass() {
+    assert_eq "the_toolchain_s_own_paths_pass" "0" \
+        "$(status_of "$(stub tidy 0 'x/rustc/8bab26f4/library/core/src/fmt/mod.rs')")"
+}
+
+# Test 10: the scan reads the components a script writes and nothing else. A
+# scan that climbed to whatever sits beside them would report the host, and
+# TMPDIR is not this suite's to answer for.
+test_the_scan_stays_beside_the_script() {
+    printf '%s' '/home/someone/.cargo/registry/src/serde.rs' > "$OUTSIDE/stray.wasm"
+    assert_eq "the_scan_stays_beside_the_script" "0" "$(status_of "$(stub tidied 0)")"
+}
+
+# Test 11: a script that wrote its components somewhere the scan does not look
+# leaves the scan reading nothing, and silence must not read as agreement.
+test_scanning_nothing_is_a_dead_step() {
+    assert_eq "scanning_nothing_is_a_dead_step" "1" \
+        "$(status_of "$(stub_writing_nothing empty)")"
+}
+
+# Test 12: a run that failed only the scan still names the script that wrote the
+# components, so the summary line is never bare.
+test_a_leak_names_the_script() {
+    script=$(stub named 0 'x/root/dev/.cargo/registry/src/serde.rs')
+    out=$(env -u CI "$SCRIPT" "$script" 2>&1 || true)
+    case "$out" in
+        *"components failed: $script"*) named="named" ;;
+        *) named="$out" ;;
+    esac
+    assert_eq "a_leak_names_the_script" "named" "$named"
+}
+
+# Test 13: a host that keeps its registry outside a home directory leaks past
+# the pattern, so the scan also looks for the path this machine builds under.
+test_this_machine_s_registry_is_looked_for() {
+    script=$(stub opted 0 'x/opt/cargo/registry/src/index.crates.io/serde.rs')
+    out=$(env -u CI CARGO_HOME=/opt/cargo "$SCRIPT" "$script" 2>&1 || true)
+    case "$out" in
+        *component.wasm*) named="named" ;;
+        *) named="$out" ;;
+    esac
+    assert_eq "this_machine_s_registry_is_named" "named" "$named"
+    assert_eq "this_machine_s_registry_is_looked_for" "1" \
+        "$(env -u CI CARGO_HOME=/opt/cargo "$SCRIPT" "$script" >/dev/null 2>&1 && echo 0 || echo 1)"
+}
+
+# Test 14: a host that keeps its registry at the path the build remaps onto
+# rebuilds the very bytes the scan would call a leak, so it would have no way
+# back to green. What the remap writes is what every host writes.
+test_the_remap_target_is_not_a_leak() {
+    script=$(stub remapped 0 'x/cargo/registry/src/index.crates.io/serde.rs')
+    assert_eq "the_remap_target_is_not_a_leak" "0" \
+        "$(env -u CI CARGO_HOME=/cargo "$SCRIPT" "$script" >/dev/null 2>&1 && echo 0 || echo 1)"
+    # rustc strips the trailing slash, so the bytes read the same and a host that
+    # spells its registry with one must not be told otherwise.
+    assert_eq "the_remap_target_with_a_trailing_slash_is_not_a_leak" "0" \
+        "$(env -u CI CARGO_HOME=/cargo/ "$SCRIPT" "$script" >/dev/null 2>&1 && echo 0 || echo 1)"
+}
+
 test_all_pass
 test_first_failure_is_not_swallowed
 test_last_failure_fails
@@ -123,6 +217,13 @@ test_every_script_runs
 test_no_arguments
 test_a_skip_runs_nothing
 test_a_skip_in_ci_is_a_dead_step
+test_a_component_that_embeds_this_machine_fails
+test_the_toolchain_s_own_paths_pass
+test_the_scan_stays_beside_the_script
+test_scanning_nothing_is_a_dead_step
+test_a_leak_names_the_script
+test_this_machine_s_registry_is_looked_for
+test_the_remap_target_is_not_a_leak
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

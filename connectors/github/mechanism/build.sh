@@ -8,6 +8,10 @@ set -eu
 # cargo was given, so building from here keeps that `src/lib.rs` and not this
 # machine's.
 cd "$(dirname "$0")"
+# Set, never appended to: an inherited RUSTFLAGS is host state, and these
+# bytes must carry none — without the remap a dependency embeds this
+# machine's registry path.
+export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
 check=${1:-}
 if [ "$check" = "--check" ]; then
     # This crate is outside the workspace, so `cargo fmt --all` and
