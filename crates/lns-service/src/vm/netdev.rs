@@ -742,7 +742,7 @@ mod tests {
         let d = tempfile::TempDir::new().unwrap();
         let layout = layout_in(d.path());
 
-        let err = start_with(
+        let Err(err) = start_with(
             &FakeSpawner::failing(),
             Path::new("/nowhere/gvproxy"),
             &layout,
@@ -750,7 +750,9 @@ mod tests {
             connect_datagram,
         )
         .await
-        .expect_err("a missing binary refuses the run");
+        else {
+            panic!("a missing binary refuses the run");
+        };
 
         assert!(format!("{err:#}").contains("/nowhere/gvproxy"), "{err:#}");
     }
@@ -761,7 +763,7 @@ mod tests {
         let layout = layout_in(d.path());
         let spawner = FakeSpawner::silent();
 
-        let err = start_with(
+        let Err(err) = start_with(
             &spawner,
             Path::new("/usr/local/bin/gvproxy"),
             &layout,
@@ -769,7 +771,9 @@ mod tests {
             connect_datagram,
         )
         .await
-        .expect_err("no socket means no guest network");
+        else {
+            panic!("no socket means no guest network");
+        };
 
         assert!(
             format!("{err:#}").contains("did not expose its vfkit socket"),
@@ -785,7 +789,7 @@ mod tests {
         let layout = layout_in(d.path());
         let spawner = FakeSpawner::listening(&layout.backend);
 
-        let err = start_with(
+        let Err(err) = start_with(
             &spawner,
             Path::new("/usr/local/bin/gvproxy"),
             &layout,
@@ -793,7 +797,9 @@ mod tests {
             |_| anyhow::bail!("simulated attach failure"),
         )
         .await
-        .expect_err("a VM end that cannot attach is not a running backend");
+        else {
+            panic!("a VM end that cannot attach is not a running backend");
+        };
 
         assert!(format!("{err:#}").contains("simulated attach failure"));
         assert!(spawner.killed.load(Ordering::SeqCst), "the child is killed");
@@ -805,7 +811,7 @@ mod tests {
         let layout = layout_in(&PathBuf::from("/").join("d".repeat(120)));
         let spawner = FakeSpawner::silent();
 
-        let err = start_with(
+        let Err(err) = start_with(
             &spawner,
             Path::new("/usr/local/bin/gvproxy"),
             &layout,
@@ -813,7 +819,9 @@ mod tests {
             connect_datagram,
         )
         .await
-        .expect_err("a path no socket can hold refuses the run");
+        else {
+            panic!("a path no socket can hold refuses the run");
+        };
 
         assert!(format!("{err:#}").contains("unix socket path"), "{err:#}");
         assert!(
