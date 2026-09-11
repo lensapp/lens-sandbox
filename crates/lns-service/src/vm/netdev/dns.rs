@@ -221,7 +221,7 @@ pub fn scopes_of_resolv_conf(contents: &str) -> Vec<Scope> {
 /// `scutil --dns` is the only place a split-DNS VPN's per-domain resolvers appear; `/etc/resolv.conf` holds none of them.
 pub fn scopes_of_scutil(output: &str) -> Vec<Scope> {
     let mut scopes = Vec::new();
-    let mut current: Option<Scope> = None;
+    let mut current: Option<Resolver> = None;
     for line in output.lines() {
         let line = line.trim();
         if line.contains("(for scoped queries)") {
@@ -229,38 +229,55 @@ pub fn scopes_of_scutil(output: &str) -> Vec<Scope> {
         }
         if line.starts_with("resolver #") {
             push_scope(&mut scopes, current.take());
-            current = Some(Scope {
-                suffix: None,
-                servers: Vec::new(),
-            });
+            current = Some(Resolver::default());
             continue;
         }
-        if let Some(scope) = current.as_mut() {
-            read_field(scope, line);
+        if let Some(resolver) = current.as_mut() {
+            read_field(resolver, line);
         }
     }
     push_scope(&mut scopes, current);
     scopes
 }
 
-fn read_field(scope: &mut Scope, line: &str) {
+/// One `resolver #n` block being read: its port is a line of its own and belongs to every nameserver it names.
+#[derive(Default)]
+struct Resolver {
+    suffix: Option<String>,
+    addresses: Vec<IpAddr>,
+    port: Option<u16>,
+}
+
+fn read_field(resolver: &mut Resolver, line: &str) {
     let Some((key, value)) = line.split_once(':') else {
         return;
     };
     let (key, value) = (key.trim(), value.trim());
     if key == "domain" {
-        scope.suffix = Some(value.to_string());
+        resolver.suffix = Some(value.to_string());
+    } else if key == "port" {
+        resolver.port = value.parse().ok();
     } else if key.starts_with("nameserver")
         && let Ok(address) = value.parse::<IpAddr>()
     {
-        scope.servers.push(SocketAddr::new(address, PORT));
+        resolver.addresses.push(address);
     }
 }
 
-fn push_scope(scopes: &mut Vec<Scope>, scope: Option<Scope>) {
-    if let Some(scope) = scope.filter(|scope| !scope.servers.is_empty()) {
-        scopes.push(scope);
-    }
+fn push_scope(scopes: &mut Vec<Scope>, resolver: Option<Resolver>) {
+    // A loopback nameserver here is a host-side socket this service opens itself, so the guest boundary does not judge it.
+    let Some(resolver) = resolver.filter(|resolver| !resolver.addresses.is_empty()) else {
+        return;
+    };
+    let port = resolver.port.unwrap_or(PORT);
+    scopes.push(Scope {
+        suffix: resolver.suffix,
+        servers: resolver
+            .addresses
+            .into_iter()
+            .map(|address| SocketAddr::new(address, port))
+            .collect(),
+    });
 }
 
 #[cfg(test)]
@@ -787,6 +804,40 @@ resolver #1
             ],
             "a resolver with no nameserver is no resolver, and the scoped-query section is not a domain"
         );
+    }
+
+    #[test]
+    fn a_resolver_on_its_own_port_is_asked_there() {
+        let scopes = scopes_of_scutil(
+            "\
+resolver #1
+  domain   : corp.internal
+  nameserver[0] : 127.0.0.1
+  nameserver[1] : 10.0.0.53
+  port     : 5353
+  flags    : Supplemental, Request A records
+",
+        );
+
+        assert_eq!(
+            scopes,
+            vec![Scope {
+                suffix: Some("corp.internal".to_string()),
+                servers: vec![
+                    SocketAddr::new("127.0.0.1".parse().unwrap(), 5353),
+                    SocketAddr::new("10.0.0.53".parse().unwrap(), 5353),
+                ],
+            }],
+            "the port of a resolver belongs to every nameserver it names"
+        );
+    }
+
+    #[test]
+    fn a_resolver_whose_port_is_not_a_number_is_asked_on_53() {
+        let scopes =
+            scopes_of_scutil("resolver #1\n  nameserver[0] : 10.0.0.53\n  port : nonsense\n");
+
+        assert_eq!(scopes, vec![scope(None, &["10.0.0.53"])]);
     }
 
     #[test]
