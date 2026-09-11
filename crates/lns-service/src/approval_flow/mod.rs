@@ -1,5 +1,6 @@
 pub mod answering;
 pub mod entries;
+pub mod inbox;
 pub mod notification;
 pub mod offline;
 pub mod protocol;

@@ -437,7 +437,9 @@ fn values_a_granted_method_sets(
         .collect()
 }
 
-fn read_granted_supply(holder: &GrantHolder) -> Result<BTreeMap<String, GrantedPayload>> {
+pub(crate) fn read_granted_supply(
+    holder: &GrantHolder,
+) -> Result<BTreeMap<String, GrantedPayload>> {
     with_run_store(holder, handler::granted_supply)
 }
 

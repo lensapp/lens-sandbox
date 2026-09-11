@@ -1,0 +1,180 @@
+{
+  "requests": [
+    {
+      "type": "StartRun",
+      "run": "run-1",
+      "attach": false,
+      "stdin": false
+    },
+    {
+      "type": "StopRun",
+      "run": "run-1",
+      "timeout_secs": 10
+    },
+    {
+      "type": "RemoveRun",
+      "run": "run-1",
+      "force": false
+    },
+    {
+      "type": "ListConnectors"
+    },
+    {
+      "type": "InstallConnector",
+      "source": "/recipes/github.yaml"
+    },
+    {
+      "type": "UninstallConnector",
+      "name": "github"
+    },
+    {
+      "type": "ConnectConnector",
+      "name": "github",
+      "method": "token",
+      "connection": "work",
+      "values": {
+        "token": "fixture-secret"
+      }
+    },
+    {
+      "type": "DisconnectConnector",
+      "name": "github",
+      "connection": "work"
+    },
+    {
+      "type": "GrantConnector",
+      "name": "github",
+      "run": "run-1",
+      "method": "token",
+      "connection": "work",
+      "answered_by": "card"
+    },
+    {
+      "type": "ForgetConnector",
+      "name": "github",
+      "run": "run-1"
+    }
+  ],
+  "responses": [
+    {
+      "type": "RunStarted",
+      "run_id": "run-1"
+    },
+    {
+      "type": "RunStopped",
+      "forced": false
+    },
+    {
+      "type": "Acknowledged"
+    },
+    {
+      "type": "ConnectorList",
+      "connectors": [
+        {
+          "name": "github",
+          "digest": "sha256:one",
+          "serves": [
+            "api.github.com"
+          ],
+          "methods": [
+            {
+              "name": "token",
+              "label": "Token",
+              "auth_label": "Token",
+              "offerable": true,
+              "opens": [
+                "api.github.com"
+              ],
+              "writes": [],
+              "env": [],
+              "credentials": [
+                "TOKEN"
+              ],
+              "asks": [
+                "token"
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "label": "work",
+              "method": "token",
+              "authority": [
+                "repo:read"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "ConnectorInstalled",
+      "connector": {
+        "name": "github",
+        "digest": "sha256:one",
+        "serves": [
+          "api.github.com"
+        ],
+        "methods": [
+          {
+            "name": "token",
+            "label": "Token",
+            "auth_label": "Token",
+            "offerable": true,
+            "opens": [
+              "api.github.com"
+            ],
+            "writes": [],
+            "env": [],
+            "credentials": [
+              "TOKEN"
+            ],
+            "asks": [
+              "token"
+            ]
+          }
+        ],
+        "connections": [
+          {
+            "label": "work",
+            "method": "token",
+            "authority": [
+              "repo:read"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "ConnectorUninstalled",
+      "name": "github",
+      "dropped_connections": 1
+    },
+    {
+      "type": "ConnectorConnected",
+      "name": "github",
+      "connection": "work",
+      "invalidated": []
+    },
+    {
+      "type": "ConnectorDisconnected",
+      "name": "github",
+      "dropped": 1
+    },
+    {
+      "type": "ConnectorGranted",
+      "name": "github",
+      "method": "token",
+      "connection": "work",
+      "displaced": null,
+      "unchanged": false,
+      "reserved": false
+    },
+    {
+      "type": "ConnectorForgotten",
+      "name": "github",
+      "had_decision": true,
+      "reserved": false
+    }
+  ]
+}

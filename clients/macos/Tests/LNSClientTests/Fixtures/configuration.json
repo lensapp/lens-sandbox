@@ -1,0 +1,74 @@
+{
+  "requests": [
+    {
+      "type": "ReadRunConfiguration",
+      "run": "run-1"
+    },
+    {
+      "type": "PreviewSandbox",
+      "source": "/project/lns.yaml",
+      "mixins": [
+        "/tools/lns.yaml"
+      ]
+    },
+    {
+      "type": "SaveRun",
+      "run": "run-1",
+      "kind": "sandbox",
+      "name": "reviewer"
+    }
+  ],
+  "responses": [
+    {
+      "type": "SandboxConfiguration",
+      "configuration": {
+        "sources": {
+          "definition": "/project/lns.yaml",
+          "mixins": [
+            "/tools/lns.yaml"
+          ],
+          "added_mixins": [
+            "/tools/lns.yaml"
+          ],
+          "contributions": [
+            {
+              "block": "tool",
+              "key": "node",
+              "source": "/tools/lns.yaml",
+              "displaced": [
+                {
+                  "source": "the sandbox",
+                  "summary": "node@20"
+                }
+              ]
+            }
+          ]
+        },
+        "document": "{\"apiVersion\":\"lns.run/v1\",\"kind\":\"sandbox\",\"name\":\"reviewer\",\"spec\":{\"image\":\"alpine:3.20\",\"tools\":[\"node@22\"]}}",
+        "decisions": "{\"spec\":{\"egress\":{\"http\":[{\"match\":\"example.com\",\"verdict\":\"deny\"}]}}}",
+        "grants": [
+          {
+            "name": "github",
+            "variables": [
+              "TOKEN"
+            ],
+            "files": [
+              "/home/agent/.gitconfig"
+            ]
+          }
+        ],
+        "rules": [
+          {
+            "table": "http",
+            "source": "Your decision",
+            "rule": "{\"match\":\"example.com\",\"verdict\":\"deny\"}"
+          }
+        ]
+      }
+    },
+    {
+      "type": "RunSaved",
+      "document": "kind: sandbox\n"
+    }
+  ]
+}

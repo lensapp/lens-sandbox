@@ -41,6 +41,7 @@ fn one_installed(store: &ConnectorStore<'_>, entry: &Installed) -> Result<Connec
     Ok(match lns_artifact::connector::parse(&entry.document) {
         Ok(definition) => view_of(&definition, &entry.digest, &connections),
         Err(_) => ConnectorView {
+            description: None,
             name: entry.name.clone(),
             digest: entry.digest.clone(),
             serves: Vec::new(),
@@ -56,6 +57,7 @@ fn view_of(
     connections: &BTreeMap<String, Connection>,
 ) -> ConnectorView {
     ConnectorView {
+        description: definition.spec.description.clone(),
         name: definition.name.clone(),
         digest: digest.to_string(),
         serves: definition.spec.serves.clone(),
@@ -562,6 +564,16 @@ mod tests {
 
     fn a_run() -> GrantHolder {
         GrantHolder::Run("1a2b3c4d0000000000000000000000aa".to_string())
+    }
+
+    #[test]
+    fn connector_description_reaches_the_client_view() {
+        let definition = lns_artifact::connector::parse(br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"issues","spec":{"description":"Work with projects and issues.","serves":["api.example.com"],"methods":[{"name":"public"}]}}"#).expect("parse connector");
+        let view = view_of(&definition, "sha256:one", &BTreeMap::new());
+        assert_eq!(
+            view.description.as_deref(),
+            Some("Work with projects and issues.")
+        );
     }
 
     fn another_run() -> GrantHolder {

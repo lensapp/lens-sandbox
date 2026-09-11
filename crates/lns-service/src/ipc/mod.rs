@@ -8,7 +8,182 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) mod adapter;
+pub mod dashboard;
 pub use adapter::run_server;
+
+fn reply_to_live_approval(
+    inbox: Option<std::sync::Arc<crate::approval_flow::inbox::ApprovalInbox>>,
+    token: &str,
+    action: lns_ipc::LiveApprovalAction,
+) -> Response {
+    match inbox {
+        Some(inbox) => inbox.respond(token, action),
+        None => Response::Error {
+            message: "approval inbox is unavailable".into(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod approval_stream_tests {
+    use super::*;
+    use crate::shutdown::Shutdown;
+
+    #[tokio::test]
+    async fn configuration_requests_report_unknown_runs_and_invalid_references() {
+        for request in [
+            Request::ReadRunConfiguration {
+                run: "never-recorded-configuration-run".into(),
+            },
+            Request::PreviewSandbox {
+                source: "!".into(),
+                mixins: vec![],
+            },
+        ] {
+            assert!(matches!(
+                handle_request(&request, Instant::now()).await,
+                Response::Error { .. }
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_shot_dispatch_keeps_subscriptions_and_stale_answers_distinct() {
+        let started = tokio::time::Instant::now().into_std();
+        let inbox = crate::approval_flow::inbox::ApprovalInbox::new();
+        crate::approval_flow::inbox::install(inbox);
+        assert_eq!(
+            handle_request(
+                &Request::RespondToApproval {
+                    token: "absent-presentation".into(),
+                    action: lns_ipc::LiveApprovalAction::AllowOnce,
+                },
+                started
+            )
+            .await,
+            Response::LiveApprovalStale
+        );
+        assert!(
+            matches!(handle_request(&Request::WatchApprovals, started).await,
+            Response::Error { message } if message.contains("streaming"))
+        );
+    }
+
+    #[test]
+    fn a_missing_inbox_is_an_unavailable_service_not_an_accepted_answer() {
+        assert!(
+            matches!(reply_to_live_approval(None, "token", lns_ipc::LiveApprovalAction::AllowOnce),
+            Response::Error { message } if message.contains("unavailable"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subscription_sends_current_state_then_changes_and_releases_a_disconnected_client() {
+        let (tx, rx) = tokio::sync::watch::channel(lns_ipc::LiveApprovalSnapshot::default());
+        let (mut service, mut client) = tokio::io::duplex(16);
+        let task =
+            tokio::spawn(async move { stream_approvals(&mut service, rx, &Shutdown::new()).await });
+        let first = read_snapshot(&mut client).await;
+        assert_eq!(first, Response::LiveApprovals(Default::default()));
+        let update = lns_ipc::LiveApprovalSnapshot {
+            approvals: vec![],
+            notices: vec!["could not save".into()],
+        };
+        tx.send_replace(update.clone());
+        let second = read_snapshot(&mut client).await;
+        assert_eq!(second, Response::LiveApprovals(update));
+        drop(client);
+        task.await.unwrap().unwrap();
+    }
+
+    async fn read_snapshot(client: &mut tokio::io::DuplexStream) -> Response {
+        #[derive(serde::Deserialize)]
+        struct Chunk {
+            #[serde(rename = "type")]
+            kind: String,
+            offset: usize,
+            data: String,
+            complete: bool,
+        }
+        let mut json = String::new();
+        loop {
+            let frame = lns_ipc::read_frame_bytes_async(client).await.unwrap();
+            let chunk: Chunk = lns_ipc::decode_frame(&mut &frame[..]).unwrap();
+            assert_eq!(chunk.kind, "LiveApprovalsChunk");
+            assert_eq!(chunk.offset, json.len());
+            json.push_str(&chunk.data);
+            if chunk.complete {
+                return serde_json::from_str(&json).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_client_that_is_not_reading() {
+        let (_, rx) = tokio::sync::watch::channel(lns_ipc::LiveApprovalSnapshot::default());
+        let (mut service, _client) = tokio::io::duplex(1);
+        let shutdown = Shutdown::new();
+        shutdown.signal();
+        stream_approvals(&mut service, rx, &shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_subscription_rejects_commands_on_its_receive_only_connection() {
+        let (tx, rx) = tokio::sync::watch::channel(lns_ipc::LiveApprovalSnapshot::default());
+        let (mut service, mut client) = tokio::io::duplex(512);
+        client.write_all(b"x").await.unwrap();
+        let error = stream_approvals(&mut service, rx, &Shutdown::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("receive-only"));
+        drop(tx);
+    }
+}
+
+pub async fn stream_approvals<S>(
+    stream: &mut S,
+    updates: tokio::sync::watch::Receiver<lns_ipc::LiveApprovalSnapshot>,
+    shutdown: &crate::shutdown::Shutdown,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    stream_responses(stream, updates, shutdown, |snapshot| {
+        Ok(lns_ipc::live_approval_frames(snapshot)?)
+    })
+    .await
+}
+
+pub(super) async fn stream_responses<S, T: Clone>(
+    stream: &mut S,
+    mut updates: tokio::sync::watch::Receiver<T>,
+    shutdown: &crate::shutdown::Shutdown,
+    responses: impl Fn(T) -> anyhow::Result<Vec<Response>>,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    loop {
+        let snapshot = updates.borrow_and_update().clone();
+        for response in responses(snapshot)? {
+            let frame = lns_ipc::encode_frame(&response)?;
+            tokio::select! {
+                result = stream.write_all(&frame) => result?,
+                _ = shutdown.wait_async() => return Ok(()),
+            }
+        }
+        let mut incoming = [0u8; 1];
+        tokio::select! {
+            result = updates.changed() => if result.is_err() { return Ok(()); },
+            result = stream.read(&mut incoming) => {
+                if result? != 0 { anyhow::bail!("IPC subscriptions are receive-only"); }
+                return Ok(());
+            }
+            _ = shutdown.wait_async() => return Ok(()),
+        }
+    }
+}
 
 /// What a run start needs from the service: the refusals a run can be turned away for before it exists, then everything it does once it will start.
 pub trait RunHost {
@@ -553,6 +728,17 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
             unreachable!("{request:?} has a handler of its own, not this match")
         }
         Request::Ping => Response::Pong,
+        Request::WatchApprovals
+        | Request::DismissApprovalNotices { .. }
+        | Request::ReadDashboard
+        | Request::WatchDashboard
+        | Request::InspectApprovalOffer { .. }
+        | Request::GrantApproval { .. } => Response::Error {
+            message: "this request requires its dedicated streaming connection handler".into(),
+        },
+        Request::RespondToApproval { token, action } => {
+            reply_to_live_approval(crate::approval_flow::inbox::get(), token, action.clone())
+        }
         Request::Status => Response::Status(StatusInfo {
             pid: std::process::id(),
             uptime_secs: started_at.elapsed().as_secs(),
@@ -681,6 +867,12 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::ListRegistryLogins => list_logins_response(),
         Request::StopRun { run, timeout_secs } => stop_run_request(run, *timeout_secs).await,
         Request::InspectRun { run } => inspect_run_request(run),
+        Request::ReadRunConfiguration { run } => {
+            image_response(adapter::read_run_configuration(run))
+        }
+        Request::PreviewSandbox { source, mixins } => {
+            image_response(crate::artifact::real::preview_sandbox(source, mixins).await)
+        }
         Request::RemoveRun { run, force } => image_response(remove_run_request(run, *force).await),
         Request::PruneRuns => image_response(prune_runs_request().await),
         Request::SaveRun { run, kind, name } => image_response(save_run_request(run, *kind, name)),
@@ -1322,6 +1514,7 @@ mod tests {
                 resolved_image: None,
                 mixins: Vec::new(),
                 composed_mixins: Vec::new(),
+                configuration_sources: None,
                 name: None,
                 cpus: 1,
                 mem: 0,

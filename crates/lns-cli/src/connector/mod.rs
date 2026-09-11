@@ -918,6 +918,7 @@ mod tests {
     async fn an_install_naming_a_method_this_version_cannot_offer_says_so() {
         // §3.2.2: an unknown auth.kind parses and leaves the method unofferable, so the card cannot offer it and the install has to explain the gap.
         let connector = ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
@@ -962,6 +963,7 @@ mod tests {
     #[test]
     fn the_connections_column_lists_what_the_machine_holds() {
         let row = ConnectorRow::new(&ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
@@ -1016,6 +1018,7 @@ mod tests {
 
     fn with_methods(methods: Vec<lns_ipc::ConnectorMethodView>) -> ConnectorView {
         ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
@@ -1177,6 +1180,7 @@ mod tests {
     #[tokio::test]
     async fn the_disclosure_names_a_connections_authority_and_says_when_it_reported_none() {
         let held = |authority: Vec<String>| ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],

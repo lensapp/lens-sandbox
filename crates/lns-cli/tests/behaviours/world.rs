@@ -17,6 +17,8 @@ pub type ReadmeLayer = (String, Vec<u8>);
 
 #[derive(Debug, Default, World)]
 pub struct BehaviourWorld {
+    pub installation_path: std::path::PathBuf,
+    pub installation_error: Option<String>,
     pub result: Option<CliRun>,
     pub split_streams: Option<(String, String)>,
     /// The stopped run a start scenario targets.

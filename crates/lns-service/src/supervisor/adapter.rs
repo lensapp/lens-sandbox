@@ -7,11 +7,11 @@ use std::sync::Weak;
 use tokio::sync::mpsc;
 
 use crate::approval_flow::entries::FileEntryStore;
-use crate::approval_flow::notification::WindowNotifier;
+use crate::approval_flow::inbox::{self, DecisionDelivery, RequestAction};
+use crate::approval_flow::notification::InboxNotifier;
 use crate::approval_flow::protocol::HostFrame;
 use crate::approval_flow::session::ApprovalSession;
 use crate::approval_flow::watcher::PolicyWatcher;
-use crate::approval_flow::window::{self, DecisionDelivery, RequestAction};
 use crate::log;
 use crate::relay;
 use lns_policy::{FilePolicyStore, Policy};
@@ -126,6 +126,9 @@ async fn decision_delivery_loop(
                 session.dismiss_request(&delivery.id);
             }
         }
+        if let Some(inbox) = inbox::get() {
+            inbox.complete_delivery(&delivery.id);
+        }
     }
 }
 
@@ -148,7 +151,7 @@ fn sweep_once(weak: &Weak<ApprovalSession>) -> bool {
     true
 }
 
-const WINDOW_NOT_INSTALLED: &str = "approval window state was not installed at boot; tray::run_tray must run before any policy-bearing run starts";
+const INBOX_NOT_INSTALLED: &str = "approval inbox was not installed during service startup";
 
 /// The run's approvals sit beside its decisions, so both go when the run's directory does.
 fn approvals_path_for(policy_path: &Path) -> PathBuf {
@@ -205,14 +208,10 @@ pub(super) async fn start(
 ) -> Result<SupervisorSession> {
     let (policy, own_policy) = running_policies(policy_path, sandbox_policy)?;
 
-    let window_state = window::get().context(WINDOW_NOT_INSTALLED)?;
+    let approval_inbox = inbox::get().context(INBOX_NOT_INSTALLED)?;
     let (decision_tx, decision_rx) = tokio::sync::mpsc::unbounded_channel::<DecisionDelivery>();
-    let notifier = Arc::new(WindowNotifier::new(
-        window_state,
-        decision_tx,
-        window::ctx(),
-    ));
-    log::info!("Approvals", "window ready");
+    let notifier = Arc::new(InboxNotifier::new(approval_inbox, decision_tx));
+    log::info!("Approvals", "inbox ready");
 
     let store = Arc::new(FilePolicyStore::new(policy_path.to_path_buf()));
     let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<HostFrame>();
@@ -435,15 +434,15 @@ mod tests {
 
     #[tokio::test]
     async fn decision_delivery_loop_exits_when_session_strong_refs_drop() {
-        use crate::approval_flow::notification::WindowNotifier;
+        use crate::approval_flow::inbox::ApprovalInbox;
+        use crate::approval_flow::notification::InboxNotifier;
         use crate::approval_flow::session::ApprovalSession;
-        use crate::approval_flow::window::WindowState;
         use lns_policy::Policy;
         use std::sync::Arc;
 
-        let window_state = WindowState::new();
+        let window_state = ApprovalInbox::new();
         let (decision_tx, decision_rx) = mpsc::unbounded_channel::<DecisionDelivery>();
-        let notifier = Arc::new(WindowNotifier::new(window_state, decision_tx, None));
+        let notifier = Arc::new(InboxNotifier::new(window_state, decision_tx));
         use crate::approval_flow::session::tests::CapturingStore;
         let store = Arc::new(CapturingStore::default());
         let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<HostFrame>();

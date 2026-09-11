@@ -1,3 +1,4 @@
+mod app_bundle;
 pub mod approval_cli;
 pub mod cli;
 pub mod config_cli;

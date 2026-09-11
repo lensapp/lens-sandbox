@@ -49,6 +49,7 @@ pub fn adopt_pinned_mixins(
     contributions: &[lns_ipc::SourceContribution],
 ) {
     args.resolved_mixins = mixin_display(resolved, &args.mixins, pinned);
+    args.mixin_sources = resolved.to_vec();
     args.mixins = pinned.to_vec();
     args.contributions = contributions.to_vec();
 }
@@ -716,6 +717,7 @@ mod tests {
             scripts: Vec::new(),
             mixins: Vec::new(),
             resolved_mixins: Vec::new(),
+            mixin_sources: Vec::new(),
             contributions: Vec::new(),
             image: image.map(str::to_string),
             file: None,
@@ -907,6 +909,11 @@ mod tests {
             args.mixins,
             std::slice::from_ref(&pinned),
             "the run merges the digest the preflight showed; a tag reaching the service could move between the disclosure and the merge, and the service refuses one outright"
+        );
+        assert_eq!(
+            args.mixin_sources,
+            std::slice::from_ref(&pinned),
+            "inspection retains the resolved source independently of the display label"
         );
         assert_eq!(
             args.resolved_mixins,

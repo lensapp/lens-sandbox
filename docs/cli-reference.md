@@ -305,6 +305,11 @@ See [Running workloads — volumes](running-workloads.md#volumes).
 Decide what this machine offers. A connector is a mixin you install once per
 machine.
 
+A connector can set `spec.description` to explain what it lets a sandbox do.
+The macOS connector card shows this text; without it, the description row is
+omitted. The description grants no access and does not replace the grant's
+disclosure of destinations, credentials, and files.
+
 ```bash
 lns connector install <REF|PATH>
 lns connector uninstall <ID>

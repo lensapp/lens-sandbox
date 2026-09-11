@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+test "$1" = --convert
+test "$2" = icns
+test "$3" = --output
+test -s "$5/icon_16x16.png"
+cp "$5/icon_16x16.png" "$4"

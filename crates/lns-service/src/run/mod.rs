@@ -2,6 +2,7 @@ use anyhow::Result;
 use lns_ipc::{Response, WireFrame};
 use tokio::sync::mpsc::Sender;
 
+pub mod configuration;
 mod decisions;
 mod orchestrator;
 mod save;

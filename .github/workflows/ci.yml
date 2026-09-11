@@ -31,6 +31,7 @@ jobs:
       check-release-build: ${{ steps.filter.outputs['check-release-build'] }}
       static-nft: ${{ steps.filter.outputs['static-nft'] }}
       shell: ${{ steps.filter.outputs.shell }}
+      macos-ui: ${{ steps.filter.outputs['macos-ui'] }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
@@ -68,6 +69,13 @@ jobs:
               - 'scripts/*.sh'
               - 'scripts/hooks/**'
               - 'Makefile'
+              - '.github/workflows/ci.yml'
+            macos-ui:
+              - 'clients/macos/**'
+              - 'crates/lns-ipc/**'
+              - 'crates/lns-service/src/approval_flow/**'
+              - 'crates/lns-service/src/dashboard/**'
+              - 'crates/lns-service/src/ipc/**'
               - '.github/workflows/ci.yml'
             static-nft:
               - 'vendor/static-nft/**'
@@ -115,6 +123,14 @@ jobs:
         with:
           cache: false
       - run: make shell-tests
+
+  macos-ui:
+    runs-on: macos-latest
+    needs: changes
+    if: needs.changes.outputs.macos-ui == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: make -C clients/macos verify
 
   test:
     runs-on: ubuntu-latest
@@ -437,7 +453,7 @@ jobs:
   # hard-fails so we don't accidentally green-light real code changes.
   check:
     runs-on: ubuntu-latest
-    needs: [changes, lint, shell-tests-macos, test, coverage, coverage-as-root, audit, check-release-build, verify-static-nft]
+    needs: [changes, lint, shell-tests-macos, macos-ui, test, coverage, coverage-as-root, audit, check-release-build, verify-static-nft]
     if: always()
     steps:
       - name: Verify all gates passed
@@ -449,6 +465,7 @@ jobs:
           }
           if ! ok "${{ needs.lint.result }}" \
             || ! ok "${{ needs['shell-tests-macos'].result }}" \
+            || ! ok "${{ needs['macos-ui'].result }}" \
             || ! ok "${{ needs.test.result }}" \
             || ! ok "${{ needs.coverage.result }}" \
             || ! ok "${{ needs['coverage-as-root'].result }}" \

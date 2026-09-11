@@ -1,0 +1,12 @@
+{
+  "requests": [
+    {"type": "RegistryLogin", "registry": "ghcr.io", "username": "octocat", "secret": "fixture-secret"},
+    {"type": "RegistryLogout", "registry": "ghcr.io"},
+    {"type": "ListRegistryLogins"}
+  ],
+  "responses": [
+    {"type": "RegistryLoginStored"},
+    {"type": "RegistryLoggedOut"},
+    {"type": "RegistryLogins", "logins": [{"registry": "ghcr.io", "username": "octocat"}]}
+  ]
+}

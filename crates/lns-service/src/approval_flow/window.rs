@@ -1,218 +1,6 @@
-use std::sync::{Arc, Mutex, OnceLock};
-
 use eframe::egui::{self, Color32, Stroke};
-use tokio::sync::mpsc;
-
-use crate::approval_flow::protocol::Decision;
-use crate::approval_flow::session::{ConnectionChoice, PendingPrompt};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecisionDelivery {
-    pub id: String,
-    pub action: RequestAction,
-}
-
-/// What the user chose on a card: a wire decision, an answer about the connector that serves the destination, or a closed card.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RequestAction {
-    Decide(Decision),
-    /// Connect this run to the offered connector by the named method (§3.2.4).
-    Grant {
-        method: String,
-        connection: ConnectionChoice,
-    },
-    /// A standing no for this run; the ordinary card then asks what the hold stood in for.
-    Decline,
-    /// A closed card: fail the held request, but record nothing — the developer made no decision.
-    Dismiss,
-}
-
-pub struct WindowState {
-    inner: Mutex<WindowInner>,
-}
-
-#[derive(Default)]
-struct WindowInner {
-    pending: Vec<PendingEntry>,
-    informs: Vec<InformEntry>,
-    next_seq: u64,
-}
-
-impl WindowInner {
-    fn alloc_seq(&mut self) -> u64 {
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        seq
-    }
-
-    fn order(&self) -> Vec<StackItem> {
-        let mut keyed: Vec<(u64, StackItem)> = Vec::new();
-        keyed.extend(seq_keyed(
-            self.informs.iter().map(|e| e.seq),
-            StackItem::Inform,
-        ));
-        keyed.extend(seq_keyed(
-            self.pending.iter().map(|e| e.seq),
-            StackItem::Network,
-        ));
-        keyed.sort_by_key(|(seq, _)| *seq);
-        keyed.into_iter().map(|(_, item)| item).collect()
-    }
-}
-
-fn seq_keyed(
-    seqs: impl Iterator<Item = u64>,
-    item: fn(usize) -> StackItem,
-) -> impl Iterator<Item = (u64, StackItem)> {
-    seqs.enumerate().map(move |(i, seq)| (seq, item(i)))
-}
-
-struct PendingEntry {
-    prompt: PendingPrompt,
-    decision_tx: mpsc::UnboundedSender<DecisionDelivery>,
-    seq: u64,
-}
-
-struct InformEntry {
-    msg: String,
-    seq: u64,
-}
-
-impl WindowState {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            inner: Mutex::new(WindowInner::default()),
-        })
-    }
-
-    pub fn insert_pending(
-        &self,
-        prompt: PendingPrompt,
-        decision_tx: mpsc::UnboundedSender<DecisionDelivery>,
-    ) {
-        let mut g = self.lock();
-        // Presenting an id already on screen updates it in place: a declined offer re-presents the same request as the ordinary question, and the card must show that rather than the answer already given. The seq stays so the card keeps its place in the pile.
-        if let Some(entry) = g.pending.iter_mut().find(|e| e.prompt.id == prompt.id) {
-            entry.prompt = prompt;
-            return;
-        }
-        let seq = g.alloc_seq();
-        g.pending.push(PendingEntry {
-            prompt,
-            decision_tx,
-            seq,
-        });
-    }
-
-    pub fn remove_pending(&self, id: &str) {
-        self.lock().pending.retain(|e| e.prompt.id != id);
-    }
-
-    pub fn push_inform(&self, msg: String) {
-        let mut g = self.lock();
-        let seq = g.alloc_seq();
-        g.informs.push(InformEntry { msg, seq });
-    }
-
-    pub fn clear_informs(&self) {
-        self.lock().informs.clear();
-    }
-
-    pub fn dismiss_inform(&self, index: usize) {
-        let mut g = self.lock();
-        if index < g.informs.len() {
-            g.informs.remove(index);
-        }
-    }
-
-    pub fn snapshot(&self) -> Snapshot {
-        let g = self.lock();
-        Snapshot {
-            pending: g.pending.iter().map(|e| e.prompt.clone()).collect(),
-            informs: g.informs.iter().map(|e| e.msg.clone()).collect(),
-            order: g.order(),
-        }
-    }
-
-    pub fn pending_count(&self) -> usize {
-        self.lock().pending.len()
-    }
-
-    pub fn decide(&self, id: &str, decision: Decision) -> bool {
-        self.deliver(id, RequestAction::Decide(decision))
-    }
-
-    pub fn grant(&self, id: &str, method: &str, connection: ConnectionChoice) -> bool {
-        self.deliver(
-            id,
-            RequestAction::Grant {
-                method: method.to_string(),
-                connection,
-            },
-        )
-    }
-
-    /// Keeps the card: a decline is answered by the ordinary question the hold stood in for, on the same request.
-    pub fn decline(&self, id: &str) -> bool {
-        let g = self.lock();
-        let Some(entry) = g.pending.iter().find(|e| e.prompt.id == id) else {
-            return false;
-        };
-        let _ = entry.decision_tx.send(DecisionDelivery {
-            id: id.to_string(),
-            action: RequestAction::Decline,
-        });
-        true
-    }
-
-    /// Drops the card and fails its held request without recording a decision. See [`RequestAction::Dismiss`].
-    pub fn dismiss(&self, id: &str) -> bool {
-        self.deliver(id, RequestAction::Dismiss)
-    }
-
-    fn deliver(&self, id: &str, action: RequestAction) -> bool {
-        let mut g = self.lock();
-        let Some(idx) = g.pending.iter().position(|e| e.prompt.id == id) else {
-            return false;
-        };
-        let entry = g.pending.remove(idx);
-        let _ = entry.decision_tx.send(DecisionDelivery {
-            id: id.to_string(),
-            action,
-        });
-        true
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, WindowInner> {
-        self.inner.lock().expect("window state mutex poisoned")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snapshot {
-    pub pending: Vec<PendingPrompt>,
-    pub informs: Vec<String>,
-    /// Every entry above in arrival order, so a card keeps its place in the stack as others come and go.
-    pub order: Vec<StackItem>,
-}
-
-/// One renderable entry of the approval window's stack, indexing into its [`Snapshot`] list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StackItem {
-    Inform(usize),
-    Network(usize),
-}
-
-static GLOBAL: OnceLock<Arc<WindowState>> = OnceLock::new();
+use std::sync::{Arc, OnceLock};
 static CTX: OnceLock<egui::Context> = OnceLock::new();
-
-pub fn install(state: Arc<WindowState>) {
-    let _ = GLOBAL.set(state);
-}
-
-pub fn get() -> Option<Arc<WindowState>> {
-    GLOBAL.get().cloned()
-}
 
 pub fn install_ctx(ctx: egui::Context) {
     let _ = CTX.set(ctx);
@@ -355,7 +143,10 @@ fn read_host_fonts() -> HostFonts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval_flow::inbox::{self, ApprovalInbox, DecisionDelivery, RequestAction};
+    use crate::approval_flow::protocol::Decision;
     use crate::approval_flow::protocol::Treatment;
+    use crate::approval_flow::session::{ConnectionChoice, PendingPrompt};
     use tokio::sync::mpsc::unbounded_channel;
 
     fn prompt(id: &str, host: &str) -> PendingPrompt {
@@ -371,7 +162,7 @@ mod tests {
 
     #[test]
     fn granting_takes_the_card_and_carries_the_account_the_user_chose() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
 
@@ -393,7 +184,7 @@ mod tests {
     #[test]
     fn declining_keeps_the_card_because_the_ordinary_question_is_still_unanswered() {
         // The hold already turned this request into a question; the session re-presents it without the offer.
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
 
@@ -408,7 +199,7 @@ mod tests {
 
     #[test]
     fn answering_a_card_that_is_gone_delivers_nothing() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         assert!(!s.grant("gone", "token", ConnectionChoice::None));
         assert!(!s.decline("gone"));
     }
@@ -416,10 +207,11 @@ mod tests {
     #[test]
     fn presenting_a_card_again_replaces_what_it_shows() {
         // A declined offer is re-presented as the ordinary question; an early return would leave the connector card on screen with both its buttons already spent.
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, _rx) = unbounded_channel();
         let mut offered = prompt("r1", "api.some-provider.example");
         offered.offer = Some(lns_ipc::ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
@@ -440,7 +232,7 @@ mod tests {
 
     #[test]
     fn insert_pending_dedupes_by_id() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, _rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "a.test"), tx.clone());
         s.insert_pending(prompt("r1", "a.test"), tx.clone());
@@ -450,7 +242,7 @@ mod tests {
 
     #[test]
     fn a_network_card_keeps_the_run_its_prompt_names() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, _rx) = unbounded_channel();
         let mut named = prompt("r1", "a.test");
         named.run = Some("some-run".into());
@@ -464,7 +256,7 @@ mod tests {
 
     #[test]
     fn remove_pending_drops_only_matching_id() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, _rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "a.test"), tx.clone());
         s.insert_pending(prompt("r2", "b.test"), tx);
@@ -476,7 +268,7 @@ mod tests {
 
     #[test]
     fn remove_unknown_id_is_a_noop() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, _rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "a.test"), tx);
         s.remove_pending("never-was");
@@ -485,7 +277,7 @@ mod tests {
 
     #[test]
     fn push_inform_appends_in_order() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         s.push_inform("first".into());
         s.push_inform("second".into());
         let snap = s.snapshot();
@@ -494,7 +286,7 @@ mod tests {
 
     #[test]
     fn clear_informs_empties_the_list() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         s.push_inform("warn".into());
         s.clear_informs();
         assert!(s.snapshot().informs.is_empty());
@@ -502,7 +294,7 @@ mod tests {
 
     #[test]
     fn dismiss_inform_removes_the_indexed_entry_and_preserves_the_rest() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         s.push_inform("first".into());
         s.push_inform("second".into());
         s.push_inform("third".into());
@@ -516,7 +308,7 @@ mod tests {
 
     #[test]
     fn dismiss_inform_out_of_bounds_is_a_noop() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         s.push_inform("only".into());
         s.dismiss_inform(5);
         assert_eq!(s.snapshot().informs, vec!["only".to_string()]);
@@ -524,14 +316,14 @@ mod tests {
 
     #[test]
     fn dismiss_inform_when_empty_is_a_noop() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         s.dismiss_inform(0);
         assert!(s.snapshot().informs.is_empty());
     }
 
     #[test]
     fn snapshot_returns_pending_in_insertion_order() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, _rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "a.test"), tx.clone());
         s.insert_pending(prompt("r2", "b.test"), tx);
@@ -543,7 +335,7 @@ mod tests {
 
     #[test]
     fn decide_sends_delivery_on_matching_tx_and_removes_entry() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "a.test"), tx);
         assert!(s.decide("r1", Decision::AllowOnce));
@@ -560,7 +352,7 @@ mod tests {
 
     #[test]
     fn dismiss_delivers_a_verdict_free_action_and_removes_the_entry() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "a.test"), tx);
 
@@ -579,7 +371,7 @@ mod tests {
 
     #[test]
     fn decide_routes_to_the_tx_supplied_at_insert_not_a_sibling() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx1, mut rx1) = unbounded_channel();
         let (tx2, mut rx2) = unbounded_channel();
         s.insert_pending(prompt("r1", "a.test"), tx1);
@@ -594,7 +386,7 @@ mod tests {
 
     #[test]
     fn decide_returns_false_for_unknown_id_and_emits_no_delivery() {
-        let s = WindowState::new();
+        let s = ApprovalInbox::new();
         let (tx, mut rx) = unbounded_channel();
         s.insert_pending(prompt("r1", "a.test"), tx);
         assert!(!s.decide("nope", Decision::AllowOnce));
@@ -604,10 +396,10 @@ mod tests {
 
     #[test]
     fn install_publishes_state_and_ctx_and_getters_return_them() {
-        let s = WindowState::new();
-        install(s.clone());
+        let s = ApprovalInbox::new();
+        inbox::install(s.clone());
         install_ctx(egui::Context::default());
-        let got_state = get().expect("global state should be installed");
+        let got_state = inbox::get().expect("global state should be installed");
         assert!(Arc::ptr_eq(&s, &got_state) || Arc::strong_count(&got_state) >= 2);
         assert!(ctx().is_some(), "global ctx should be installed");
     }

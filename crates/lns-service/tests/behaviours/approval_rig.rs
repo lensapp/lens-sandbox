@@ -170,6 +170,7 @@ impl ApprovalRig {
     pub fn offer_connector(&self, name: &str, host: &str) {
         self.session.set_connector_port(Arc::new(GrantingPort));
         self.session.hold_for_offers(vec![ConnectorView {
+            description: None,
             name: name.to_string(),
             digest: "sha256:test".into(),
             serves: vec![host.to_string()],

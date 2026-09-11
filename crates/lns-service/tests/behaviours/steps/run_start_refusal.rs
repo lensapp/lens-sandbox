@@ -54,6 +54,7 @@ fn args_named(name: &str) -> RunImageArgs {
         resolved_image: None,
         mixins: Vec::new(),
         composed_mixins: Vec::new(),
+        configuration_sources: None,
         name: Some(name.to_string()),
         cpus: 1,
         mem: 0,

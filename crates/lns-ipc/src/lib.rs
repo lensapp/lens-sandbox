@@ -1,6 +1,9 @@
 mod audit;
 mod codec;
+mod configuration;
+mod dashboard;
 mod ledger;
+mod live_approvals;
 mod paths;
 mod protocol;
 mod socket;
@@ -14,7 +17,15 @@ pub use codec::{
     decode_wire_frame_from_payload, decode_wire_frame_sync, encode_frame, encode_raw_frame,
     encode_wire_frame, read_frame_bytes_async,
 };
+pub use configuration::{
+    ConfigurationGrant, ConfigurationRule, ConfigurationSources, SandboxConfiguration,
+};
+pub use dashboard::{DashboardApproval, DashboardEvent, DashboardSandbox};
 pub use ledger::{AnswerSource, ApprovalKind, ConnectorVerb, Decision, LedgerEvent, LedgerRecord};
+pub use live_approvals::{
+    ApprovalConnection, LiveApproval, LiveApprovalAction, LiveApprovalSnapshot,
+    live_approval_frames,
+};
 pub use paths::{
     LnsHomeError, audit_anchor_for_run, audit_log_for_run, audit_runs_root, build_cache_root,
     config_path, connection_ledger, connection_ledger_anchor, connector_grants_path,

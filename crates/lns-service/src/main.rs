@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Instant;
 
 use lns_service::{
-    approval_flow::window::{self as approval_window, WindowState},
+    approval_flow::inbox::{self as approval_window, ApprovalInbox},
     ipc, log, paths,
     shutdown::Shutdown,
     tray,
@@ -20,12 +20,14 @@ fn main() -> anyhow::Result<()> {
 
     log::info!("Starting", "lns-service (socket: {})", socket.display());
 
-    let window_state = WindowState::new();
+    let window_state = ApprovalInbox::new();
     approval_window::install(window_state.clone());
 
     let ipc_shutdown = shutdown.clone();
     let ipc_socket = socket.clone();
-    let ipc_handle = thread::spawn(move || run_ipc_runtime(ipc_socket, ipc_shutdown, started_at));
+    let ipc_inbox = window_state.clone();
+    let ipc_handle =
+        thread::spawn(move || run_ipc_runtime(ipc_socket, ipc_shutdown, started_at, ipc_inbox));
 
     if tray::display_present() {
         tray::run_tray(shutdown, ipc_handle, window_state)
@@ -38,6 +40,7 @@ fn run_ipc_runtime(
     socket: std::path::PathBuf,
     shutdown: Arc<Shutdown>,
     started_at: Instant,
+    inbox: Arc<ApprovalInbox>,
 ) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -45,6 +48,7 @@ fn run_ipc_runtime(
 
     rt.block_on(async {
         spawn_signal_listener(shutdown.clone());
+        tokio::spawn(tray::watch_approvals(inbox.watch(), shutdown.clone()));
         tokio::spawn(lns_service::update_check::run_periodic(shutdown.clone()));
 
         let result = ipc::run_server(socket, shutdown.clone(), started_at).await;

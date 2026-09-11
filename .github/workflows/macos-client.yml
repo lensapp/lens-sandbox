@@ -1,0 +1,69 @@
+name: Native macOS client
+
+on:
+  push:
+    branches-ignore: [main]
+    paths:
+      - 'clients/macos/**'
+      - 'crates/lns-ipc/**'
+      - 'crates/lns-cli/**'
+      - 'crates/lns-service/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'Makefile'
+      - '.github/workflows/macos-client.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - run: |
+          if make -C clients/macos verify > native-verify.log 2>&1; then
+            cat native-verify.log
+          else
+            cat native-verify.log
+            sh scripts/gate-annotate.sh native-verify.log
+          fi
+
+  bundle:
+    needs: verify
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/install-cross-toolchain
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: .
+          cache-shared-key: native-macos-bundle
+          cache-on-failure: true
+      - run: |
+          if make -C clients/macos package > native-package.log 2>&1; then
+            cat native-package.log
+          else
+            cat native-package.log
+            sh scripts/gate-annotate.sh native-package.log
+          fi
+      - run: |
+          if make -C clients/macos smoke > native-smoke.log 2>&1; then
+            cat native-smoke.log
+          else
+            cat native-smoke.log
+            sh scripts/gate-annotate.sh native-smoke.log
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: LNS-macos-${{ github.sha }}
+          path: clients/macos/dist/LNS-macos.zip
+          if-no-files-found: error
+          retention-days: 7

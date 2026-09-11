@@ -29,6 +29,8 @@ pub struct ConnectorDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default)]
     pub serves: Vec<String>,
     #[serde(default)]
@@ -453,6 +455,14 @@ pub fn path_filesets(connector: &ConnectorSpec) -> Vec<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn connector_description_survives_document_parsing_and_serialization() {
+        let document = br#"{"apiVersion":"lns.run/v1","kind":"connector","name":"issues","spec":{"description":"Work with projects and issues.","serves":["api.example.com"],"methods":[{"name":"public"}]}}"#;
+        let parsed = super::parse(document).expect("a connector may describe its purpose");
+        let spec = serde_json::to_value(&parsed.spec).expect("serialize connector");
+        assert_eq!(spec["description"], "Work with projects and issues.");
+    }
+
     use super::*;
 
     fn document(spec: &str) -> Vec<u8> {

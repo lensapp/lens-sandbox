@@ -1,0 +1,8 @@
+[
+  {"type":"DashboardBegin"},
+  {"type":"DashboardSandbox","sandbox":{"id":"run-1","name":"quiet_river","image":"alpine:3.20","status":"running"}},
+  {"type":"DashboardApproval","approval":{"entry":{"id":"entry-1","sandbox":"quiet_river","subject":"example.com","action":"CONNECT example.com:443","kind":"destination","answer":"withdrawn","answerable":true},"raw":true,"answers":["always-allow","always-deny"],"grantable":false}},
+  {"type":"DashboardEvent","event":{"id":"event-1","ts":"2026-09-09T12:00:00Z","when":"2026-09-09 12:00:00","run":"run-1","kind":"egress","detail":"CONNECT example.com:443","raw":"{\"message\":\"CONNECT example.com:443\",\"sequence\":9007199254740993}"}},
+  {"type":"DashboardWarning","message":"audit integrity: log truncated or rolled back"},
+  {"type":"DashboardEnd"}
+]

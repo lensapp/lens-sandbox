@@ -17,6 +17,9 @@ use lns_service::forward::ForwardGuard;
 
 #[derive(Debug, Default, World)]
 pub struct BehaviourWorld {
+    pub configuration: Option<lns_ipc::SandboxConfiguration>,
+    pub dashboard: Option<crate::steps::dashboard::DashboardRig>,
+    pub live_approval: Option<crate::steps::live_approvals::LiveApprovalRig>,
     pub started_at: Option<Instant>,
     pub response: Option<Response>,
     pub approval: Option<ApprovalRig>,

@@ -148,6 +148,48 @@ async fn handle_connection(
     let request: Request = decode_frame(&mut &bytes[..])?;
 
     match request {
+        Request::DismissApprovalNotices { notices } => {
+            let inbox =
+                crate::approval_flow::inbox::get().context("approval inbox is unavailable")?;
+            stream
+                .write_all(&encode_frame(&inbox.dismiss_notices(&notices))?)
+                .await?;
+            Ok(())
+        }
+        Request::ReadDashboard => {
+            let snapshot = tokio::task::spawn_blocking(read_dashboard)
+                .await
+                .context("reading dashboard task")?;
+            match snapshot {
+                Ok(snapshot) => {
+                    super::dashboard::write_snapshot(&mut stream, snapshot, &shutdown).await
+                }
+                Err(error) => {
+                    write_error(&mut stream, format!("reading dashboard: {error:#}")).await
+                }
+            }
+        }
+        Request::WatchDashboard => {
+            super::stream_responses(
+                &mut stream,
+                crate::dashboard::live::subscribe(),
+                &shutdown,
+                |()| Ok(vec![Response::DashboardChanged]),
+            )
+            .await
+        }
+        request @ (Request::InspectApprovalOffer { .. } | Request::GrantApproval { .. }) => {
+            let response = tokio::task::spawn_blocking(move || dashboard_action(request))
+                .await
+                .context("dashboard approval task")?;
+            stream.write_all(&encode_frame(&response)?).await?;
+            Ok(())
+        }
+        Request::WatchApprovals => {
+            let inbox =
+                crate::approval_flow::inbox::get().context("approval inbox is unavailable")?;
+            super::stream_approvals(&mut stream, inbox.watch(), &shutdown).await
+        }
         Request::RunImage(args) => handle_run(stream, *args).await,
         Request::ExecImage(args) => handle_exec(stream, args).await,
         Request::StartRun { run, attach, stdin } => {
@@ -157,6 +199,52 @@ async fn handle_connection(
         Request::AttachRun { run } => handle_attach(stream, run).await,
         Request::RunStats { run } => handle_stats(stream, run).await,
         other => handle_one_shot(stream, other, shutdown, started_at).await,
+    }
+}
+
+fn read_dashboard() -> anyhow::Result<super::dashboard::Snapshot> {
+    let timeline = lns_audit::collect_timeline(
+        &lns_ipc::audit_runs_root()?,
+        &lns_ipc::connection_ledger()?,
+        None,
+    )?;
+    let root = crate::cache::root()?;
+    Ok(super::dashboard::assemble(
+        crate::dashboard::active_sandboxes(),
+        timeline,
+        crate::approval_flow::answering::entries(&root),
+    ))
+}
+
+fn dashboard_action(request: Request) -> Response {
+    match crate::cache::root() {
+        Ok(root) => super::dashboard::reply_to_action(&DashboardApprovalHost(root), request),
+        Err(error) => Response::Error {
+            message: format!("{error:#}"),
+        },
+    }
+}
+
+struct DashboardApprovalHost(PathBuf);
+
+impl super::dashboard::ApprovalHost for DashboardApprovalHost {
+    fn offered(&self, id: &str) -> Option<lns_ipc::ConnectorView> {
+        crate::approval_flow::answering::offered(&self.0, crate::run_registry::approvals, id)
+    }
+
+    fn grant(
+        &self,
+        id: &str,
+        method: &str,
+        connection: crate::approval_flow::session::ConnectionChoice,
+    ) -> crate::approval_flow::answering::Granting {
+        crate::approval_flow::answering::grant(
+            &self.0,
+            crate::run_registry::approvals,
+            id,
+            method,
+            connection,
+        )
     }
 }
 
@@ -724,4 +812,21 @@ async fn take_reservations(
             "taking what was reserved for this run failed, so it starts without it: {e}"
         );
     }
+}
+
+pub(super) fn read_run_configuration(run: &str) -> anyhow::Result<Response> {
+    let id = crate::run_registry::resolve(run).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let root = crate::cache::root()?;
+    let bytes = std::fs::read(crate::run_record::record_path(&root, &id))
+        .context("reading the recorded sandbox configuration")?;
+    let record =
+        serde_json::from_slice(&bytes).context("parsing the recorded sandbox configuration")?;
+    let decisions = lns_policy::Policy::load_or_default(&crate::cache::decisions_path(&root, &id))?;
+    let grants = crate::connector::real::read_granted_supply(
+        &crate::connector::store::GrantHolder::Run(id.clone()),
+    )?;
+    let configuration = crate::run::configuration::inspect(&record, &decisions, &grants)?;
+    Ok(Response::SandboxConfiguration {
+        configuration: Box::new(configuration),
+    })
 }

@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+case "$1" in */render-icons.swift) ;; *) exit 1;; esac
+test -s "$2"
+mkdir -p "$3"
+cp "$2" "$3/icon_16x16.png"

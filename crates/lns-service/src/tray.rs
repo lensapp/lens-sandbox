@@ -9,9 +9,10 @@ use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
+use crate::approval_flow::inbox::{ApprovalInbox, Snapshot, StackItem};
 use crate::approval_flow::protocol::Decision;
 use crate::approval_flow::session::{ConnectionChoice, PendingPrompt};
-use crate::approval_flow::window::{self, Snapshot, StackItem, WindowState};
+use crate::approval_flow::window;
 use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
 
@@ -32,6 +33,21 @@ const PILE_INSET: f32 = 10.0;
 const PILE_MAX_LEDGES: usize = 2;
 const PILE_HEADER_H: f32 = 19.0;
 const PILE_HEADER_BUTTON_CENTER: f32 = 16.0;
+
+pub async fn watch_approvals(
+    mut updates: tokio::sync::watch::Receiver<lns_ipc::LiveApprovalSnapshot>,
+    shutdown: Arc<Shutdown>,
+) {
+    loop {
+        tokio::select! {
+            changed = updates.changed() => {
+                if changed.is_err() { return; }
+                if let Some(ctx) = window::ctx() { ctx.request_repaint(); }
+            }
+            _ = shutdown.wait_async() => return,
+        }
+    }
+}
 
 /// Builds the tray icon + Quit menu and installs the global menu-event handler (Quit signals shutdown); `on_event` lets the caller repaint after any menu event.
 fn build_tray_icon(
@@ -135,7 +151,7 @@ fn approval_viewport() -> egui::ViewportBuilder {
 pub fn run_tray(
     shutdown: Arc<Shutdown>,
     ipc_handle: JoinHandle<anyhow::Result<()>>,
-    window_state: Arc<WindowState>,
+    window_state: Arc<ApprovalInbox>,
 ) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let gtk_tray = spawn_gtk_tray(shutdown.clone());
@@ -209,7 +225,7 @@ pub fn run_headless(
 
 struct TrayApp {
     shutdown: Arc<Shutdown>,
-    window_state: Arc<WindowState>,
+    window_state: Arc<ApprovalInbox>,
     #[cfg(target_os = "macos")]
     _tray: tray_icon::TrayIcon,
     placement: ViewportPlacement,
@@ -229,7 +245,7 @@ impl TrayApp {
     fn new(
         ctx: egui::Context,
         shutdown: Arc<Shutdown>,
-        window_state: Arc<WindowState>,
+        window_state: Arc<ApprovalInbox>,
     ) -> anyhow::Result<Self> {
         // Linux owns the tray on a dedicated gtk-main thread (spawn_gtk_tray); only macOS builds it in-app.
         #[cfg(target_os = "macos")]
@@ -736,7 +752,7 @@ fn pile_scroll_offset(
 }
 
 /// Dismisses every card the pile is showing; `pub` so a behavioural test drives the same fan-out the header ✕ does rather than deciding each card itself.
-pub fn close_all(state: &WindowState, snapshot: &Snapshot) {
+pub fn close_all(state: &ApprovalInbox, snapshot: &Snapshot) {
     let mut had_inform = false;
     for item in &snapshot.order {
         match close_action(item, snapshot) {
@@ -752,7 +768,7 @@ pub fn close_all(state: &WindowState, snapshot: &Snapshot) {
 }
 
 /// The single place a closed card becomes a non-decision, shared by the per-card ✕ and the pile's close-all.
-fn apply_dismissal(state: &WindowState, dismissal: &Dismissal) {
+fn apply_dismissal(state: &ApprovalInbox, dismissal: &Dismissal) {
     match dismissal {
         Dismissal::Network { id } => {
             state.dismiss(id);
@@ -2020,6 +2036,7 @@ mod tests {
                 treatment: Treatment::Inspected,
                 run: Some("my-agent".into()),
                 offer: Some(lns_ipc::ConnectorView {
+                    description: None,
                     name: "some-provider".into(),
                     digest: "sha256:abc".into(),
                     serves: vec!["api.some-provider.example".into()],
@@ -2493,6 +2510,7 @@ mod tests {
 
     fn holding(labels: &[&str]) -> lns_ipc::ConnectorView {
         lns_ipc::ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: Vec::new(),
@@ -2565,7 +2583,7 @@ mod tests {
 
     #[test]
     fn closing_every_card_at_once_decides_nothing() {
-        let state = WindowState::new();
+        let state = ApprovalInbox::new();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         state.insert_pending(
             PendingPrompt {
@@ -2586,7 +2604,7 @@ mod tests {
             .expect("close-all must resolve every held request");
         assert_eq!(
             delivery.action,
-            crate::approval_flow::window::RequestAction::Dismiss,
+            crate::approval_flow::inbox::RequestAction::Dismiss,
             "one click on close-all must not permanently deny every held request in the stack"
         );
     }

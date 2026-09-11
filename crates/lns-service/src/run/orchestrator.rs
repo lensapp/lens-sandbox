@@ -168,6 +168,8 @@ async fn orchestrate(
     // A local definition plans directly; a published sandbox reference boots what it resolved to; a plain image passes through unchanged.
     let resolved_image = args.resolved_image.as_deref().or(args.image.as_deref());
     let mut resolved_document: Option<String> = None;
+    let mut configuration_sources = args.configuration_sources.clone();
+    let mut authored_egress = args.authored_egress.clone();
     let sandbox_plan = match document {
         PreparedDocument::Local(definition) => {
             resolved_document = Some(definition.clone());
@@ -182,6 +184,8 @@ async fn orchestrate(
             )
         }
         PreparedDocument::Published(resolved) => {
+            configuration_sources = Some(Box::new(resolved.sources.clone()));
+            authored_egress = Some(resolved.authored_egress.clone());
             resolved_document = String::from_utf8(resolved.document.clone()).ok();
             Some(
                 crate::artifact::real::plan_resolved(
@@ -484,7 +488,9 @@ async fn orchestrate(
     );
     super::verify_pinned_descriptor(&mode, &descriptor.descriptor_sha256)?;
     let recorded_descriptor_sha = descriptor.descriptor_sha256.clone();
-    let record_args = args.clone();
+    let mut record_args = args.clone();
+    record_args.configuration_sources = configuration_sources;
+    record_args.authored_egress = authored_egress;
 
     let run_as = vm::resolve_run_as(
         args.sandbox_user.as_deref(),

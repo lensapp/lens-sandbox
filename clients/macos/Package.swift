@@ -1,0 +1,22 @@
+// swift-tools-version: 5.9
+import PackageDescription
+
+var products: [Product] = [.library(name: "LNSClient", targets: ["LNSClient"])]
+var targets: [Target] = [
+    .target(name: "LNSClient"),
+    .executableTarget(name: "LNSLaunchSmoke", dependencies: ["LNSClient"], path: "Smoke/Launch"),
+    .testTarget(name: "LNSClientTests", dependencies: ["LNSClient"], resources: [.copy("Fixtures")])
+]
+#if os(macOS)
+products.append(.executable(name: "LNS", targets: ["LNSMac"]))
+targets.append(.executableTarget(name: "LNSMac", dependencies: ["LNSClient"]))
+targets.append(.testTarget(name: "LNSMacTests", dependencies: ["LNSMac", "LNSClient"]))
+targets.append(.executableTarget(name: "LNSClientSmoke", dependencies: ["LNSClient"], path: "Smoke/Client"))
+#endif
+
+let package = Package(
+    name: "LNSMac",
+    platforms: [.macOS(.v13)],
+    products: products,
+    targets: targets
+)
