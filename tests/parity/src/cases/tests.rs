@@ -9,14 +9,16 @@ fn output(stdout: &str, code: i32) -> Output {
         stderr: String::new(),
         code,
         duration: Duration::from_millis(1),
+        timed_out: false,
     }
 }
 
 #[test]
 fn every_case_of_this_phase_is_registered_once_and_the_shutdown_case_runs_last() {
     let names = names();
-    assert_eq!(names.len(), 12);
-    assert_eq!(names[0], "lease-and-resolver");
+    assert_eq!(names.len(), 13);
+    assert_eq!(names[0], PREFLIGHT);
+    assert_eq!(names[1], "lease-and-resolver");
     assert_eq!(names[names.len() - 1], "service-stop-with-guests");
 
     let mut sorted = names.clone();
@@ -181,9 +183,106 @@ fn the_context_writes_one_definition_per_image_it_runs() {
     let curl = std::fs::read_to_string(ctx.project.join("curl.yaml")).unwrap();
     assert!(alpine.contains(&images.alpine), "{alpine}");
     assert!(curl.contains(&images.curl), "{curl}");
+    for document in [&alpine, &curl] {
+        for destination in fixtures.guest_destinations() {
+            assert!(
+                document.contains(&format!("match: \"{destination}\"")),
+                "{document}"
+            );
+        }
+    }
     assert_eq!(ctx.expectation("loopback-witness"), Some("refused"));
     assert_eq!(ctx.expectation("upload-100m"), None);
     assert_eq!(ctx.lan(), std::net::Ipv4Addr::LOCALHOST);
     assert_eq!(ctx.conn_mark(), 0);
     assert!(ctx.new_connection(Role::Sink, 0).is_none());
+}
+
+#[test]
+fn every_case_declares_a_budget_and_whether_it_needs_a_raw_stream_to_the_fixture() {
+    for case in all() {
+        assert!(
+            case.budget >= Duration::from_secs(60),
+            "{} declares {:?}",
+            case.name,
+            case.budget
+        );
+    }
+    assert!(needs_fixture_stream("upload-100m"));
+    assert!(needs_fixture_stream("create-destroy-20"));
+    assert!(!needs_fixture_stream(PREFLIGHT));
+    assert!(!needs_fixture_stream("lease-and-resolver"));
+    assert!(!needs_fixture_stream("loopback-witness"));
+}
+
+#[test]
+fn the_transfer_budget_is_the_one_the_hundred_megabyte_size_is_measured_against() {
+    let budget = |name: &str| {
+        all()
+            .into_iter()
+            .find(|case| case.name == name)
+            .map(|case| case.budget)
+            .unwrap()
+    };
+    assert_eq!(budget("upload-100m"), Duration::from_secs(120));
+    assert_eq!(budget("download-100m"), Duration::from_secs(120));
+    assert_eq!(
+        budget("create-destroy-20"),
+        Duration::from_secs(60 * (lifecycle::CYCLES / lifecycle::CYCLE_GROUP) as u64)
+    );
+}
+
+#[test]
+fn what_the_fixtures_saw_is_recorded_on_the_case_whatever_its_verdict() {
+    let mut case = CaseResult::new("upload-100m");
+    record_activity(
+        &mut case,
+        crate::fixtures::Activity {
+            connections: 2,
+            bytes_in: 1024,
+            bytes_out: 0,
+        },
+    );
+
+    assert_eq!(case.measures["fixture_seen_connections"].to_string(), "2");
+    assert_eq!(case.measures["fixture_seen_bytes_in"].to_string(), "1024");
+    assert_eq!(case.measures["fixture_seen_bytes_out"].to_string(), "0");
+}
+
+#[test]
+fn a_guest_command_killed_at_its_budget_says_so_in_the_case() {
+    let mut case = CaseResult::new("upload-100m");
+    let mut killed = output("started\n", -1);
+    killed.timed_out = true;
+    guest_output(&mut case, &killed);
+
+    assert_eq!(case.measures["guest_timed_out"].to_string(), "true");
+}
+
+#[test]
+fn a_case_run_outside_the_runner_still_has_a_budget_to_spend() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixtures = Fixtures::start(std::net::Ipv4Addr::LOCALHOST, 0, Sizes::default()).unwrap();
+    let lns = Lns::new(PathBuf::from("/bin/echo"), BTreeMap::new());
+    let images = Images::default();
+    let ctx = Ctx::prepare(
+        &lns,
+        &fixtures,
+        &images,
+        &dir.path().join("project"),
+        "192.168.127".to_string(),
+        BTreeMap::new(),
+        None,
+    )
+    .unwrap();
+    assert!(ctx.remaining() > Duration::from_secs(60));
+
+    ctx.begin_case(Duration::from_secs(30));
+    assert!(ctx.remaining() <= Duration::from_secs(30));
+    assert!(ctx.within_budget(Duration::from_secs(180)) <= Duration::from_secs(30));
+    assert_eq!(
+        ctx.within_budget(Duration::from_millis(1)),
+        Duration::from_millis(1)
+    );
+    assert_eq!(ctx.activity(), crate::fixtures::Activity::default());
 }

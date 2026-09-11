@@ -34,4 +34,6 @@ sha2       = "=0.10.9"
 toml       = "=0.8.23"
 
 [dev-dependencies]
-tempfile = "=3.27.0"
+tempfile   = "=3.27.0"
+lns-policy = { path = "../../crates/lns-policy" }
+serde_yaml = "=0.9.34"

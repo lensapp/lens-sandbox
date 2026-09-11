@@ -1,6 +1,6 @@
 use crate::cases::{self, Ctx, Image};
 use crate::config::{Backend, Config, Images};
-use crate::fixtures::{Fixtures, Sizes, refuse_unsuitable_bind};
+use crate::fixtures::{Activity, Fixtures, Sizes, refuse_unsuitable_bind};
 use crate::host;
 use crate::result::{
     BackendRecord, BinaryRecord, CaseResult, ImageRecord, RunResult, SCHEMA_VERSION, sha256_file,
@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct RunPlan {
     pub backend: Backend,
@@ -21,6 +21,7 @@ pub struct RunPlan {
     pub base_port: u16,
     pub guest_subnet: String,
     pub selected: Vec<String>,
+    pub budgets: BTreeMap<String, u64>,
     pub work_dir: PathBuf,
     pub out: PathBuf,
 }
@@ -38,11 +39,84 @@ pub fn select_cases(requested: &[String]) -> Result<Vec<String>> {
             );
         }
     }
+    // The preflight joins any selection that needs a raw stream, so a held stream is named once rather than stalling each case that meets it.
+    let needs_preflight = requested
+        .iter()
+        .any(|name| cases::needs_fixture_stream(name));
     Ok(known
         .into_iter()
-        .filter(|name| requested.iter().any(|wanted| wanted == name))
+        .filter(|name| {
+            requested.iter().any(|wanted| wanted == name)
+                || (needs_preflight && *name == cases::PREFLIGHT)
+        })
         .map(str::to_string)
         .collect())
+}
+
+pub fn check_budgets(budgets: &BTreeMap<String, u64>) -> Result<()> {
+    let known = cases::names();
+    for (name, seconds) in budgets {
+        if !known.contains(&name.as_str()) {
+            bail!(
+                "no case named {name}; this phase runs: {}",
+                known.join(", ")
+            );
+        }
+        if *seconds == 0 {
+            bail!("--budget {name}=0 leaves the case no time at all");
+        }
+    }
+    Ok(())
+}
+
+/// What the preflight settled for the cases behind it: a held stream skips every case that needs one, rather than letting each stall to its own budget.
+#[derive(Debug, Default)]
+pub struct Cascade {
+    reason: Option<String>,
+}
+
+impl Cascade {
+    pub fn observe(&mut self, case: &cases::Case, result: &CaseResult) {
+        if case.name == cases::PREFLIGHT && result.status == crate::result::Status::Fail {
+            self.reason = Some(
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "the preflight failed".to_string()),
+            );
+        }
+    }
+
+    pub fn skip_for(&self, case: &cases::Case) -> Option<CaseResult> {
+        let reason = self.reason.as_ref()?;
+        case.needs_fixture_stream.then(|| {
+            CaseResult::new(case.name).skip(format!("fixture unreachable from the guest: {reason}"))
+        })
+    }
+}
+
+pub fn budget_failure(elapsed: Duration, activity: Activity) -> String {
+    format!(
+        "budget exceeded after {}s, {} bytes seen by the fixture",
+        elapsed.as_secs(),
+        activity.bytes()
+    )
+}
+
+/// A case past its budget is a fail whatever it thought of itself; a skip stands, because a missing command is not a stall.
+pub fn enforce_budget(
+    result: CaseResult,
+    elapsed: Duration,
+    budget: Duration,
+    activity: Activity,
+) -> CaseResult {
+    if elapsed <= budget || result.status == crate::result::Status::Skip {
+        return result;
+    }
+    let duration_ms = result.duration_ms;
+    let mut failed = result.fail(budget_failure(elapsed, activity));
+    failed.duration_ms = duration_ms;
+    failed
 }
 
 pub fn merge_backend(
@@ -121,26 +195,7 @@ pub fn execute(plan: RunPlan) -> Result<RunResult> {
     )?;
 
     let images = record_images(&ctx, &plan.images);
-    let mut results = Vec::new();
-    for (name, case) in cases::all() {
-        if !plan.selected.iter().any(|wanted| wanted == name) {
-            continue;
-        }
-        eprintln!("[case]  {name}");
-        let outcome = case(&ctx);
-        eprintln!("[{}]  {name}", outcome.status.as_str());
-        results.push(outcome);
-    }
-
-    let samples = sampler.as_ref().map(Sampler::take).unwrap_or_default();
-    if let Some(sampler) = &sampler {
-        sampler.stop();
-    }
-    service.stop()?;
-    fixtures.write_report(&plan.work_dir.join("fixtures.json"))?;
-    fixtures.shutdown();
-
-    let result = RunResult {
+    let mut result = RunResult {
         schema_version: SCHEMA_VERSION,
         harness_revision: harness_revision(),
         backend: BackendRecord {
@@ -156,11 +211,62 @@ pub fn execute(plan: RunPlan) -> Result<RunResult> {
         host: host::facts(),
         started_unix_ms,
         finished_unix_ms: unix_ms(),
-        cases: results,
-        samples,
+        cases: Vec::new(),
+        samples: Vec::new(),
     };
+
+    let mut cascade = Cascade::default();
+    for case in cases::all() {
+        if !plan.selected.iter().any(|wanted| *wanted == case.name) {
+            continue;
+        }
+        let budget = budget_for(&case, &plan.budgets);
+        let outcome = match cascade.skip_for(&case) {
+            Some(skipped) => skipped,
+            None => {
+                eprintln!("[case]  {} (budget {}s)", case.name, budget.as_secs());
+                run_case(&ctx, &case, budget)
+            }
+        };
+        eprintln!("[{}]  {}", outcome.status.as_str(), case.name);
+        cascade.observe(&case, &outcome);
+        result.cases.push(outcome);
+        // Written after every case, because a run that stalls or is stopped still has to be readable.
+        result.finished_unix_ms = unix_ms();
+        result.samples = sampler.as_ref().map(Sampler::take).unwrap_or_default();
+        result.write(&plan.out)?;
+        fixtures.write_report(&plan.work_dir.join("fixtures.json"))?;
+    }
+
+    result.samples = sampler.as_ref().map(Sampler::take).unwrap_or_default();
+    if let Some(sampler) = &sampler {
+        sampler.stop();
+    }
+    service.stop()?;
+    fixtures.write_report(&plan.work_dir.join("fixtures.json"))?;
+    fixtures.shutdown();
+
+    result.finished_unix_ms = unix_ms();
     result.write(&plan.out)?;
     Ok(result)
+}
+
+fn budget_for(case: &cases::Case, budgets: &BTreeMap<String, u64>) -> Duration {
+    budgets
+        .get(case.name)
+        .map(|seconds| Duration::from_secs(*seconds))
+        .unwrap_or(case.budget)
+}
+
+fn run_case(ctx: &Ctx, case: &cases::Case, budget: Duration) -> CaseResult {
+    ctx.begin_case(budget);
+    let started = Instant::now();
+    let mut result = (case.run)(ctx);
+    let elapsed = started.elapsed();
+    let activity = ctx.activity();
+    ctx.cleanup_case();
+    cases::record_activity(&mut result, activity);
+    enforce_budget(result, elapsed, budget, activity)
 }
 
 fn binaries(backend: &Backend) -> Result<Vec<BinaryRecord>> {
@@ -299,6 +405,124 @@ mod tests {
         assert!(err.contains("upload-100m"), "{err}");
     }
 
+    fn registered(name: &str) -> cases::Case {
+        cases::all()
+            .into_iter()
+            .find(|case| case.name == name)
+            .expect("the registry holds this case")
+    }
+
+    #[test]
+    fn a_selection_that_needs_a_raw_stream_runs_the_preflight_that_proves_one() {
+        let selected = select_cases(&["download-100m".to_string()]).unwrap();
+        assert_eq!(selected, vec![cases::PREFLIGHT, "download-100m"]);
+
+        let selected = select_cases(&["lease-and-resolver".to_string()]).unwrap();
+        assert_eq!(selected, vec!["lease-and-resolver"]);
+    }
+
+    #[test]
+    fn a_failed_preflight_skips_every_case_that_needs_the_fixture_rather_than_stalling_each() {
+        let mut cascade = Cascade::default();
+        let preflight = registered(cases::PREFLIGHT);
+        cascade.observe(
+            &preflight,
+            &CaseResult::new(cases::PREFLIGHT).fail("the guest sent 16 bytes and read 0 back"),
+        );
+
+        let skipped = cascade.skip_for(&registered("upload-100m")).unwrap();
+        assert_eq!(skipped.status, Status::Skip);
+        assert_eq!(
+            skipped.reason.as_deref(),
+            Some("fixture unreachable from the guest: the guest sent 16 bytes and read 0 back")
+        );
+        assert!(
+            cascade
+                .skip_for(&registered("lease-and-resolver"))
+                .is_none()
+        );
+        assert!(cascade.skip_for(&registered("loopback-witness")).is_none());
+    }
+
+    #[test]
+    fn a_preflight_that_passed_lets_every_case_behind_it_run() {
+        let mut cascade = Cascade::default();
+        cascade.observe(
+            &registered(cases::PREFLIGHT),
+            &CaseResult::new(cases::PREFLIGHT).pass(),
+        );
+        assert!(cascade.skip_for(&registered("upload-100m")).is_none());
+    }
+
+    #[test]
+    fn a_case_past_its_budget_fails_with_what_the_fixture_saw_while_it_ran() {
+        let activity = Activity {
+            connections: 1,
+            bytes_in: 0,
+            bytes_out: 0,
+        };
+        let over = enforce_budget(
+            CaseResult::new("upload-100m").pass(),
+            Duration::from_secs(121),
+            Duration::from_secs(120),
+            activity,
+        );
+
+        assert_eq!(over.status, Status::Fail);
+        assert_eq!(
+            over.error.as_deref(),
+            Some("budget exceeded after 121s, 0 bytes seen by the fixture")
+        );
+    }
+
+    #[test]
+    fn a_case_inside_its_budget_and_a_skip_past_it_keep_their_own_verdict() {
+        let activity = Activity::default();
+        let inside = enforce_budget(
+            CaseResult::new("upload-100m").pass(),
+            Duration::from_secs(30),
+            Duration::from_secs(120),
+            activity,
+        );
+        assert_eq!(inside.status, Status::Pass);
+
+        let skipped = enforce_budget(
+            CaseResult::new("guest-half-close").skip("the image's nc has neither -N nor -q"),
+            Duration::from_secs(200),
+            Duration::from_secs(120),
+            activity,
+        );
+        assert_eq!(skipped.status, Status::Skip);
+    }
+
+    #[test]
+    fn a_budget_override_replaces_the_one_the_registry_declares() {
+        let case = registered("download-100m");
+        assert_eq!(
+            budget_for(&case, &BTreeMap::new()),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            budget_for(&case, &BTreeMap::from([("download-100m".to_string(), 300)])),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn a_budget_for_a_case_this_phase_does_not_run_is_refused() {
+        let err = check_budgets(&BTreeMap::from([("dns-fixture".to_string(), 60)]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("dns-fixture"), "{err}");
+
+        let err = check_budgets(&BTreeMap::from([("upload-100m".to_string(), 0)]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no time at all"), "{err}");
+
+        check_budgets(&BTreeMap::from([("upload-100m".to_string(), 240)])).unwrap();
+    }
+
     #[test]
     fn a_backend_may_be_given_whole_on_the_command_line() {
         let backend = merge_backend(
@@ -433,6 +657,7 @@ mod tests {
             base_port: 0,
             guest_subnet: "192.168.127".into(),
             selected: vec![],
+            budgets: BTreeMap::new(),
             work_dir: std::env::temp_dir().join("parity-never-created"),
             out: std::env::temp_dir().join("parity-never-written.json"),
         };

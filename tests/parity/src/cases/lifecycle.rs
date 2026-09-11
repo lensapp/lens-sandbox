@@ -8,7 +8,8 @@ use std::time::Duration;
 const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const DESCRIPTOR_TIMEOUT: Duration = Duration::from_secs(10);
-const CYCLES: usize = 20;
+pub const CYCLES: usize = 20;
+pub const CYCLE_GROUP: usize = 5;
 const CYCLE_GROWTH_ALLOWED: i64 = 3;
 
 pub fn kill_mid_transfer(ctx: &Ctx) -> CaseResult {
@@ -67,7 +68,7 @@ pub fn kill_mid_transfer(ctx: &Ctx) -> CaseResult {
             .unwrap_or(bytes_at_close);
         case.record("sink_bytes_after_close", after);
 
-        let recovered = poll(DESCRIPTOR_TIMEOUT, || {
+        let recovered = poll(ctx.within_budget(DESCRIPTOR_TIMEOUT), || {
             let now = ctx.open_fds()?;
             (baseline.is_some_and(|before| now <= before)).then_some(now)
         });

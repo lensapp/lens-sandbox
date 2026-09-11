@@ -243,3 +243,51 @@ fn consecutive_ports_follow_the_base_port() {
     assert_eq!(offset_port(0, 3).unwrap(), 0);
     assert!(offset_port(65535, 1).is_err());
 }
+
+#[test]
+fn every_lan_fixture_is_a_destination_the_guests_definition_decides() {
+    let f = fixtures(small());
+    let destinations = f.guest_destinations();
+
+    let expected: Vec<String> = {
+        let report = f.report();
+        let mut ports: Vec<u16> = report
+            .ports
+            .iter()
+            .filter(|(role, _)| role.as_str() != Role::Witness.as_str())
+            .map(|(_, port)| *port)
+            .collect();
+        ports.sort_unstable();
+        ports
+            .into_iter()
+            .map(|port| format!("{}:{port}", f.bind()))
+            .collect()
+    };
+    assert_eq!(destinations, expected);
+    assert_eq!(destinations.len(), 8, "seven TCP fixtures and the UDP echo");
+
+    let witness = format!("{}:{}", f.bind(), f.port(Role::Witness));
+    assert!(
+        !destinations.contains(&witness),
+        "the witness binds the host's loopback; a case proves the guest cannot reach it"
+    );
+}
+
+#[test]
+fn what_the_fixtures_saw_since_a_mark_is_counted_on_both_directions() {
+    let f = fixtures(small());
+    let mark = f.report().connections.last().map(|c| c.id).unwrap_or(0);
+    let mut client = connect(&f, Role::Sink);
+    client.write_all(&vec![0u8; 1_000]).unwrap();
+    drop(client);
+    closed_record(&f, Role::Sink);
+
+    let activity = f.activity_since(mark);
+    assert_eq!(activity.connections, 1);
+    assert_eq!(activity.bytes_in, 1_000);
+    assert_eq!(activity.bytes_out, 0);
+    assert_eq!(activity.bytes(), 1_000);
+
+    let after = f.report().connections.last().map(|c| c.id).unwrap_or(0);
+    assert_eq!(f.activity_since(after), Activity::default());
+}

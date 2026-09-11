@@ -1,8 +1,15 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+const POLL: Duration = Duration::from_millis(50);
+/// How long a reader is given to drain a pipe after the command is gone; a grandchild that outlives it must not hold the harness.
+const READER_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Output {
@@ -10,6 +17,7 @@ pub struct Output {
     pub stderr: String,
     pub code: i32,
     pub duration: Duration,
+    pub timed_out: bool,
 }
 
 impl Output {
@@ -53,12 +61,99 @@ impl Lns {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             code: output.status.code().unwrap_or(-1),
             duration: started.elapsed(),
+            timed_out: false,
+        })
+    }
+
+    /// A command the harness gives up on: past `budget` the child is killed, so one stalled stream costs a budget rather than the run.
+    pub fn run_within(&self, args: &[&str], budget: Duration) -> Result<Output> {
+        let started = Instant::now();
+        let context = || format!("run {} {}", self.bin.display(), args.join(" "));
+        let mut child = self
+            .command(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(context)?;
+        let stdout = child
+            .stdout
+            .take()
+            .map(read_in_background)
+            .unwrap_or_default();
+        let stderr = child
+            .stderr
+            .take()
+            .map(read_in_background)
+            .unwrap_or_default();
+
+        let mut timed_out = false;
+        let code = loop {
+            match child.try_wait().with_context(context)? {
+                Some(status) => break status.code().unwrap_or(-1),
+                None if started.elapsed() >= budget => {
+                    timed_out = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break -1;
+                }
+                None => std::thread::sleep(POLL),
+            }
+        };
+
+        await_reader(&stdout, READER_GRACE);
+        await_reader(&stderr, READER_GRACE);
+        Ok(Output {
+            stdout: read_so_far(&stdout),
+            stderr: read_so_far(&stderr),
+            code,
+            duration: started.elapsed(),
+            timed_out,
         })
     }
 
     pub fn version(&self) -> Result<String> {
         Ok(self.run(&["--version"])?.stdout.trim().to_string())
     }
+}
+
+/// A pipe read as it arrives, so a killed command still reports what it printed even when a surviving grandchild holds the other end open.
+#[derive(Clone, Default)]
+struct Reader {
+    text: Arc<Mutex<String>>,
+    done: Arc<AtomicBool>,
+}
+
+fn read_in_background(mut pipe: impl Read + Send + 'static) -> Reader {
+    let reader = Reader::default();
+    let thread = reader.clone();
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 8192];
+        while let Ok(read) = pipe.read(&mut buffer) {
+            if read == 0 {
+                break;
+            }
+            if let Ok(mut text) = thread.text.lock() {
+                text.push_str(&String::from_utf8_lossy(&buffer[..read]));
+            }
+        }
+        thread.done.store(true, Ordering::SeqCst);
+    });
+    reader
+}
+
+fn await_reader(reader: &Reader, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    while !reader.done.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(POLL);
+    }
+}
+
+fn read_so_far(reader: &Reader) -> String {
+    reader
+        .text
+        .lock()
+        .map(|text| text.clone())
+        .unwrap_or_default()
 }
 
 pub fn parse_status_pid(stdout: &str) -> Option<u32> {
@@ -87,11 +182,26 @@ pub fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> boo
     }
 }
 
-pub fn write_sandbox(path: &Path, name: &str, image: &str) -> Result<()> {
-    let document = format!(
+pub fn write_sandbox(path: &Path, name: &str, image: &str, destinations: &[String]) -> Result<()> {
+    let document = sandbox_document(name, image, destinations);
+    std::fs::write(path, document).with_context(|| format!("write {}", path.display()))
+}
+
+/// A raw stream to a fixture is redirected to the guest's own transparent proxy, so a destination no `egress.tcp` entry decides is held rather than carried.
+pub fn sandbox_document(name: &str, image: &str, destinations: &[String]) -> String {
+    let mut document = format!(
         "apiVersion: lns.run/v1\nkind: sandbox\nname: {name}\nspec:\n  image: {image}\n  egress:\n    http:\n      - match: \"*\"\n        verdict: allow\n"
     );
-    std::fs::write(path, document).with_context(|| format!("write {}", path.display()))
+    if destinations.is_empty() {
+        return document;
+    }
+    document.push_str("    tcp:\n");
+    for destination in destinations {
+        document.push_str(&format!(
+            "      - match: \"{destination}\"\n        verdict: allow\n        description: parity host fixture\n"
+        ));
+    }
+    document
 }
 
 #[cfg(test)]
@@ -122,20 +232,72 @@ mod tests {
         assert!(!wait_until(Duration::from_millis(200), || false));
     }
 
+    #[derive(serde::Deserialize)]
+    struct Document {
+        spec: DocumentSpec,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DocumentSpec {
+        image: String,
+        egress: lns_policy::Egress,
+    }
+
+    fn parse(document: &str) -> Document {
+        serde_yaml::from_str(document).expect("the product's own parser reads this definition")
+    }
+
     #[test]
     fn the_generated_definition_allows_the_egress_a_case_needs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lns.yaml");
-        write_sandbox(&path, "parity-upload", "docker.io/library/alpine:3.20").unwrap();
+        let destinations = ["192.168.1.49:47200".to_string()];
+        write_sandbox(
+            &path,
+            "parity-upload",
+            "docker.io/library/alpine:3.20",
+            &destinations,
+        )
+        .unwrap();
         let document = std::fs::read_to_string(&path).unwrap();
 
         assert!(document.contains("kind: sandbox"), "{document}");
         assert!(document.contains("name: parity-upload"), "{document}");
-        assert!(
-            document.contains("image: docker.io/library/alpine:3.20"),
-            "{document}"
+        let parsed = parse(&document);
+        assert_eq!(parsed.spec.image, "docker.io/library/alpine:3.20");
+        assert_eq!(parsed.spec.egress.http[0].match_pattern, "*");
+        assert_eq!(
+            parsed.spec.egress.http[0].verdict,
+            lns_policy::Verdict::Allow
         );
-        assert!(document.contains("match: \"*\""), "{document}");
+    }
+
+    #[test]
+    fn every_fixture_destination_is_decided_by_a_raw_tcp_rule() {
+        let destinations = [
+            "192.168.1.49:47200".to_string(),
+            "192.168.1.49:47207".to_string(),
+        ];
+        let document = sandbox_document("parity-alpine", "alpine:3.20", &destinations);
+        let egress = parse(&document).spec.egress;
+
+        let written: Vec<&str> = egress
+            .tcp
+            .iter()
+            .map(|rule| rule.match_pattern.as_str())
+            .collect();
+        assert_eq!(written, vec!["192.168.1.49:47200", "192.168.1.49:47207"]);
+        for rule in &egress.tcp {
+            assert_eq!(rule.verdict, lns_policy::Verdict::Allow);
+            rule.validate().expect("the guest gate accepts this rule");
+        }
+    }
+
+    #[test]
+    fn a_definition_with_no_fixture_destination_carries_no_empty_tcp_table() {
+        let document = sandbox_document("parity-alpine", "alpine:3.20", &[]);
+        assert!(!document.contains("tcp:"), "{document}");
+        assert!(parse(&document).spec.egress.tcp.is_empty());
     }
 
     #[test]
@@ -167,6 +329,37 @@ mod tests {
 
         assert_eq!(output.code, 3);
         assert!(!output.ok());
+        assert!(!output.timed_out);
+        assert_eq!(output.combined(), "out\nerr\n");
+    }
+
+    #[test]
+    fn a_command_past_its_budget_is_killed_and_says_so() {
+        let lns = Lns::new(PathBuf::from("/bin/sh"), BTreeMap::new());
+        let output = lns
+            .run_within(
+                &["-c", "echo started; sleep 30"],
+                Duration::from_millis(300),
+            )
+            .unwrap();
+
+        assert!(output.timed_out);
+        assert!(output.duration < Duration::from_secs(10), "{output:?}");
+        assert!(output.stdout.contains("started"), "{output:?}");
+    }
+
+    #[test]
+    fn a_command_that_finishes_inside_its_budget_reports_what_it_printed() {
+        let lns = Lns::new(PathBuf::from("/bin/sh"), BTreeMap::new());
+        let output = lns
+            .run_within(
+                &["-c", "echo out; echo err >&2; exit 7"],
+                Duration::from_secs(30),
+            )
+            .unwrap();
+
+        assert!(!output.timed_out);
+        assert_eq!(output.code, 7);
         assert_eq!(output.combined(), "out\nerr\n");
     }
 
@@ -174,7 +367,12 @@ mod tests {
     fn a_binary_that_is_not_there_names_itself_in_the_error() {
         let lns = Lns::new(PathBuf::from("/nowhere/lns"), BTreeMap::new());
         let err = format!("{:#}", lns.run(&["ps"]).unwrap_err());
+        assert!(err.contains("/nowhere/lns"), "{err}");
 
+        let err = format!(
+            "{:#}",
+            lns.run_within(&["ps"], Duration::from_secs(1)).unwrap_err()
+        );
         assert!(err.contains("/nowhere/lns"), "{err}");
     }
 

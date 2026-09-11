@@ -58,6 +58,9 @@ pub struct Config {
     pub images: Images,
     #[serde(default, rename = "backend")]
     pub backends: Vec<Backend>,
+    /// Seconds a named case may take, overriding the budget the registry declares.
+    #[serde(default)]
+    pub budgets: BTreeMap<String, u64>,
 }
 
 impl Config {
@@ -85,6 +88,18 @@ impl Config {
 
     pub fn base_port(&self) -> u16 {
         self.base_port.unwrap_or(DEFAULT_BASE_PORT)
+    }
+}
+
+pub fn parse_budget_pair(pair: &str) -> Result<(String, u64)> {
+    match pair.split_once('=') {
+        Some((name, seconds)) if !name.is_empty() => match seconds.parse() {
+            Ok(seconds) => Ok((name.to_string(), seconds)),
+            Err(_) => {
+                bail!("--budget takes NAME=SECONDS, and {seconds:?} is not a number of seconds")
+            }
+        },
+        _ => bail!("--budget takes NAME=SECONDS, not {pair:?}"),
     }
 }
 
@@ -189,6 +204,25 @@ enviroment = { LNS_NETDEV = "netstack" }
         );
         let err = format!("{:#}", Config::load(&path).unwrap_err());
         assert!(err.contains("parity.toml"), "{err}");
+    }
+
+    #[test]
+    fn a_config_may_give_a_case_more_time_than_the_registry_declares() {
+        let (_dir, path) = write("budgets = { \"download-100m\" = 300 }\n");
+        let config = Config::load(&path).unwrap();
+
+        assert_eq!(config.budgets["download-100m"], 300);
+    }
+
+    #[test]
+    fn a_budget_flag_is_one_case_and_a_number_of_seconds() {
+        assert_eq!(
+            parse_budget_pair("upload-100m=240").unwrap(),
+            ("upload-100m".to_string(), 240)
+        );
+        assert!(parse_budget_pair("upload-100m").is_err());
+        assert!(parse_budget_pair("upload-100m=soon").is_err());
+        assert!(parse_budget_pair("=240").is_err());
     }
 
     #[test]

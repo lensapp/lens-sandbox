@@ -11,7 +11,7 @@ mod service;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
-use config::{Config, parse_env_pair};
+use config::{Config, parse_budget_pair, parse_env_pair};
 use fixtures::{Fixtures, Sizes, refuse_unsuitable_bind};
 use result::RunResult;
 use run::{BackendOverrides, RunPlan};
@@ -32,7 +32,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     Diff(DiffArgs),
     Fixtures(FixtureArgs),
 }
@@ -57,6 +57,8 @@ struct RunArgs {
     guest_subnet: Option<String>,
     #[arg(long = "case", value_name = "NAME")]
     cases: Vec<String>,
+    #[arg(long = "budget", value_name = "NAME=SECONDS")]
+    budgets: Vec<String>,
     #[arg(long)]
     work_dir: Option<PathBuf>,
     #[arg(long, short)]
@@ -90,7 +92,7 @@ fn main() -> Result<()> {
 
 fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
-        Command::Run(args) => run_backend(args),
+        Command::Run(args) => run_backend(*args),
         Command::Diff(args) => diff_results(args),
         Command::Fixtures(args) => serve_fixtures(args),
     }
@@ -122,6 +124,16 @@ fn run_backend(args: RunArgs) -> Result<i32> {
         },
     )?;
 
+    let mut budgets: BTreeMap<String, u64> = config
+        .as_ref()
+        .map(|config| config.budgets.clone())
+        .unwrap_or_default();
+    for pair in &args.budgets {
+        let (name, seconds) = parse_budget_pair(pair)?;
+        budgets.insert(name, seconds);
+    }
+    run::check_budgets(&budgets)?;
+
     let bind = match args.bind.or_else(|| {
         config
             .as_ref()
@@ -148,6 +160,7 @@ fn run_backend(args: RunArgs) -> Result<i32> {
             .or_else(|| config.as_ref().map(Config::guest_subnet))
             .unwrap_or_else(|| config::DEFAULT_GUEST_SUBNET.to_string()),
         selected: run::select_cases(&args.cases)?,
+        budgets,
         work_dir: args.work_dir.unwrap_or_else(default_work_dir),
         out: args.out.clone(),
     };
@@ -251,6 +264,7 @@ mod tests {
             base_port: None,
             guest_subnet: None,
             cases: vec![],
+            budgets: vec![],
             work_dir: None,
             out: PathBuf::from("netstack.json"),
             allow_any_host: false,
@@ -272,6 +286,7 @@ mod tests {
             base_port: None,
             guest_subnet: None,
             cases: vec![],
+            budgets: vec![],
             work_dir: None,
             out: PathBuf::from("netstack.json"),
             allow_any_host: true,
@@ -293,6 +308,7 @@ mod tests {
             base_port: None,
             guest_subnet: None,
             cases: vec![],
+            budgets: vec![],
             work_dir: None,
             out: PathBuf::from("netstack.json"),
             allow_any_host: true,

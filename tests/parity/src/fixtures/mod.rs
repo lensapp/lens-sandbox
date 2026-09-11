@@ -106,6 +106,31 @@ impl FixtureReport {
     pub fn last_on(&self, port: u16) -> Option<&ConnRecord> {
         self.connections.iter().rev().find(|c| c.port == port)
     }
+
+    pub fn activity_since(&self, mark: u64) -> Activity {
+        self.connections
+            .iter()
+            .filter(|record| record.id > mark)
+            .fold(Activity::default(), |activity, record| Activity {
+                connections: activity.connections + 1,
+                bytes_in: activity.bytes_in + record.bytes_in,
+                bytes_out: activity.bytes_out + record.bytes_out,
+            })
+    }
+}
+
+/// What the host fixtures saw while one case ran — recorded whatever the case's verdict, so a stall is readable from the result alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Activity {
+    pub connections: u64,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
+impl Activity {
+    pub fn bytes(&self) -> u64 {
+        self.bytes_in + self.bytes_out
+    }
 }
 
 struct Shared {
@@ -228,6 +253,25 @@ impl Fixtures {
 
     pub fn report(&self) -> FixtureReport {
         self.shared.with_report(|r| r.clone())
+    }
+
+    /// Every fixture destination a guest reaches over the LAN, as an `egress.tcp` `match`; the witness is left out, because it binds the host's loopback and a case proves the guest cannot reach it.
+    pub fn guest_destinations(&self) -> Vec<String> {
+        let mut ports: Vec<u16> = self
+            .ports
+            .iter()
+            .filter(|(role, _)| role.as_str() != Role::Witness.as_str())
+            .map(|(_, port)| *port)
+            .collect();
+        ports.sort_unstable();
+        ports
+            .into_iter()
+            .map(|port| format!("{}:{port}", self.bind))
+            .collect()
+    }
+
+    pub fn activity_since(&self, mark: u64) -> Activity {
+        self.shared.with_report(|r| r.activity_since(mark))
     }
 
     pub fn write_report(&self, path: &std::path::Path) -> Result<()> {

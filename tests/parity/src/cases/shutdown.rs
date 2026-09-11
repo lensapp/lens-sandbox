@@ -37,7 +37,7 @@ pub fn service_stop_with_guests(ctx: &Ctx) -> CaseResult {
         }
 
         let sink_port = ctx.port(Role::Sink);
-        let open = poll(BOOT_TIMEOUT, || {
+        let open = poll(ctx.within_budget(BOOT_TIMEOUT), || {
             let report = ctx.fixtures.report();
             let ids: Vec<u64> = report
                 .connections
@@ -61,7 +61,7 @@ pub fn service_stop_with_guests(ctx: &Ctx) -> CaseResult {
         let stopped = ctx.lns.run(&["service", "stop"])?;
         case.record("service_stop_exit_code", stopped.code as i64);
 
-        let closed = poll(SHUTDOWN_TIMEOUT, || {
+        let closed = poll(ctx.within_budget(SHUTDOWN_TIMEOUT), || {
             let report = ctx.fixtures.report();
             let all_closed = ids.iter().all(|id| {
                 report
@@ -74,7 +74,10 @@ pub fn service_stop_with_guests(ctx: &Ctx) -> CaseResult {
         case.record("connections_closed_within_10s", closed.is_some());
 
         let gone = match ctx.service_pid {
-            Some(pid) => poll(SHUTDOWN_TIMEOUT, || (!pid_alive(pid)).then_some(())).is_some(),
+            Some(pid) => poll(ctx.within_budget(SHUTDOWN_TIMEOUT), || {
+                (!pid_alive(pid)).then_some(())
+            })
+            .is_some(),
             None => false,
         };
         case.record("service_pid_gone", gone);
