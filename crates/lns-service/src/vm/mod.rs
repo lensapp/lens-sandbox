@@ -6,6 +6,7 @@ mod cloud_hypervisor;
 mod connect;
 #[cfg(target_os = "macos")]
 pub mod diag_console;
+pub mod netdev;
 pub mod session_client;
 mod transport;
 #[cfg(target_os = "macos")]
@@ -35,6 +36,8 @@ pub struct VmSpec {
     pub connector_tx: Option<tokio::sync::oneshot::Sender<std::sync::Arc<dyn GuestTransport>>>,
     #[cfg(target_os = "macos")]
     pub console_fd: std::os::fd::RawFd,
+    #[cfg(target_os = "macos")]
+    pub net: netdev::NetAttachment,
     pub debug: bool,
     pub exec: ExecSpec,
 }
@@ -998,6 +1001,8 @@ mod tests {
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,
+            #[cfg(target_os = "macos")]
+            net: netdev::NetAttachment::Nat,
             debug: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
         }

@@ -9,9 +9,9 @@ use super::VmSpec;
 
 mod launch;
 mod orchestrate;
-mod process;
+pub(crate) mod process;
 mod real;
-mod vmm_bin;
+pub(crate) mod vmm_bin;
 mod vsock;
 
 use process::Child;
@@ -132,6 +132,8 @@ mod tests {
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,
+            #[cfg(target_os = "macos")]
+            net: crate::vm::netdev::NetAttachment::Nat,
         }
     }
 

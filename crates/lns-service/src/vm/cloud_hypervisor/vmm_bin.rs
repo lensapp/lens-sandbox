@@ -156,7 +156,7 @@ fn fallback_dirs_phrase(fallback_dirs: &[PathBuf]) -> String {
     format!(" or in {joined}")
 }
 
-fn which(name: &str, env_get: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+pub(crate) fn which(name: &str, env_get: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     let path_var = env_get("PATH")?;
     std::env::split_paths(&path_var)
         .map(|dir| dir.join(name))
@@ -164,7 +164,7 @@ fn which(name: &str, env_get: &impl Fn(&str) -> Option<OsString>) -> Option<Path
 }
 
 #[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -172,7 +172,7 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
