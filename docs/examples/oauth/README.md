@@ -28,7 +28,9 @@ provider discovery, or a hosted broker.
    ```
 
 Choose the profile-only preset for the identity demo. LNS then shows the
-verification destination and user code and opens the browser.
+verification destination and user code and tries to open the browser.
+If the host has no browser, open that destination on another device and enter
+the displayed code; authorization keeps polling.
 Check the displayed code, sign in, and consent there. The service polls
 automatically; do not press Continue. Ctrl-C cancels the terminal operation.
 GitHub may return no refresh token or expiry; LNS keeps those facts as returned

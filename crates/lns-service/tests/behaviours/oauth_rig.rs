@@ -15,6 +15,7 @@ pub(crate) struct Fake {
     pub(crate) replies: Mutex<VecDeque<serde_json::Value>>,
     pub(crate) requests: Mutex<Vec<HttpRequest>>,
     pub(crate) opened: Mutex<Vec<String>>,
+    pub(crate) browser_unavailable: std::sync::atomic::AtomicBool,
     callback: Mutex<Option<String>>,
     state: Mutex<String>,
     pub(crate) canceled: Mutex<Vec<String>>,
@@ -75,6 +76,12 @@ impl Browser for Fake {
     }
     fn open(&self, url: &str) -> Result<()> {
         self.opened.lock().unwrap().push(url.into());
+        if self
+            .browser_unavailable
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("no local browser");
+        }
         Ok(())
     }
     fn poll(&self, _: &str, _: &str, _: u64) -> Result<Callback> {

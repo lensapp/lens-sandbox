@@ -99,6 +99,9 @@ pub fn parse(
 }
 
 pub fn json_body(response: &HttpResponse) -> Result<serde_json::Value> {
+    if response.status == 429 || (500..600).contains(&response.status) {
+        return Err(TokenError::Transient.into());
+    }
     if response.body.len() > MAX_BODY {
         bail!("OAuth response exceeds 65536 bytes");
     }
@@ -107,8 +110,8 @@ pub fn json_body(response: &HttpResponse) -> Result<serde_json::Value> {
 }
 
 pub fn response_error(status: u16, body: &serde_json::Value) -> Result<()> {
-    if status >= 500 || status == 429 {
-        return Err(TokenError::Transient.into());
+    if (300..400).contains(&status) {
+        return Err(TokenError::Refused.into());
     }
     if let Some(error) = body.get("error") {
         return Err(match error.as_str() {
@@ -195,6 +198,28 @@ mod tests {
             body: body.to_string().into_bytes(),
         }
     }
+    #[test]
+    fn transient_status_wins_over_malformed_or_oversized_response_bodies() {
+        for status in [429, 500, 502, 503] {
+            for body in [
+                b"<html>unavailable</html>".to_vec(),
+                vec![b'x'; MAX_BODY + 1],
+            ] {
+                let reply = HttpResponse {
+                    status,
+                    headers: vec![],
+                    body,
+                };
+                let error = parse(&reply, binding(), &BTreeSet::new(), 0).unwrap_err();
+                let transient = matches!(
+                    error.downcast_ref::<TokenError>(),
+                    Some(TokenError::Transient)
+                );
+                assert!(transient, "{error}");
+            }
+        }
+    }
+
     #[test]
     fn oversized_token_responses_are_refused_before_parsing_or_projection() {
         let response = HttpResponse {

@@ -114,3 +114,13 @@ fn authority(w: &mut BehaviourWorld, expected: String) {
         expected.split(' ').map(str::to_string).collect()
     );
 }
+
+#[given("the host cannot open a local browser")]
+fn no_browser(w: &mut BehaviourWorld) {
+    w.oauth
+        .as_ref()
+        .unwrap()
+        .fake
+        .browser_unavailable
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+}

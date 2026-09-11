@@ -148,7 +148,7 @@ pub fn once(
     name: &str,
     now_millis: u64,
 ) -> Result<Vec<String>> {
-    let (definition, held) = match read_it(store, name) {
+    let (definition, held, digest) = match read_it(store, name) {
         Ok(read) => read,
         // A connector lns cannot read is spent against the floor too, so an unreadable document is reported once rather than every pass for the life of the process.
         Err(_) if schedule.was_tried_within_the_floor(name, &Of::WholeConnector, now_millis) => {
@@ -159,7 +159,6 @@ pub fn once(
             return Err(e);
         }
     };
-    let digest = super::handler::installed_entry(store, name)?.digest;
     let mut renewed = Vec::new();
     for (label, connection) in schedule.due(name, &held, now_millis) {
         schedule.tried(name, Of::Connection(&label), now_millis);
@@ -256,11 +255,13 @@ fn read_it(
 ) -> Result<(
     lns_artifact::connector::ConnectorDefinition,
     BTreeMap<String, Connection>,
+    String,
 )> {
     let entry = super::handler::installed_entry(store, name)?;
     Ok((
         lns_artifact::connector::parse(&entry.document)?,
         store.connections_of(name)?,
+        entry.digest,
     ))
 }
 

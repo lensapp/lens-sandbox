@@ -370,11 +370,11 @@ pub enum Response {
     ConnectorUnknown {
         name: String,
     },
-    /// The mechanism is waiting to be told these, in this order. `message` is the connector author's own words and is shown as theirs; it is empty where the mechanism is one lns implements (§3.2.6).
     ConnectorPending {
         session: String,
         progress: OAuthProgress,
     },
+    /// Fields are answered in order; `message` is attributed to the connector author and is empty for built-in mechanisms (§3.2.6).
     ConnectorAsks {
         session: String,
         message: String,
@@ -514,7 +514,6 @@ impl ConnectorView {
     }
 }
 
-/// One value a mechanism is waiting for. `secret` decides whether the caller echoes what is typed, so it travels rather than being guessed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthDisclosure {
     pub destinations: Vec<String>,
@@ -551,6 +550,7 @@ pub enum OAuthProgress {
     Expired,
 }
 
+/// `secret` determines whether the client echoes the value entered for this field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorFieldView {
     pub name: String,

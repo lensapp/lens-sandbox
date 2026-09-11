@@ -24,10 +24,16 @@ struct State {
     phase: Phase,
     progress: OAuthProgress,
     scopes: Vec<String>,
+    retry_delay: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 enum Phase {
+    Exchange {
+        code: String,
+        redirect: String,
+        verifier: String,
+    },
     Select,
     Start,
     Device {
@@ -59,6 +65,7 @@ impl Native {
             next: now.saturating_add(900_000),
             phase: Phase::Select,
             scopes: Vec::new(),
+            retry_delay: 5000,
             progress: OAuthProgress::SelectingScopes {
                 options: self.scope_options(),
             },
@@ -122,18 +129,54 @@ impl Native {
         if now < state.next && !matches!(state.phase, Phase::Select) {
             return pending(&state).map(Advance::Pending);
         }
-        match &mut state.phase {
-            Phase::Select => pending(&state).map(Advance::Pending),
-            Phase::Start => {
-                self.begin(host, &mut state, now)?;
+        match self.advance_state(host, &mut state, now) {
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<token::TokenError>(),
+                    Some(token::TokenError::Transient)
+                ) =>
+            {
+                state.next = now.saturating_add(state.retry_delay);
+                state.retry_delay = state.retry_delay.saturating_mul(2).min(60_000);
                 pending(&state).map(Advance::Pending)
+            }
+            result => result,
+        }
+    }
+
+    fn advance_state(&self, host: &Host, state: &mut State, now: u64) -> Result<Advance> {
+        match &mut state.phase {
+            Phase::Exchange {
+                code,
+                redirect,
+                verifier,
+            } => {
+                let response = fetch(
+                    host,
+                    self.config.token_endpoint(),
+                    &[
+                        ("grant_type", "authorization_code"),
+                        ("client_id", self.config.client_id()),
+                        ("redirect_uri", redirect),
+                        ("code_verifier", verifier),
+                        ("code", code),
+                    ],
+                )?;
+                self.complete(&response, &state.scopes, now)
+                    .map(Advance::Done)
+            }
+
+            Phase::Select => pending(state).map(Advance::Pending),
+            Phase::Start => {
+                self.begin(host, state, now)?;
+                pending(state).map(Advance::Pending)
             }
             Phase::Device { code, interval, .. } => {
                 match self.poll_device(host, code, interval, &state.scopes, now)? {
                     Some(outcome) => Ok(Advance::Done(outcome)),
                     None => {
                         state.next = now.saturating_add(*interval);
-                        pending(&state).map(Advance::Pending)
+                        pending(state).map(Advance::Pending)
                     }
                 }
             }
@@ -145,7 +188,7 @@ impl Native {
             } => match self.browser.poll(&state.owner, handle, now)? {
                 Callback::Ignore => {
                     state.next = now.saturating_add(1000);
-                    pending(&state).map(Advance::Pending)
+                    pending(state).map(Advance::Pending)
                 }
                 Callback::Denied => {
                     self.browser.cancel(handle);
@@ -155,21 +198,18 @@ impl Native {
                     self.browser.cancel(handle);
                     Err(token::TokenError::Refused.into())
                 }
+                Callback::UnsupportedIssuer => {
+                    self.browser.cancel(handle);
+                    bail!("OAuth callback contains unsupported iss; no issuer is configured");
+                }
                 Callback::Code(code) => {
                     self.browser.cancel(handle);
-                    let response = fetch(
-                        host,
-                        self.config.token_endpoint(),
-                        &[
-                            ("grant_type", "authorization_code"),
-                            ("client_id", self.config.client_id()),
-                            ("redirect_uri", redirect),
-                            ("code_verifier", verifier),
-                            ("code", &code),
-                        ],
-                    )?;
-                    self.complete(&response, &state.scopes, now)
-                        .map(Advance::Done)
+                    state.phase = Phase::Exchange {
+                        code,
+                        redirect: redirect.clone(),
+                        verifier: verifier.clone(),
+                    };
+                    self.advance_state(host, state, now)
                 }
             },
         }
@@ -223,7 +263,7 @@ impl Native {
                     interval,
                     url: url.into(),
                 };
-                self.browser.open(url)?;
+                let _ = self.browser.open(url);
             }
             OAuth::AuthorizationCode {
                 authorization_endpoint,
@@ -299,10 +339,28 @@ impl Native {
             }
             Err(CallError::Refused(_)) => bail!("OAuth device request was refused by the host"),
         };
-        let body = token::json_body(&response)?;
+        let body = match token::json_body(&response) {
+            Ok(body) => body,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<token::TokenError>(),
+                    Some(token::TokenError::Transient)
+                ) =>
+            {
+                *interval = interval.saturating_mul(2);
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         match body.get("error").and_then(serde_json::Value::as_str) {
             Some("authorization_pending") => {}
             Some("slow_down") => *interval = interval.saturating_add(5000),
+            Some("temporarily_unavailable" | "server_error")
+                if !(300..400).contains(&response.status) =>
+            {
+                *interval = interval.saturating_mul(2);
+                return Ok(None);
+            }
             Some("access_denied") => return Err(FlowError::Denied.into()),
             Some("expired_token") => return Err(FlowError::Expired.into()),
             _ => return self.complete(&response, scopes, now).map(Some),
@@ -379,6 +437,9 @@ impl Native {
         match read_state(bytes)?.phase {
             Phase::Device { url, .. } | Phase::Code { url, .. } => self.browser.open(&url),
             Phase::Select | Phase::Start => bail!("OAuth is still preparing authorization"),
+            Phase::Exchange { .. } => {
+                bail!("OAuth is exchanging authorization; no browser action is needed")
+            }
         }
     }
 }
@@ -412,8 +473,10 @@ fn fetch(host: &Host, endpoint: &str, fields: &[(&str, &str)]) -> Result<HttpRes
     if request.body.len() > token::MAX_BODY {
         bail!("OAuth request exceeds 65536 bytes");
     }
-    host.fetch(&request)
-        .map_err(|_| token::TokenError::Transient.into())
+    host.fetch(&request).map_err(|error| match error {
+        CallError::Failed(_) => token::TokenError::Transient.into(),
+        CallError::Refused(_) => token::TokenError::Refused.into(),
+    })
 }
 
 fn random(host: &Host) -> Result<String> {

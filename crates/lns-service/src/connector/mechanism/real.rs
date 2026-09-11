@@ -560,6 +560,20 @@ impl crate::connector::real::NativeAccess for NativeAccess {
             Ok(())
         })
     }
+    fn revoker(&self) -> Option<&dyn super::traits::Mechanisms> {
+        mechanisms()
+            .ok()
+            .map(|ready| ready as &dyn super::traits::Mechanisms)
+    }
+    fn now_millis(&self) -> u64 {
+        now_millis()
+    }
+    fn cancel_connector(&self, name: &str, label: Option<&str>) -> Result<()> {
+        crate::connector::real::with_stores(|store| {
+            driver(*store)?.cancel_connector(name, label);
+            Ok(())
+        })
+    }
     fn offers(
         &self,
         holder: &crate::connector::store::GrantHolder,
@@ -569,8 +583,9 @@ impl crate::connector::real::NativeAccess for NativeAccess {
     fn supply(
         &self,
         holder: &crate::connector::store::GrantHolder,
-    ) -> Result<std::collections::BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>>
-    {
-        crate::connector::real::read_granted_supply(holder)
+    ) -> Result<crate::connector::handler::SupplySnapshot> {
+        crate::connector::real::with_stores(|store| {
+            crate::connector::handler::granted_supply_snapshot(store, holder, now_millis())
+        })
     }
 }

@@ -181,15 +181,19 @@ pub(crate) trait NativeAccess: Send + Sync {
     fn status(&self, session: &str) -> Result<super::connect::Turn>;
     fn open_browser(&self, session: &str) -> Result<()>;
     fn cancel(&self, session: &str) -> Result<()>;
+    fn cancel_connector(&self, name: &str, label: Option<&str>) -> Result<()>;
+    fn revoker(&self) -> Option<&dyn super::mechanism::traits::Mechanisms>;
+    fn now_millis(&self) -> u64;
     fn offers(&self, holder: &GrantHolder) -> Result<Vec<lns_ipc::ConnectorView>>;
-    fn supply(&self, holder: &GrantHolder) -> Result<BTreeMap<String, GrantedPayload>>;
+    fn supply(&self, holder: &GrantHolder) -> Result<handler::SupplySnapshot>;
 }
 
-/// The connector store as the approval session reaches it: every method opens the three stores itself, because a card outlives no lock.
+/// Approval interactions open store snapshots as needed and keep only the next expiry between reads.
 pub struct RealConnectorPort {
     holder: GrantHolder,
     microvm: String,
     native: std::sync::Arc<dyn NativeAccess>,
+    next_expiry: std::sync::Mutex<Option<u64>>,
 }
 
 impl RealConnectorPort {
@@ -198,6 +202,7 @@ impl RealConnectorPort {
             holder: GrantHolder::Run(run_id),
             microvm,
             native: std::sync::Arc::new(super::mechanism::real::NativeAccess),
+            next_expiry: std::sync::Mutex::new(None),
         }
     }
 
@@ -262,6 +267,13 @@ impl crate::approval_flow::session::ConnectRoundPort for RealConnectorPort {
 }
 
 impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
+    fn refresh_after(&self) -> std::time::Duration {
+        let expiry = *self.next_expiry.lock().unwrap_or_else(|e| e.into_inner());
+        std::time::Duration::from_millis(expiry.map_or(30_000, |expiry| {
+            expiry.saturating_sub(self.native.now_millis()).min(30_000)
+        }))
+    }
+
     fn current_offers(&self) -> Option<Vec<lns_ipc::ConnectorView>> {
         Some(self.native.offers(&self.holder).unwrap_or_else(|error| {
             crate::log::warn!("could not reconcile this run's connector offers: {error:#}");
@@ -269,12 +281,14 @@ impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
         }))
     }
     fn current_supply(&self) -> Option<BTreeMap<String, GrantedPayload>> {
-        Some(self.native.supply(&self.holder).unwrap_or_else(|error| {
+        let snapshot = self.native.supply(&self.holder).unwrap_or_else(|error| {
             crate::log::warn!(
                 "could not read this run's connector credentials; disarming them: {error:#}"
             );
-            BTreeMap::new()
-        }))
+            handler::SupplySnapshot::default()
+        });
+        *self.next_expiry.lock().unwrap_or_else(|e| e.into_inner()) = snapshot.expires_at_millis;
+        Some(snapshot.payloads)
     }
 
     fn connect(
@@ -645,7 +659,7 @@ async fn answer_in(
             connector: handler::install(&store, &RegistryConnectors, &source).await?,
         }),
         Call::Uninstall(name) => {
-            super::mechanism::real::driver(store)?.cancel_connector(&name, None);
+            let _ = native.cancel_connector(&name, None);
             Ok(match handler::uninstall(&store, &name)? {
                 Some(dropped_connections) => Response::ConnectorUninstalled {
                     name,
@@ -680,8 +694,10 @@ async fn answer_in(
         }
         Call::Cancel(session) => {
             native.cancel(&session)?;
-            let turn = native.status(&session)?;
-            Ok(one_turn(&turn.connector, turn.connecting))
+            Ok(Response::ConnectorPending {
+                session,
+                progress: lns_ipc::OAuthProgress::Canceled,
+            })
         }
         Call::OpenBrowser(session) => {
             native.open_browser(&session)?;
@@ -692,16 +708,13 @@ async fn answer_in(
             // A revoke is a component call, so it is spent off the thread every component deadline is measured in.
             // A machine that cannot start a component runtime still drops what the user pressed Disconnect on; it just has nobody to tell.
             dropped: super::mechanism::real::off_the_runtime_thread(|| {
-                super::mechanism::real::driver(store)?
-                    .cancel_connector(&name, connection.as_deref());
+                let _ = native.cancel_connector(&name, connection.as_deref());
                 handler::disconnect(
                     &store,
-                    super::mechanism::real::mechanisms()
-                        .ok()
-                        .map(|ready| ready as &dyn super::mechanism::traits::Mechanisms),
+                    native.revoker(),
                     &name,
                     connection.as_deref(),
-                    super::mechanism::real::now_millis(),
+                    native.now_millis(),
                 )
             })?,
             name,

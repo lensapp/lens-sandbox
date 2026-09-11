@@ -5,6 +5,7 @@ pub enum Callback {
     Ignore,
     Denied,
     Failed,
+    UnsupportedIssuer,
     Code(String),
 }
 
@@ -14,6 +15,7 @@ impl std::fmt::Debug for Callback {
             Self::Ignore => "Ignore",
             Self::Denied => "Denied",
             Self::Failed => "Failed",
+            Self::UnsupportedIssuer => "UnsupportedIssuer",
             Self::Code(_) => "Code(<redacted>)",
         })
     }
@@ -93,8 +95,11 @@ pub fn callback(request: &str, path: &str, state: &str) -> Callback {
         }
     }
     let value = |key: &str| pairs.get(key).map(|v| v.as_ref());
-    if value("state") != Some(state) || value("iss").is_some() {
+    if value("state") != Some(state) {
         return Callback::Ignore;
+    }
+    if value("iss").is_some() {
+        return Callback::UnsupportedIssuer;
     }
     match (value("code"), value("error")) {
         (Some(code), None)
@@ -121,6 +126,21 @@ pub fn callback(request: &str, path: &str, state: &str) -> Callback {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_matching_issuer_callback_fails_immediately_and_consumes_its_lease() {
+        let mut lease = Lease::new("owner", "/callback", "expected", 100);
+        let result = lease
+            .accept(
+                "owner",
+                0,
+                "GET /callback?state=expected&code=private&iss=https://issuer.example HTTP/1.1",
+            )
+            .unwrap();
+        assert_eq!(result, Callback::UnsupportedIssuer);
+        assert!(!format!("{result:?}").contains("issuer.example"));
+        assert!(lease.live("owner", 1).is_err());
+    }
+
     #[test]
     fn an_authorization_server_error_is_terminal_only_for_its_matching_state() {
         for error in [
@@ -197,7 +217,7 @@ mod tests {
             "GET /callback?state=expected&code=a&error=x HTTP/1.1",
             "GET /callback?state=expected&error=access_denied&error=x HTTP/1.1",
             "GET /callback?state=expected&code= HTTP/1.1",
-            "GET /callback?state=expected&code=a&iss=https://other.example HTTP/1.1",
+            "GET /callback?state=wrong&code=a&iss=https://other.example HTTP/1.1",
             "GET /callback?state=expected&code=a&extra=1&extra=2 HTTP/1.1",
             "",
             "GET /callback HTTP/1.1",

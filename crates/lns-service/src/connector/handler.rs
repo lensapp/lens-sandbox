@@ -451,12 +451,19 @@ pub fn undecided(
     Ok(open)
 }
 
-/// What every recorded grant gives this run, by connector, so a run that granted yesterday is not asked again and is not left empty-handed (§7.1).
-pub fn granted_supply(
+#[derive(Default)]
+pub struct SupplySnapshot {
+    pub payloads: BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>,
+    pub expires_at_millis: Option<u64>,
+}
+
+/// Records expiry alongside the host payloads so reconciliation can wake without rereading the stores on every tick.
+pub fn granted_supply_snapshot(
     store: &ConnectorStore<'_>,
     holder: &GrantHolder,
     now_millis: u64,
-) -> Result<BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>> {
+) -> Result<SupplySnapshot> {
+    let mut expires_at_millis = None;
     let mut supplied = BTreeMap::new();
     for entry in store.installed()? {
         let Some(super::store::RunDecision::Granted {
@@ -472,8 +479,9 @@ pub fn granted_supply(
         if digest != entry.digest {
             continue;
         }
-        match supplied_by(store, &entry, &method, connection.as_deref(), now_millis) {
-            Ok(payload) => {
+        match supplied_with_expiry(store, &entry, &method, connection.as_deref(), now_millis) {
+            Ok((payload, expiry)) => {
+                expires_at_millis = expires_at_millis.into_iter().chain(expiry).min();
                 supplied.insert(entry.name.clone(), payload);
             }
             // A grant is per connector, so one this run cannot supply must not take the others with it.
@@ -481,7 +489,19 @@ pub fn granted_supply(
         }
     }
     drop_a_connector_writing_a_path_another_already_holds(&mut supplied);
-    Ok(supplied)
+    Ok(SupplySnapshot {
+        payloads: supplied,
+        expires_at_millis,
+    })
+}
+
+/// What every recorded grant gives this run, by connector, so a run that granted yesterday is not asked again and is not left empty-handed (§7.1).
+pub fn granted_supply(
+    store: &ConnectorStore<'_>,
+    holder: &GrantHolder,
+    now_millis: u64,
+) -> Result<BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>> {
+    granted_supply_snapshot(store, holder, now_millis).map(|snapshot| snapshot.payloads)
 }
 
 /// Decided per connector, not per path: a dropped connector writes nothing, so the paths it claimed are free again and must not cost a third connector its grant.
@@ -515,19 +535,36 @@ fn supplied_by(
     connection: Option<&str>,
     now_millis: u64,
 ) -> Result<crate::approval_flow::protocol::GrantedPayload> {
+    supplied_with_expiry(store, entry, method, connection, now_millis).map(|(payload, _)| payload)
+}
+
+fn supplied_with_expiry(
+    store: &ConnectorStore<'_>,
+    entry: &Installed,
+    method: &str,
+    connection: Option<&str>,
+    now_millis: u64,
+) -> Result<(crate::approval_flow::protocol::GrantedPayload, Option<u64>)> {
     let definition = lns_artifact::connector::parse(&entry.document)?;
     let method = offerable_method(&definition, method)?;
+    let mut expires_at_millis = None;
     let values = match connection {
         Some(label) => store
             .connections_of(&entry.name)?
             .remove(label)
             // A connection whose values have run out supplies none, so the placeholder is left unarmed and the next request raises the connect prompt (§4.1).
             .filter(|held| !held.has_run_out(now_millis))
-            .map(|held| lns_ipc::SecretValues(held.values))
+            .map(|held| {
+                expires_at_millis = held.expires_at_millis;
+                lns_ipc::SecretValues(held.values)
+            })
             .unwrap_or_default(),
         None => lns_ipc::SecretValues::default(),
     };
-    Ok(super::payload::granted_payload(method, &values))
+    Ok((
+        super::payload::granted_payload(method, &values),
+        expires_at_millis,
+    ))
 }
 
 /// Every connector this run has not decided, as the card and `lns connector grant` both disclose it, so a run holds what they serve and can offer them (§3.2.1).

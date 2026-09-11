@@ -34,3 +34,14 @@ Feature: Native public-client OAuth
       | flow               |
       | device             |
       | authorization code |
+
+  Scenario: Device authorization succeeds using another device's browser
+    Given a public client using native "device" OAuth
+    And the host cannot open a local browser
+    When the user starts native authorization
+    And the user chooses native permission preset "read-only"
+    And the service advances native authorization
+    Then LNS presents structured authorization progress
+    When the provider authorizes the native OAuth operation
+    And the service advances native authorization
+    Then native authorization supplies one public access token and private renewal state

@@ -152,8 +152,12 @@ pub enum ConnectRound {
     Failed(String),
 }
 
-/// The connector store's side of a card decision. Every method writes to disk, so the session takes it as a port (§3.2.4).
+/// Store snapshots and card decisions cross this port without holding a store lock across an interaction (§3.2.4).
 pub trait ConnectorPort: Send + Sync {
+    fn refresh_after(&self) -> Duration {
+        Duration::from_secs(30)
+    }
+
     fn current_offers(&self) -> Option<Vec<ConnectorView>>;
 
     fn current_supply(&self) -> Option<BTreeMap<String, GrantedPayload>>;
@@ -213,6 +217,8 @@ pub struct ApprovalSession {
     /// What has already been said once, so a misconfiguration every request trips does not fill the window.
     said: Mutex<std::collections::HashSet<String>>,
     connectors: OnceLock<Arc<dyn ConnectorPort>>,
+    connector_clock: Mutex<Option<Instant>>,
+    next_connector_refresh: Mutex<Duration>,
     /// What drives a sign-in for the card, wired beside the store because only the card needs it.
     connect_rounds: OnceLock<Arc<dyn ConnectRoundPort>>,
     /// The connectors this run has not decided. Mutable, because a grant lifts its own hold and every later frame must be published without it (§3.2.1).
@@ -348,6 +354,8 @@ impl ApprovalSession {
             granted: Mutex::new(BTreeMap::new()),
             said: Mutex::new(std::collections::HashSet::new()),
             connectors: OnceLock::new(),
+            connector_clock: Mutex::new(None),
+            next_connector_refresh: Mutex::new(Duration::ZERO),
             connect_rounds: OnceLock::new(),
             offers: Mutex::new(Vec::new()),
             entries: OnceLock::new(),
@@ -1337,7 +1345,14 @@ impl ApprovalSession {
 
     pub fn tick_timeouts(&self, now: Instant) -> usize {
         self.poll_native_rounds();
-        self.refresh_connector_supply();
+        let elapsed = {
+            let mut start = self
+                .connector_clock
+                .lock()
+                .expect("connector clock mutex poisoned");
+            now.saturating_duration_since(*start.get_or_insert(now))
+        };
+        self.refresh_connector_supply_due(elapsed);
         let expired: Vec<String> = {
             let pending = self.pending.lock().expect("pending mutex poisoned");
             pending
@@ -1347,6 +1362,28 @@ impl ApprovalSession {
                 .collect()
         };
         expired.iter().filter(|id| self.timeout_one(id)).count()
+    }
+
+    fn refresh_connector_supply_due(&self, elapsed: Duration) {
+        {
+            let mut next = self
+                .next_connector_refresh
+                .lock()
+                .expect("connector refresh mutex poisoned");
+            if elapsed < *next {
+                return;
+            }
+            *next = elapsed.saturating_add(Duration::from_secs(30));
+        }
+        self.refresh_connector_supply();
+        if let Some(port) = self.connectors.get() {
+            let due = elapsed.saturating_add(port.refresh_after().min(Duration::from_secs(30)));
+            let mut next = self
+                .next_connector_refresh
+                .lock()
+                .expect("connector refresh mutex poisoned");
+            *next = (*next).min(due);
+        }
     }
 
     fn refresh_connector_supply(&self) {
@@ -1415,6 +1452,10 @@ impl ApprovalSession {
             .lock()
             .expect("granted mutex poisoned")
             .insert(connector.to_string(), granted);
+        *self
+            .next_connector_refresh
+            .lock()
+            .expect("connector refresh mutex poisoned") = Duration::ZERO;
         let own = self
             .persisted
             .lock()
@@ -2996,6 +3037,8 @@ pub(crate) mod tests {
         connected: StdMutex<Vec<Connected>>,
         granted: StdMutex<Vec<Granted>>,
         opens: Option<GrantedPayload>,
+        reads: StdMutex<usize>,
+        refresh_after: Option<Duration>,
         supply: StdMutex<Option<BTreeMap<String, GrantedPayload>>>,
         offers: StdMutex<Option<Vec<ConnectorView>>>,
         invalidated: Vec<String>,
@@ -3003,11 +3046,16 @@ pub(crate) mod tests {
     }
 
     impl ConnectorPort for FakeConnectorPort {
+        fn refresh_after(&self) -> Duration {
+            self.refresh_after.unwrap_or(Duration::from_secs(30))
+        }
         fn current_offers(&self) -> Option<Vec<ConnectorView>> {
+            *self.reads.lock().unwrap() += 1;
             self.offers.lock().unwrap().clone()
         }
 
         fn current_supply(&self) -> Option<BTreeMap<String, GrantedPayload>> {
+            *self.reads.lock().unwrap() += 1;
             self.supply.lock().unwrap().clone()
         }
 
@@ -4295,6 +4343,51 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_known_expiry_wakes_reconciliation_before_the_idle_cadence() {
+        let (session, _, _, _) = fixture();
+        let port = Arc::new(FakeConnectorPort {
+            refresh_after: Some(Duration::from_secs(2)),
+            ..Default::default()
+        });
+        session.set_connector_port(port.clone());
+        session.refresh_connector_supply_due(Duration::ZERO);
+        session.refresh_connector_supply_due(Duration::from_secs(1));
+        assert_eq!(*port.reads.lock().unwrap(), 2);
+        session.refresh_connector_supply_due(Duration::from_secs(2));
+        assert_eq!(
+            *port.reads.lock().unwrap(),
+            4,
+            "expiry must bypass the idle cadence"
+        );
+    }
+
+    #[test]
+    fn a_new_card_grant_refreshes_its_expiry_on_the_next_tick() {
+        let (session, _, _, _) = fixture();
+        let port = Arc::new(FakeConnectorPort::default());
+        session.set_connector_port(port.clone());
+        session.refresh_connector_supply_due(Duration::ZERO);
+        session.apply_granted_egress("provider", GrantedPayload::default());
+        session.refresh_connector_supply_due(Duration::from_secs(1));
+        assert_eq!(*port.reads.lock().unwrap(), 4);
+    }
+
+    #[test]
+    fn unchanged_connectors_are_not_read_on_every_approval_tick() {
+        let (session, _, _, _) = fixture();
+        let port = Arc::new(FakeConnectorPort::default());
+        session.set_connector_port(port.clone());
+        for seconds in 0..30 {
+            session.refresh_connector_supply_due(Duration::from_secs(seconds));
+        }
+        assert_eq!(*port.reads.lock().unwrap(), 2);
+        session.refresh_connector_supply_due(Duration::from_secs(30));
+        assert_eq!(*port.reads.lock().unwrap(), 4);
+        session.refresh_connector_supply_due(Duration::from_secs(30));
+        assert_eq!(*port.reads.lock().unwrap(), 4);
+    }
+
+    #[test]
     fn a_port_without_a_reconciliation_snapshot_preserves_the_existing_grant() {
         let (session, _, _, mut rx) = fixture();
         session.set_connector_port(Arc::new(
@@ -4310,7 +4403,7 @@ pub(crate) mod tests {
         );
         let original = session.policy_message();
         let _ = policy_frame(&mut rx);
-        session.refresh_connector_supply();
+        session.refresh_connector_supply_due(Duration::ZERO);
         assert_eq!(session.policy_message(), original);
         assert!(rx.try_recv().is_err());
     }
