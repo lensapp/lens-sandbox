@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,9 @@ pub const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The host's resolver list is read again this often, so a VPN coming up mid-run is picked up.
 pub const REFRESH_AFTER: Duration = Duration::from_secs(30);
+
+/// A read of the host's configuration has this long, `scutil --dns` included, before the list in hand is kept instead.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// One resolver of the host's configuration: which servers to ask, and the domain suffix they answer for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +47,8 @@ pub trait Sources: Send + Sync + 'static {
 pub struct Resolvers {
     sources: Arc<dyn Sources>,
     refresh_after: Duration,
-    cached: Mutex<Cached>,
+    cached: Arc<Mutex<Cached>>,
+    refreshing: Arc<AtomicBool>,
 }
 
 struct Cached {
@@ -57,21 +62,45 @@ impl Resolvers {
         Self {
             sources,
             refresh_after,
-            cached: Mutex::new(Cached {
+            cached: Arc::new(Mutex::new(Cached {
                 scopes,
                 read_at: Instant::now(),
-            }),
+            })),
+            refreshing: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// The servers that answer for `name`: the longest matching scope, or the default one.
     pub fn servers_for(&self, name: &str) -> Vec<SocketAddr> {
-        let mut cached = self.cached.lock().expect("resolvers poisoned");
-        if cached.read_at.elapsed() >= self.refresh_after {
-            cached.scopes = self.sources.scopes();
-            cached.read_at = Instant::now();
+        let (servers, old) = {
+            let cached = self.cached.lock().expect("resolvers poisoned");
+            (
+                servers_for(&cached.scopes, name),
+                cached.read_at.elapsed() >= self.refresh_after,
+            )
+        };
+        if old {
+            self.refresh();
         }
-        servers_for(&cached.scopes, name)
+        servers
+    }
+
+    /// One read at a time, off the runtime's workers: a query is answered from the list in hand, never from the read.
+    fn refresh(&self) {
+        if self.refreshing.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let sources = Arc::clone(&self.sources);
+        let cached = Arc::clone(&self.cached);
+        let refreshing = Arc::clone(&self.refreshing);
+        tokio::spawn(async move {
+            let read = tokio::task::spawn_blocking(move || sources.scopes());
+            if let Ok(Ok(scopes)) = tokio::time::timeout(REFRESH_TIMEOUT, read).await {
+                cached.lock().expect("resolvers poisoned").scopes = scopes;
+            }
+            cached.lock().expect("resolvers poisoned").read_at = Instant::now();
+            refreshing.store(false, Ordering::SeqCst);
+        });
     }
 
     /// After a query nobody answered, the next one reads the host's configuration again.
@@ -226,6 +255,7 @@ mod tests {
     use super::*;
     use hickory_proto::op::{OpCode, Query};
     use hickory_proto::rr::{Name, RecordType};
+    use std::sync::atomic::AtomicUsize;
 
     fn server(address: &str) -> SocketAddr {
         SocketAddr::new(address.parse().unwrap(), PORT)
@@ -300,6 +330,125 @@ mod tests {
             let reply = (self.answering == Some(server)).then(|| answer(&query, false));
             Box::pin(async move { reply.ok_or_else(|| std::io::Error::other("no answer")) })
         }
+    }
+
+    const PATIENCE: Duration = Duration::from_secs(5);
+
+    async fn eventually(mut settled: impl FnMut() -> bool) {
+        let until = Instant::now() + PATIENCE;
+        while Instant::now() < until {
+            if settled() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the refresh never landed");
+    }
+
+    /// A host whose configuration takes a while to read: the first read answers at once, every later one blocks.
+    struct SlowSources {
+        entered: AtomicUsize,
+        finished: AtomicUsize,
+        reading: Arc<tokio::sync::Semaphore>,
+        gate: Mutex<std::sync::mpsc::Receiver<()>>,
+        blocked_for: Duration,
+        refreshed: Vec<Scope>,
+    }
+
+    impl SlowSources {
+        fn new(
+            gate: std::sync::mpsc::Receiver<()>,
+            blocked_for: Duration,
+            refreshed: Vec<Scope>,
+        ) -> Self {
+            Self {
+                entered: AtomicUsize::new(0),
+                finished: AtomicUsize::new(0),
+                reading: Arc::new(tokio::sync::Semaphore::new(0)),
+                gate: Mutex::new(gate),
+                blocked_for,
+                refreshed,
+            }
+        }
+
+        async fn reading(&self) {
+            let _ = self.reading.acquire().await.expect("the read starts");
+        }
+
+        fn reads(&self) -> (usize, usize) {
+            (
+                self.entered.load(Ordering::SeqCst),
+                self.finished.load(Ordering::SeqCst),
+            )
+        }
+    }
+
+    impl Sources for SlowSources {
+        fn scopes(&self) -> Vec<Scope> {
+            if self.entered.fetch_add(1, Ordering::SeqCst) == 0 {
+                return vec![scope(None, &["1.1.1.1"])];
+            }
+            self.reading.add_permits(1);
+            let _ = self
+                .gate
+                .lock()
+                .expect("gate poisoned")
+                .recv_timeout(self.blocked_for);
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            self.refreshed.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_old_lists_is_read_again_once_and_waited_for_by_nobody() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let sources = Arc::new(SlowSources::new(
+            gate,
+            PATIENCE,
+            vec![scope(None, &["9.9.9.9"])],
+        ));
+        let resolvers = Resolvers::new(Arc::clone(&sources) as Arc<dyn Sources>, Duration::ZERO);
+
+        for _ in 0..5 {
+            assert_eq!(
+                resolvers.servers_for("example.com"),
+                vec![server("1.1.1.1")],
+                "a query is answered from the list in hand, never from a read it waits for"
+            );
+        }
+
+        sources.reading().await;
+        assert_eq!(
+            sources.reads(),
+            (2, 0),
+            "one read at construction and one refresh for the whole burst, still reading"
+        );
+        drop(release);
+    }
+
+    #[tokio::test]
+    async fn a_host_configuration_that_will_not_be_read_leaves_the_list_in_hand() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let sources = Arc::new(SlowSources::new(
+            gate,
+            REFRESH_TIMEOUT * 2,
+            vec![scope(None, &["9.9.9.9"])],
+        ));
+        let resolvers = Resolvers::new(Arc::clone(&sources) as Arc<dyn Sources>, Duration::ZERO);
+
+        assert_eq!(
+            resolvers.servers_for("example.com"),
+            vec![server("1.1.1.1")]
+        );
+        sources.reading().await;
+        tokio::time::sleep(REFRESH_TIMEOUT + Duration::from_millis(200)).await;
+
+        assert_eq!(
+            resolvers.servers_for("example.com"),
+            vec![server("1.1.1.1")],
+            "a read that outlasts its own deadline changes nothing"
+        );
+        drop(release);
     }
 
     struct FixedSources(Mutex<Vec<Vec<Scope>>>);
@@ -587,18 +736,21 @@ resolver #1
         assert_eq!(servers_for(&[], "example.com"), Vec::new());
     }
 
-    #[test]
-    fn the_resolver_list_is_read_again_once_it_is_old() {
+    #[tokio::test]
+    async fn the_resolver_list_is_read_again_once_it_is_old() {
         let resolvers = Resolvers::new(sources(), Duration::ZERO);
 
         assert_eq!(
             resolvers.servers_for("example.com"),
-            vec![server("9.9.9.9")]
+            vec![server("1.1.1.1")],
+            "the query in hand is answered from the list in hand"
         );
+
+        eventually(|| resolvers.servers_for("example.com") == vec![server("9.9.9.9")]).await;
     }
 
-    #[test]
-    fn a_fresh_resolver_list_is_not_read_again_for_every_query() {
+    #[tokio::test]
+    async fn a_fresh_resolver_list_is_not_read_again_for_every_query() {
         let resolvers = Resolvers::new(sources(), Duration::from_secs(3600));
 
         assert_eq!(
@@ -611,8 +763,8 @@ resolver #1
         );
     }
 
-    #[test]
-    fn a_query_nobody_answered_makes_the_next_one_read_the_list_again() {
+    #[tokio::test]
+    async fn a_query_nobody_answered_makes_the_next_one_read_the_list_again() {
         let resolvers = Resolvers::new(sources(), Duration::from_secs(3600));
         assert_eq!(
             resolvers.servers_for("example.com"),
@@ -621,9 +773,6 @@ resolver #1
 
         resolvers.stale();
 
-        assert_eq!(
-            resolvers.servers_for("example.com"),
-            vec![server("9.9.9.9")]
-        );
+        eventually(|| resolvers.servers_for("example.com") == vec![server("9.9.9.9")]).await;
     }
 }
