@@ -57,6 +57,7 @@ struct ManagementForm: View {
         }
         .padding(24)
         .frame(width: 540, height: sheet.kind == .grant || sheet.kind == .connect ? 590 : 330)
+        .controlSize(.large)
         .lnsAppearance()
         .interactiveDismissDisabled(busy)
         .onAppear { selection.run = sheet.run }
@@ -71,20 +72,28 @@ struct ManagementForm: View {
         switch sheet.kind {
         case .install:
             Text("Install a published connector or a local connector document. Installing makes it available on this Mac; each sandbox still needs a grant.")
-            TextField("Registry reference or absolute file path", text: $source).textFieldStyle(.roundedBorder)
-            Button("Choose File…", action: chooseFile)
+            LNSFormField(title: "Connector source") {
+                HStack {
+                    TextField("Registry reference or absolute file path", text: $source).textFieldStyle(.roundedBorder)
+                    Button("Choose File…", action: chooseFile)
+                }
+            }
         case .connect:
             Text("Save a connection on this Mac. You choose which sandboxes may use it when you grant access.")
             methodPicker(connecting: true)
             if let method, method.offerable, method.auth_label != nil {
                 if let help = method.help { Text(help).textSelection(.enabled) }
-                TextField("Connection name, e.g. work", text: $label).textFieldStyle(.roundedBorder)
+                LNSFormField(title: "Connection name") {
+                    TextField("e.g. work", text: $label).textFieldStyle(.roundedBorder)
+                }
                 if offer?.connections.contains(where: { $0.label == label.trimmingCharacters(in: .whitespacesAndNewlines) }) == true {
                     Text("That name is already used. Choose a new name to keep the existing account.").foregroundStyle(LNSTheme.warning)
                 }
                 ForEach(method.asks, id: \.self) { field in
-                    SecureField(field, text: Binding(get: { values[field] ?? "" }, set: { values[field] = $0 }))
-                        .textFieldStyle(.roundedBorder)
+                    LNSFormField(title: field) {
+                        SecureField(field, text: Binding(get: { values[field] ?? "" }, set: { values[field] = $0 }))
+                            .textFieldStyle(.roundedBorder)
+                    }
                 }
                 Text("Real credentials stay outside the workload.").font(.caption).foregroundStyle(LNSTheme.muted)
             }

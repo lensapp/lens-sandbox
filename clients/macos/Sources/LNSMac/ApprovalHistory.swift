@@ -8,8 +8,7 @@ struct ApprovalHistory: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            LNSPageHeading(title: "Approvals", subtitle: model.sandboxName)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(24)
+            LNSPageHeader(title: "Approvals", subtitle: "Review access requests and saved decisions.") { EmptyView() }
             HStack(spacing: 12) {
                 HStack(spacing: 8) {
                     SandboxFilter(model: model)
@@ -27,18 +26,13 @@ struct ApprovalHistory: View {
                         }
                     } label: { Label(model.filters.answers.isEmpty ? "All answers" : "\(model.filters.answers.count) answers", systemImage: "line.3.horizontal.decrease.circle") }
                 }
-                .fixedSize(horizontal: true, vertical: false)
+                .fixedSize(horizontal: true, vertical: false).controlSize(.large)
                 Spacer()
                 LNSStatus(title: "\(model.waitingCount) waiting", color: model.waitingCount > 0 ? LNSTheme.warning : LNSTheme.muted)
             }
             .padding(.horizontal, 24).padding(.bottom, 16)
-            Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
-                    if model.history.isEmpty {
-                        Text(model.connected ? "Nothing has been asked matching these filters." : "Waiting for the service…")
-                            .foregroundStyle(LNSTheme.muted)
-                    }
                     groups(model.waiting)
                     if !model.archived.isEmpty {
                         DisclosureGroup("Archive (\(model.archived.count))", isExpanded: Binding(
@@ -49,8 +43,17 @@ struct ApprovalHistory: View {
                         }
                     }
                 }
-                .padding(24)
+                .padding(.horizontal, 24).padding(.bottom, 24)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .overlay {
+                if model.history.isEmpty {
+                    LNSEmptyState(
+                        symbol: "checkmark.shield",
+                        title: model.connected ? "No matching requests" : "Waiting for the service…",
+                        message: "Requests for sandbox access and your answers appear here."
+                    ).allowsHitTesting(false)
+                }
             }
         }
     }
@@ -83,8 +86,9 @@ struct HistoryRow: View {
             Button { model.selectHistory(approval) } label: {
                 HStack(spacing: 10) {
                     Image(systemName: model.selectedHistory == approval.id ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(LNSTheme.muted).frame(width: 12)
                     Image(systemName: approval.entry.kind == "connector" ? "link" : (approval.entry.kind == "notice" ? "info.circle" : "network"))
-                    Text(approval.entry.subject).lineLimit(2)
+                    Text(approval.entry.subject).font(.system(size: 13, weight: .medium)).foregroundStyle(LNSTheme.heading).lineLimit(2)
                     if approval.raw { Image(systemName: "eye.slash").help("LNS cannot inspect this traffic.") }
                     Spacer()
                     LNSStatus(title: approval.entry.answer, color: answerColor)

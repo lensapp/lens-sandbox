@@ -8,18 +8,17 @@ struct RegistryList: View {
     @State private var signingOut: RegistryLogin?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 24) {
-                LNSPageHeading(title: "Registries", subtitle: "Sign in to pull sandbox definitions and base images.")
-                Spacer()
+        VStack(alignment: .leading, spacing: 0) {
+            LNSPageHeader(title: "Registries", subtitle: "Manage accounts for private definitions and images.") {
                 Button("Sign In…") { showingLogin = true }
                     .buttonStyle(.borderedProminent).disabled(!model.registries.connected || model.registries.busy)
             }
-            Label("Accounts are shared with the CLI. Credentials stay outside your sandboxes.", systemImage: "lock.shield")
-                .font(.callout).foregroundStyle(LNSTheme.muted)
-                .padding(12).frame(maxWidth: .infinity, alignment: .leading).lnsPanel()
+            Label("Credentials stay on this Mac and are shared with the CLI.", systemImage: "lock.shield")
+                .font(.system(size: 12)).foregroundStyle(LNSTheme.muted)
+                .padding(.horizontal, 24).padding(.bottom, 16)
             if let error = model.registries.error {
                 Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(LNSTheme.warning).textSelection(.enabled)
+                    .padding(.horizontal, 24).padding(.bottom, 16)
             }
             List(model.registries.logins) { login in
                 HStack(spacing: 16) {
@@ -27,7 +26,8 @@ struct RegistryList: View {
                         .frame(width: 36, height: 36)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(login.registry).font(.system(size: 13, weight: .semibold, design: .monospaced)).foregroundStyle(LNSTheme.heading)
-                        Text(login.username).font(.caption).foregroundStyle(LNSTheme.muted)
+                            .lineLimit(1).help(login.registry)
+                        Text(login.username).font(.caption).foregroundStyle(LNSTheme.muted).lineLimit(1).help(login.username)
                     }
                     Spacer()
                     Button("Sign Out…", role: .destructive) { signingOut = login }
@@ -37,18 +37,15 @@ struct RegistryList: View {
             .listStyle(.inset).scrollContentBackground(.hidden).lnsPanel()
             .overlay {
                 if model.registries.logins.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "externaldrive.connected.to.line.below")
-                            .font(.system(size: 32, weight: .light)).foregroundStyle(LNSTheme.accent)
-                        Text(model.registries.connected ? "No registry accounts saved" : "Waiting for the service…")
-                            .font(.headline).foregroundStyle(LNSTheme.heading)
-                        Text("Sign in to pull images that require authentication.")
-                            .foregroundStyle(LNSTheme.muted).multilineTextAlignment(.center).frame(maxWidth: 340)
-                    }
+                    LNSEmptyState(
+                        symbol: "externaldrive.connected.to.line.below",
+                        title: model.registries.connected ? "No registry accounts saved" : "Waiting for the service…",
+                        message: "Sign in to pull definitions and images that require authentication."
+                    )
                 }
             }
+            .padding(.horizontal, 24).padding(.bottom, 24)
         }
-        .padding(24)
         .sheet(isPresented: $showingLogin) { RegistryLoginForm(model: model) }
         .confirmationDialog("Sign out of \(signingOut?.registry ?? "this registry")?", isPresented: Binding(
             get: { signingOut != nil }, set: { if !$0 { signingOut = nil } }), titleVisibility: .visible) {
@@ -76,11 +73,13 @@ struct RegistryLoginForm: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            LNSPageHeading(title: "Sign In to a Registry", subtitle: "Keep private images within reach.")
+            LNSPageHeading(title: "Sign In to a Registry", subtitle: "Use your browser or registry credentials.")
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 14) {
-                        TextField("Registry host, e.g. hub.lns.run or ghcr.io", text: $registry).textFieldStyle(.roundedBorder)
+                        LNSFormField(title: "Registry") {
+                            TextField("hub.lns.run or ghcr.io", text: $registry).textFieldStyle(.roundedBorder)
+                        }
                         if let hostError { Text(hostError).font(.caption).foregroundStyle(LNSTheme.warning) }
                         Picker("Sign-in option", selection: $browser) {
                             Text("Browser").tag(true).disabled(model.registryBrowser == nil)
@@ -90,8 +89,12 @@ struct RegistryLoginForm: View {
                             Text("Your browser opens to approve sign-in. The confirmation code appears below. Registries without browser login can use a username and token.")
                                 .foregroundStyle(LNSTheme.muted)
                         } else {
-                            TextField("Username", text: $username).textFieldStyle(.roundedBorder)
-                            SecureField("Password or access token", text: $secret).textFieldStyle(.roundedBorder)
+                            LNSFormField(title: "Username") {
+                                TextField("Username", text: $username).textFieldStyle(.roundedBorder)
+                            }
+                            LNSFormField(title: "Password or access token") {
+                                SecureField("Password or access token", text: $secret).textFieldStyle(.roundedBorder)
+                            }
                             Text("LNS verifies these credentials before saving them outside the sandbox.").font(.caption).foregroundStyle(LNSTheme.muted)
                         }
                         Text("Signing in replaces any saved account for this registry.").font(.caption).foregroundStyle(LNSTheme.muted)
@@ -117,7 +120,8 @@ struct RegistryLoginForm: View {
                     .disabled(!valid || !session.connected || session.busy)
             }
         }
-        .padding(24).frame(width: 580, height: 470)
+        .padding(24).frame(width: 580, height: 540)
+        .controlSize(.large)
         .lnsAppearance()
         .interactiveDismissDisabled(session.busy && !browser)
         .onAppear { if model.registryBrowser == nil { browser = false } }

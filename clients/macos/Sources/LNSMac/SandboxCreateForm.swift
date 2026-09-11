@@ -41,6 +41,7 @@ struct SandboxCreateForm: View {
             }
         }
         .padding(24).frame(width: 580, height: 620)
+        .controlSize(.large)
         .lnsAppearance()
         .interactiveDismissDisabled(busy)
         .sheet(isPresented: $registryLogin) { RegistryLoginForm(model: model) }
@@ -53,12 +54,16 @@ struct SandboxCreateForm: View {
                 Text("Published Reference").tag(SandboxDraft.Source.published)
             }.pickerStyle(.segmented)
                 .onChange(of: draft.kind) { _ in draft.source = ""; draft.allowSetup = false }
-            HStack {
-                TextField(draft.kind == .local ? "/path/to/lns.yaml" : "ghcr.io/team/agent:latest", text: $draft.source)
-                    .textFieldStyle(.roundedBorder)
-                if draft.kind == .local { Button("Choose…", action: chooseDefinition) }
+            LNSFormField(title: draft.kind == .local ? "Definition path" : "Published reference") {
+                HStack {
+                    TextField(draft.kind == .local ? "/path/to/lns.yaml" : "ghcr.io/team/agent:latest", text: $draft.source)
+                        .textFieldStyle(.roundedBorder)
+                    if draft.kind == .local { Button("Choose…", action: chooseDefinition) }
+                }
             }
-            TextField("Sandbox name (optional)", text: $draft.name).textFieldStyle(.roundedBorder)
+            LNSFormField(title: "Sandbox name (optional)") {
+                TextField("Optional name", text: $draft.name).textFieldStyle(.roundedBorder)
+            }
             if let validationError {
                 Text(validationError).font(.caption).foregroundStyle(LNSTheme.warning)
             }

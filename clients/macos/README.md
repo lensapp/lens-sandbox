@@ -11,6 +11,9 @@ connectors use bordered cards. The same styling carries through registry sign-in
 creation dialogs, audit details, and live approvals. Native controls and keyboard
 shortcuts remain available. Shared colors and presentation components live in
 `Sources/LNSMac/LNSTheme.swift`.
+Page headers, search fields, empty states, and persistent form labels share
+presentation components. The sandbox list uses matching header and row columns;
+connector cards keep routine actions neutral and reserve blue for the page action.
 
 Audit and Approvals each include a sandbox filter in their own view; the sidebar
 contains navigation only. The native dashboard includes event-kind filters, global
@@ -76,7 +79,7 @@ template so macOS adapts its color to the current appearance.
 The Dock image is assigned at startup even when launching the app executable
 directly from a terminal. If an icon cannot load, the menu bar shows **LNS** and
 the app reports the missing or invalid asset.
-⌘F focuses audit search and ⌘R refreshes the dashboard. Escape clears a focused
+⌘F focuses search in Sandboxes, Connectors, and Audit; ⌘R refreshes the dashboard. Escape clears a focused
 search or closes focused event details. Standard macOS window controls and ⌘W
 close a window without stopping the service; the menu-bar interface stays open.
 ⌘Q quits only the interface. Stopping the service is a separate, confirmed

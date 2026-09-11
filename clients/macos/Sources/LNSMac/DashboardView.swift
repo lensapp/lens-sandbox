@@ -54,14 +54,13 @@ struct DashboardView: View {
             HStack(spacing: 12) {
                 if let mark {
                     Image(nsImage: mark).resizable().renderingMode(.template)
-                        .scaledToFit().frame(width: 32, height: 32).accessibilityHidden(true)
+                        .scaledToFit().frame(width: 24, height: 24).accessibilityHidden(true)
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("LNS").font(.system(size: 19, weight: .semibold)).tracking(1)
-                    Text("Your local sandboxes").font(.caption).foregroundStyle(LNSTheme.muted)
+                    Text("LNS").font(.system(size: 16, weight: .semibold))
                 }
             }
-            .foregroundStyle(LNSTheme.heading).padding(24)
+            .foregroundStyle(LNSTheme.heading).padding(.horizontal, 24).padding(.vertical, 20)
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
@@ -149,23 +148,13 @@ struct DashboardView: View {
 @MainActor
 struct AuditTimeline: View {
     @ObservedObject var model: DashboardModel
-    @FocusState private var searchFocused: Bool
     private let kinds = ["launch", "egress", "env", "volume", "bind", "approval", "connection", "credential", "tool"]
 
     var body: some View {
         VStack(spacing: 0) {
-            LNSPageHeading(title: "Audit", subtitle: model.sandboxName)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(24)
-            HStack {
-                Button { searchFocused = true } label: { Label("Search audit", systemImage: "magnifyingglass") }
-                    .labelStyle(.iconOnly).buttonStyle(.borderless).keyboardShortcut("f")
-                    .help("Search all sandboxes (⌘F)")
-                TextField("Search all sandboxes’ audit events", text: $model.filters.search)
-                    .textFieldStyle(.roundedBorder).focused($searchFocused)
-                    .accessibilityLabel("Search all sandboxes’ audit events")
-                    .onExitCommand { model.filters.search = ""; searchFocused = false }
-            }
-            .padding(.horizontal, 24).padding(.bottom, 12)
+            LNSPageHeader(title: "Audit", subtitle: "Review sandbox activity and network decisions.") { EmptyView() }
+            LNSSearchField(prompt: "Search all sandboxes’ audit events", text: $model.filters.search)
+                .padding(.horizontal, 24).padding(.bottom, 12)
             HStack(spacing: 12) {
                 HStack(spacing: 8) {
                     SandboxFilter(model: model)
@@ -182,12 +171,11 @@ struct AuditTimeline: View {
                     } label: { Label(model.filters.kinds.isEmpty ? "All event kinds" : "\(model.filters.kinds.count) kinds", systemImage: "line.3.horizontal.decrease.circle") }
                     .disabled(!model.filters.search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                .fixedSize(horizontal: true, vertical: false)
+                .fixedSize(horizontal: true, vertical: false).controlSize(.large)
                 Spacer()
                 Text("\(model.events.count) events").font(.caption).foregroundStyle(LNSTheme.muted)
             }
             .padding(.horizontal, 24).padding(.bottom, 16)
-            Divider()
             HSplitView {
                 Table(model.events, selection: $model.selectedEvent) {
                     TableColumn("When") { event in Text(event.when).monospacedDigit() }.width(min: 130, ideal: 155)
@@ -198,11 +186,14 @@ struct AuditTimeline: View {
                 .scrollContentBackground(.hidden)
                 .overlay {
                     if model.events.isEmpty {
-                        Text(model.connected ? "No matching audit events." : "Waiting for the service…")
-                            .foregroundStyle(LNSTheme.muted).allowsHitTesting(false)
+                        LNSEmptyState(
+                            symbol: "list.bullet.rectangle",
+                            title: model.connected ? "No matching events" : "Waiting for the service…",
+                            message: "Sandbox activity appears here. Try another search or filter."
+                        ).allowsHitTesting(false)
                     }
                 }
-                .frame(minWidth: 420)
+                .frame(minWidth: 280)
                 if let event = model.detail {
                     AuditDetail(event: event, sandbox: model.data.sandboxes.first { $0.id == event.run }?.name) {
                         model.selectedEvent = nil
@@ -210,6 +201,8 @@ struct AuditTimeline: View {
                     .frame(minWidth: 280, idealWidth: 360, maxWidth: 540)
                 }
             }
+            .clipShape(RoundedRectangle(cornerRadius: 4)).lnsPanel()
+            .padding(.horizontal, 24).padding(.bottom, 24)
         }
         .onChange(of: model.filters.search) { _ in model.selectedEvent = nil }
         .onChange(of: model.filters.kinds) { _ in model.selectedEvent = nil }

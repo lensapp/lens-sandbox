@@ -19,6 +19,7 @@ struct SandboxFilter: View {
         } label: {
             Label(model.sandboxName, systemImage: "shippingbox").lineLimit(1)
         }
+        .frame(maxWidth: 220)
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityLabel("Filter by sandbox")
         .accessibilityValue(model.sandboxName)

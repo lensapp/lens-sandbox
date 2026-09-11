@@ -43,7 +43,91 @@ struct LNSPageHeading: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.system(size: 22, weight: .semibold)).foregroundStyle(LNSTheme.heading)
-            Text(subtitle).font(.callout).foregroundStyle(LNSTheme.muted).fixedSize(horizontal: false, vertical: true)
+            Text(subtitle).font(.system(size: 12)).foregroundStyle(LNSTheme.muted).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+struct LNSPageHeader<Actions: View>: View {
+    let title: String
+    let subtitle: String
+    @ViewBuilder var actions: Actions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 16) {
+                Text(title).font(.system(size: 22, weight: .semibold)).foregroundStyle(LNSTheme.heading)
+                Spacer(minLength: 16)
+                actions.fixedSize().controlSize(.large)
+            }
+            .frame(minHeight: 32)
+            Text(subtitle).font(.system(size: 12)).foregroundStyle(LNSTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(24)
+    }
+}
+
+struct LNSSearchField: View {
+    let prompt: String
+    @Binding var text: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button { focused = true } label: {
+                Image(systemName: "magnifyingglass").foregroundStyle(LNSTheme.muted)
+            }
+            .buttonStyle(.plain).keyboardShortcut("f")
+            .accessibilityLabel(prompt).help("\(prompt) (⌘F)")
+            TextField(prompt, text: $text).textFieldStyle(.plain).focused($focused)
+                .accessibilityLabel(prompt)
+                .onExitCommand { text = ""; focused = false }
+            if !text.isEmpty {
+                Button { text = ""; focused = true } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(LNSTheme.muted)
+                }
+                .buttonStyle(.plain).accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 10).frame(height: 32)
+        .background(LNSTheme.surface, in: RoundedRectangle(cornerRadius: 4))
+        .overlay {
+            RoundedRectangle(cornerRadius: 4)
+                .strokeBorder(focused ? LNSTheme.accent : LNSTheme.border, lineWidth: 1)
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+struct LNSEmptyState: View {
+    let symbol: String
+    let title: String
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: symbol).font(.system(size: 28, weight: .light))
+                .foregroundStyle(LNSTheme.muted).accessibilityHidden(true)
+            VStack(spacing: 6) {
+                Text(title).font(.system(size: 14, weight: .medium)).foregroundStyle(LNSTheme.heading)
+                Text(message).font(.system(size: 12)).foregroundStyle(LNSTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: 340).padding(24)
+    }
+}
+
+struct LNSFormField<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(LNSTheme.text)
+            content
         }
     }
 }
