@@ -38,6 +38,9 @@ pub struct VmSpec {
     pub console_fd: std::os::fd::RawFd,
     #[cfg(target_os = "macos")]
     pub net: netdev::NetAttachment,
+    /// The vhost-user link the run's passt serves; `None` is a guest with no network device.
+    #[cfg(target_os = "linux")]
+    pub net: Option<netdev::VhostUserNet>,
     pub debug: bool,
     pub exec: ExecSpec,
 }
@@ -1003,6 +1006,8 @@ mod tests {
             console_fd: -1,
             #[cfg(target_os = "macos")]
             net: netdev::NetAttachment::Nat,
+            #[cfg(target_os = "linux")]
+            net: None,
             debug: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
         }

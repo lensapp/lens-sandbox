@@ -62,13 +62,25 @@ host DHCP server, and no shared packet filter between runs.
 On macOS that process is
 [`gvproxy`](https://github.com/containers/gvisor-tap-vsock). The service starts
 one per run, connects a datagram socket to it, and attaches that socket to the
-virtual machine. `gvproxy` answers DHCP, DNS and NAT itself:
+virtual machine. On Linux it is [`passt`](https://passt.top), started per run in
+`--vhost-user` mode; `cloud-hypervisor` connects to the socket `passt` binds and
+gives the guest a `virtio-net` device on the other end of it. Either way the
+backend answers DHCP, DNS and NAT itself:
 
 | | |
 |---|---|
 | Guest subnet | `192.168.127.0/24` |
 | Gateway and DNS resolver | `192.168.127.1` |
+| Guest address | `192.168.127.2` (Linux; macOS leases from the same subnet) |
 | MTU | 1500 |
+
+`passt` would otherwise hand the guest the host's own address and default
+gateway, so lns asks for that private address instead — the same subnet the
+macOS backend serves, so a guest reads the same on both platforms. The gateway
+address is not mapped back to the host's loopback (`--no-map-gw`), so nothing in
+the guest can reach a service listening on the host by aiming at its gateway.
+DNS is forwarded by `passt` itself from the address it advertises, so the
+resolver the guest is handed is always one that answers.
 
 Egress policy is unaffected. Every request still goes through the in-guest
 proxy, so the approval cards and the [audit](audit.md) chain read the same as
@@ -76,18 +88,18 @@ before. The chain also records which backend a run used:
 
 ```
 $ lns audit
-2026-09-11T09:14:02Z  calm-finch  network  guest network served by gvproxy (192.168.127.0/24)
+2026-09-11T09:14:02Z  calm-finch  network  guest network served by passt (192.168.127.0/24)
 ```
 
 The launch prints the same thing:
 
 ```
 $ lns run -- curl -sS https://example.com
-  Network  gvproxy (192.168.127.0/24)
+  Network  passt (192.168.127.0/24)
   Booting  microVM
 ```
 
-### Where gvproxy comes from
+### Where gvproxy comes from (macOS)
 
 The service looks in three places, in order, and stops at the first hit:
 
@@ -105,16 +117,61 @@ binary during install on macOS, so the first run needs no download.
 A run that cannot get a verified `gvproxy` fails before the workload starts and
 exits `125`, like every other pre-start refusal.
 
-### Going back to the old bridge
+### Where passt comes from (Linux)
 
-`LNS_NETDEV=vmnet` restores the previous behaviour — the Apple `vmnet` NAT
-bridge, with the host answering DHCP:
+`passt` publishes no versioned static binary with a checksum to pin, so lns does
+not download one. It uses the `passt` the host has, looking in three places and
+stopping at the first hit:
+
+1. `LNS_PASST_BIN` — a path you name. If that path is not a file, the run is
+   refused; it does not fall back.
+2. `passt` on `PATH`.
+3. `/usr/bin`, `/usr/local/bin`, `/usr/sbin`, `/usr/local/sbin` — where the
+   distro packages put it.
+
+A host with no `passt` refuses the run before the workload starts and exits
+`125`, naming the package:
 
 ```bash
-LNS_NETDEV=vmnet lns run -- curl -sS https://example.com
+sudo apt install passt    # Debian, Ubuntu
+sudo dnf install passt    # Fedora, RHEL
 ```
 
-This is an escape hatch for one release. Report anything that needs it.
+`lns-install.sh` probes for it next to `cloud-hypervisor` and `virtiofsd` and
+says so during install.
+
+### Running the service in a container
+
+`passt` isolates itself in a user namespace as it starts. Where `unshare(2)` is
+blocked — Docker's default `seccomp` profile blocks it for a container without
+`CAP_SYS_ADMIN` — `passt` reports
+
+```
+Couldn't create user namespace: Operation not permitted
+```
+
+and stops, so the run is refused rather than started without a network. There is
+no option that turns the isolation off. A container that hosts `lns-service`
+therefore needs `unshare(2)` allowed:
+
+```bash
+docker run --device /dev/kvm --security-opt seccomp=unconfined ...
+```
+
+Podman's default profile already allows it.
+
+### Going back to the old behaviour
+
+On macOS, `LNS_NETDEV=vmnet` restores the Apple `vmnet` NAT bridge, with the
+host answering DHCP. On Linux, `LNS_NETDEV=none` boots the guest with no network
+device at all, which is what every Linux run did before this change:
+
+```bash
+LNS_NETDEV=vmnet lns run -- curl -sS https://example.com   # macOS
+LNS_NETDEV=none  lns run -- echo hello                     # Linux, no egress
+```
+
+These are escape hatches for one release. Report anything that needs them.
 
 ## Updating
 
