@@ -27,6 +27,9 @@ pub enum Call {
         session: String,
         values: std::collections::BTreeMap<String, String>,
     },
+    Status(String),
+    Cancel(String),
+    OpenBrowser(String),
     Disconnect {
         name: String,
         connection: Option<String>,
@@ -48,6 +51,9 @@ pub enum Call {
 fn one_round(turn: super::connect::Connecting) -> crate::approval_flow::session::ConnectRound {
     use crate::approval_flow::session::ConnectRound;
     match turn {
+        super::connect::Connecting::Pending { session, progress } => {
+            ConnectRound::Pending { session, progress }
+        }
         super::connect::Connecting::Asks {
             session,
             message,
@@ -77,6 +83,9 @@ fn one_round(turn: super::connect::Connecting) -> crate::approval_flow::session:
 /// One turn of a connect, as the caller sees it.
 fn one_turn(name: &str, turn: super::connect::Connecting) -> Response {
     match turn {
+        super::connect::Connecting::Pending { session, progress } => {
+            Response::ConnectorPending { session, progress }
+        }
         super::connect::Connecting::Asks {
             session,
             message,
@@ -164,14 +173,23 @@ pub fn offers_for_run(run_id: &str) -> Vec<lns_ipc::ConnectorView> {
     }
 }
 
-fn read_offers(holder: &GrantHolder) -> Result<Vec<lns_ipc::ConnectorView>> {
+pub(crate) fn read_offers(holder: &GrantHolder) -> Result<Vec<lns_ipc::ConnectorView>> {
     with_run_store(holder, handler::offerable)
+}
+
+pub(crate) trait NativeAccess: Send + Sync {
+    fn status(&self, session: &str) -> Result<super::connect::Turn>;
+    fn open_browser(&self, session: &str) -> Result<()>;
+    fn cancel(&self, session: &str) -> Result<()>;
+    fn offers(&self, holder: &GrantHolder) -> Result<Vec<lns_ipc::ConnectorView>>;
+    fn supply(&self, holder: &GrantHolder) -> Result<BTreeMap<String, GrantedPayload>>;
 }
 
 /// The connector store as the approval session reaches it: every method opens the three stores itself, because a card outlives no lock.
 pub struct RealConnectorPort {
     holder: GrantHolder,
     microvm: String,
+    native: std::sync::Arc<dyn NativeAccess>,
 }
 
 impl RealConnectorPort {
@@ -179,6 +197,7 @@ impl RealConnectorPort {
         Self {
             holder: GrantHolder::Run(run_id),
             microvm,
+            native: std::sync::Arc::new(super::mechanism::real::NativeAccess),
         }
     }
 
@@ -192,6 +211,20 @@ impl RealConnectorPort {
 }
 
 impl crate::approval_flow::session::ConnectRoundPort for RealConnectorPort {
+    fn poll_connect(
+        &self,
+        session: &str,
+    ) -> Result<crate::approval_flow::session::ConnectRound, String> {
+        self.native
+            .status(session)
+            .map(|turn| one_round(turn.connecting))
+            .map_err(|error| format!("{error:#}"))
+    }
+    fn open_connect_browser(&self, session: &str) -> Result<(), String> {
+        self.native
+            .open_browser(session)
+            .map_err(|error| format!("{error:#}"))
+    }
     fn begin_connect(
         &self,
         name: &str,
@@ -221,10 +254,7 @@ impl crate::approval_flow::session::ConnectRoundPort for RealConnectorPort {
     }
 
     fn abandon_connect(&self, session: &str) {
-        let dropped = self.with_store(|store| {
-            super::mechanism::real::driver(*store)?.abandon_handle(session);
-            Ok(())
-        });
+        let dropped = self.native.cancel(session);
         if let Err(why) = dropped {
             crate::log::warn!("dropping an abandoned connect round: {why}");
         }
@@ -232,6 +262,21 @@ impl crate::approval_flow::session::ConnectRoundPort for RealConnectorPort {
 }
 
 impl crate::approval_flow::session::ConnectorPort for RealConnectorPort {
+    fn current_offers(&self) -> Option<Vec<lns_ipc::ConnectorView>> {
+        Some(self.native.offers(&self.holder).unwrap_or_else(|error| {
+            crate::log::warn!("could not reconcile this run's connector offers: {error:#}");
+            Vec::new()
+        }))
+    }
+    fn current_supply(&self) -> Option<BTreeMap<String, GrantedPayload>> {
+        Some(self.native.supply(&self.holder).unwrap_or_else(|error| {
+            crate::log::warn!(
+                "could not read this run's connector credentials; disarming them: {error:#}"
+            );
+            BTreeMap::new()
+        }))
+    }
+
     fn connect(
         &self,
         name: &str,
@@ -446,7 +491,7 @@ pub fn record_a_grant_for_a_test(run_id: &str, name: &str, digest: &str) {
     .expect("record a grant");
 }
 
-fn with_stores<T>(f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T> {
+pub(super) fn with_stores<T>(f: impl FnOnce(&ConnectorStore<'_>) -> Result<T>) -> Result<T> {
     let paths = Paths::resolve()?;
     let installed = super::dir::ConnectorDir::new(paths.connectors);
     let values: JsonDecisionStore<Connection> = JsonDecisionStore::new(paths.values);
@@ -551,7 +596,9 @@ fn values_a_granted_method_sets(
         .collect()
 }
 
-fn read_granted_supply(holder: &GrantHolder) -> Result<BTreeMap<String, GrantedPayload>> {
+pub(crate) fn read_granted_supply(
+    holder: &GrantHolder,
+) -> Result<BTreeMap<String, GrantedPayload>> {
     with_run_store(holder, |store, holder| {
         handler::granted_supply(store, holder, super::mechanism::real::now_millis())
     })
@@ -585,17 +632,28 @@ pub async fn answer(call: Call) -> Result<Response> {
     let values: JsonDecisionStore<Connection> = JsonDecisionStore::new(paths.values);
     let grants: JsonDecisionStore<RunDecision> = JsonDecisionStore::new(paths.grants);
     let store = ConnectorStore::new(&installed, &values, &grants);
+    answer_in(store, call, &super::mechanism::real::NativeAccess).await
+}
+
+async fn answer_in(
+    store: ConnectorStore<'_>,
+    call: Call,
+    native: &dyn NativeAccess,
+) -> Result<Response> {
     match call {
         Call::Install(source) => Ok(Response::ConnectorInstalled {
             connector: handler::install(&store, &RegistryConnectors, &source).await?,
         }),
-        Call::Uninstall(name) => Ok(match handler::uninstall(&store, &name)? {
-            Some(dropped_connections) => Response::ConnectorUninstalled {
-                name,
-                dropped_connections,
-            },
-            None => Response::ConnectorUnknown { name },
-        }),
+        Call::Uninstall(name) => {
+            super::mechanism::real::driver(store)?.cancel_connector(&name, None);
+            Ok(match handler::uninstall(&store, &name)? {
+                Some(dropped_connections) => Response::ConnectorUninstalled {
+                    name,
+                    dropped_connections,
+                },
+                None => Response::ConnectorUnknown { name },
+            })
+        }
         Call::List => Ok(Response::ConnectorList {
             connectors: handler::list(&store)?,
         }),
@@ -616,10 +674,26 @@ pub async fn answer(call: Call) -> Result<Response> {
             })?;
             Ok(one_turn(&turn.connector, turn.connecting))
         }
+        Call::Status(session) => {
+            let turn = native.status(&session)?;
+            Ok(one_turn(&turn.connector, turn.connecting))
+        }
+        Call::Cancel(session) => {
+            native.cancel(&session)?;
+            let turn = native.status(&session)?;
+            Ok(one_turn(&turn.connector, turn.connecting))
+        }
+        Call::OpenBrowser(session) => {
+            native.open_browser(&session)?;
+            let turn = native.status(&session)?;
+            Ok(one_turn(&turn.connector, turn.connecting))
+        }
         Call::Disconnect { name, connection } => Ok(Response::ConnectorDisconnected {
             // A revoke is a component call, so it is spent off the thread every component deadline is measured in.
             // A machine that cannot start a component runtime still drops what the user pressed Disconnect on; it just has nobody to tell.
             dropped: super::mechanism::real::off_the_runtime_thread(|| {
+                super::mechanism::real::driver(store)?
+                    .cancel_connector(&name, connection.as_deref());
                 handler::disconnect(
                     &store,
                     super::mechanism::real::mechanisms()
@@ -2195,3 +2269,6 @@ mod tests {
         assert_eq!(value["kind"], "connector");
     }
 }
+
+#[cfg(test)]
+mod native_tests;

@@ -141,6 +141,7 @@ pub const SPEC: CommandSpec = CommandSpec {
 
 /// Sends one connector request to the running service; `None` means the service did not answer.
 pub trait ConnectorService {
+    fn wait_for_oauth(&self) -> LocalBoxFuture<'_, bool>;
     fn request(&self, req: Request) -> LocalBoxFuture<'_, Option<Response>>;
 }
 
@@ -232,6 +233,17 @@ async fn connect(
     }
     let (connector, method) = method_to_connect(svc, &args.name, args.method.as_deref()).await?;
     writeln!(prompt, "connecting {} with {}", args.name, method.label)?;
+    if let Some(oauth) = &method.oauth {
+        writeln!(
+            prompt,
+            "OAuth destinations: {}\nRequested scopes: {}",
+            oauth.destinations.join(", "),
+            oauth.scopes.join(" ")
+        )?;
+        if let Some(callback) = &oauth.callback {
+            writeln!(prompt, "Registered callback: {callback}")?;
+        }
+    }
     let connection = match args.label.clone() {
         Some(named) => named,
         None => confirm_name(&connector, &method, terminal, prompt)?,
@@ -245,8 +257,50 @@ async fn connect(
         },
     )
     .await?;
+    let mut last_progress = None;
     loop {
         match turn {
+            Response::ConnectorPending { session, progress } => {
+                if last_progress.as_ref() != Some(&progress) {
+                    match &progress {
+                        lns_ipc::OAuthProgress::Starting {
+                            destinations,
+                            scopes,
+                        } => writeln!(
+                            prompt,
+                            "OAuth authorization: {}\nRequested scopes: {}",
+                            destinations.join(", "),
+                            scopes.join(" ")
+                        )?,
+                        lns_ipc::OAuthProgress::DeviceAuthorization {
+                            verification_uri,
+                            user_code,
+                        } => writeln!(
+                            prompt,
+                            "Open {verification_uri} and enter code {user_code}. Waiting for authorization…"
+                        )?,
+                        lns_ipc::OAuthProgress::WaitingForBrowser {
+                            authorization_endpoint,
+                            redirect_uri,
+                        } => writeln!(
+                            prompt,
+                            "Opened the browser for {authorization_endpoint}. Waiting for callback at {redirect_uri}…"
+                        )?,
+                        lns_ipc::OAuthProgress::Canceled => bail!("OAuth authorization canceled"),
+                        lns_ipc::OAuthProgress::Expired => {
+                            bail!("OAuth authorization expired; connect again")
+                        }
+                    }
+                    prompt.flush()?;
+                    last_progress = Some(progress);
+                }
+                let request = if svc.wait_for_oauth().await {
+                    Request::ConnectStatus { session }
+                } else {
+                    Request::CancelConnect { session }
+                };
+                turn = send(svc, request).await?;
+            }
             Response::ConnectorAsks {
                 session,
                 message,
@@ -338,7 +392,7 @@ async fn method_to_connect(
             method.name
         );
     }
-    if method.asks.is_empty() {
+    if method.asks.is_empty() && method.oauth.is_none() {
         bail!(
             "method {} declares no credential, so there is no value to ask for",
             method.name
@@ -863,6 +917,7 @@ mod tests {
         run_is_unknown: bool,
         /// Overrides both, for the answers a probe should refuse rather than read.
         run_probe: Option<Response>,
+        cancel_oauth: bool,
     }
 
     impl CannedService {
@@ -872,6 +927,7 @@ mod tests {
                 sent: Mutex::new(Vec::new()),
                 run_is_unknown: false,
                 run_probe: None,
+                cancel_oauth: false,
             }
         }
 
@@ -900,6 +956,9 @@ mod tests {
     }
 
     impl ConnectorService for CannedService {
+        fn wait_for_oauth(&self) -> LocalBoxFuture<'_, bool> {
+            Box::pin(async { !self.cancel_oauth })
+        }
         fn request(&self, req: Request) -> LocalBoxFuture<'_, Option<Response>> {
             self.sent.lock().unwrap().push(req.clone());
             if let Request::InspectRun { run } = req {
@@ -1017,6 +1076,8 @@ mod tests {
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
             methods: vec![lns_ipc::ConnectorMethodView {
+                oauth: None,
+
                 name: "future".into(),
                 label: "Future sign-in".into(),
                 auth_label: Some("token".to_string()),
@@ -1124,6 +1185,8 @@ mod tests {
 
     fn method(name: &str, offerable: bool) -> lns_ipc::ConnectorMethodView {
         lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: name.into(),
             label: name.into(),
             auth_label: Some("token".to_string()),
@@ -1726,6 +1789,8 @@ mod tests {
     async fn a_method_declaring_no_credential_has_nothing_to_ask_for() {
         // A method that authenticates but declares no credential would otherwise prompt for a value with nowhere to put it.
         let bare = lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: "token".into(),
             label: "token".into(),
             auth_label: Some("token".to_string()),
@@ -1913,6 +1978,8 @@ mod tests {
     async fn connecting_asks_exactly_what_the_mechanism_asked_for_and_nothing_it_read_itself() {
         // The mechanism decides the fields, so a method setting two variables from one value is one question — and it is the service that says so.
         let two = lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: "token".into(),
             label: "token".into(),
             auth_label: Some("token".to_string()),
@@ -1978,5 +2045,131 @@ mod tests {
             [("token".to_string(), "first".to_string())].into(),
             "the value travels under the auth output both credentials draw on, which is the key the grant reads it back under"
         );
+    }
+    #[tokio::test]
+    async fn oauth_ctrl_c_cancels_the_service_operation_and_reports_terminal_states() {
+        for terminal in [
+            lns_ipc::OAuthProgress::Canceled,
+            lns_ipc::OAuthProgress::Expired,
+        ] {
+            let svc = CannedService {
+                cancel_oauth: true,
+                ..CannedService::with([
+                    Some(listing(vec![with_methods(vec![method("token", true)])])),
+                    Some(Response::ConnectorPending {
+                        session: "oauth/1".into(),
+                        progress: lns_ipc::OAuthProgress::Starting {
+                            destinations: vec!["https://auth.example/device".into()],
+                            scopes: vec!["read".into()],
+                        },
+                    }),
+                    Some(Response::ConnectorPending {
+                        session: "oauth/1".into(),
+                        progress: terminal,
+                    }),
+                ])
+            };
+            let result = drive(
+                ConnectorCommand::Connect(ConnectArgs {
+                    name: "some-provider".into(),
+                    method: None,
+                    label: Some("work".into()),
+                }),
+                &svc,
+                &[],
+                &cwd(),
+            )
+            .await;
+            assert!(result.is_err());
+            assert!(matches!(&svc.sent()[2],Request::CancelConnect{session} if session=="oauth/1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_oauth_discloses_registration_and_waits_without_spending_answer_rounds() {
+        let mut native = method("browser", true);
+        native.oauth = Some(lns_ipc::OAuthDisclosure {
+            destinations: vec!["https://auth.example/authorize".into()],
+            scopes: vec!["read".into()],
+            callback: Some("http://127.0.0.1:53682/callback".into()),
+        });
+        native.asks.clear();
+        let waiting = Some(Response::ConnectorPending {
+            session: "oauth/1".into(),
+            progress: lns_ipc::OAuthProgress::WaitingForBrowser {
+                authorization_endpoint: "https://auth.example/authorize".into(),
+                redirect_uri: "http://127.0.0.1:53682/callback".into(),
+            },
+        });
+        let mut responses = vec![Some(listing(vec![with_methods(vec![native])]))];
+        responses.extend(vec![waiting; 20]);
+        responses.push(Some(Response::ConnectorConnected {
+            name: "some-provider".into(),
+            connection: "work".into(),
+            invalidated: vec![],
+        }));
+        let svc = CannedService::with(responses);
+        let (code, seen) = drive(
+            ConnectorCommand::Connect(ConnectArgs {
+                name: "some-provider".into(),
+                method: None,
+                label: Some("work".into()),
+            }),
+            &svc,
+            &[],
+            &cwd(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(seen.contains("Requested scopes: read"));
+        assert!(seen.contains("Registered callback: http://127.0.0.1:53682/callback"));
+        assert_eq!(seen.matches("Opened the browser").count(), 1);
+        assert_eq!(
+            svc.sent()
+                .iter()
+                .filter(|r| matches!(r, Request::ConnectStatus { .. }))
+                .count(),
+            20
+        );
+        assert!(
+            !svc.sent()
+                .iter()
+                .any(|r| matches!(r, Request::AnswerConnect { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_progress_waits_without_collecting_answers() {
+        let svc = CannedService::with([
+            Some(listing(vec![with_methods(vec![method("token", true)])])),
+            Some(Response::ConnectorPending {
+                session: "oauth/1".into(),
+                progress: lns_ipc::OAuthProgress::DeviceAuthorization {
+                    verification_uri: "https://auth.example/device".into(),
+                    user_code: "ABCD".into(),
+                },
+            }),
+            Some(Response::ConnectorConnected {
+                name: "some-provider".into(),
+                connection: "work".into(),
+                invalidated: vec![],
+            }),
+        ]);
+        let (code, seen) = drive(
+            ConnectorCommand::Connect(ConnectArgs {
+                name: "some-provider".into(),
+                method: None,
+                label: Some("work".into()),
+            }),
+            &svc,
+            &[],
+            &cwd(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(seen.contains("ABCD"));
+        assert!(matches!(&svc.sent()[2],Request::ConnectStatus{session} if session=="oauth/1"));
     }
 }

@@ -951,7 +951,7 @@ fn signs_in_elsewhere(
     method: &lns_ipc::ConnectorMethodView,
     draft: &crate::tray::OfferDraft,
 ) -> bool {
-    method.carries_code && draft.connecting
+    (method.carries_code || method.oauth.is_some()) && draft.connecting
 }
 
 fn toggle(state: &mut DashboardState, id: &str) {
@@ -1776,6 +1776,8 @@ mod tests {
 
     fn method_that(carries_code: bool) -> lns_ipc::ConnectorMethodView {
         lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: "sign-in".into(),
             label: "sign-in".into(),
             auth_label: Some("sign-in".into()),
@@ -1791,6 +1793,21 @@ mod tests {
             runs_programs: false,
             carries_code,
         }
+    }
+
+    #[test]
+    fn native_oauth_sign_in_uses_the_card_or_cli_before_this_row_grants() {
+        let mut method = method_that(false);
+        method.oauth = Some(lns_ipc::OAuthDisclosure {
+            destinations: vec![],
+            scopes: vec![],
+            callback: None,
+        });
+        let mut draft = crate::tray::OfferDraft::default();
+        draft.connecting = true;
+        assert!(signs_in_elsewhere(&method, &draft));
+        draft.connecting = false;
+        assert!(!signs_in_elsewhere(&method, &draft));
     }
 
     #[test]

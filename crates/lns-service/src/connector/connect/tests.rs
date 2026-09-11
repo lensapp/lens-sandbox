@@ -77,6 +77,7 @@ impl OneMechanism {
 }
 
 impl Mechanisms for OneMechanism {
+    fn cancel_native(&self, _: &[u8]) {}
     fn for_method(
         &self,
         connector: &str,
@@ -129,6 +130,8 @@ fn asking(name: &str, secret: bool) -> Step {
 
 fn done(values: &[(&str, &str)], authority: &[&str]) -> Step {
     Step::Done(Outcome {
+        oauth: None,
+
         values: values
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -184,8 +187,11 @@ impl crate::connector::store::InstalledSet for FakeSet {
             .ok_or_else(|| std::io::Error::other("no such component"))
     }
 
-    fn remove(&self, _name: &str) -> std::io::Result<bool> {
-        Ok(false)
+    fn remove(&self, name: &str) -> std::io::Result<bool> {
+        let mut entries = self.entries.lock().unwrap();
+        let previous = entries.len();
+        entries.retain(|entry| entry.name != name);
+        Ok(entries.len() != previous)
     }
 }
 
@@ -694,6 +700,7 @@ fn a_card_that_collected_less_than_the_mechanism_asks_for_says_so_rather_than_ha
 struct AlwaysAsking(Parts);
 
 impl Mechanisms for AlwaysAsking {
+    fn cancel_native(&self, _: &[u8]) {}
     fn for_method(
         &self,
         _connector: &str,
@@ -838,3 +845,5 @@ fn a_method_that_carries_no_component_is_built_from_none() {
 
     assert_eq!(*mechanisms.given.lock().expect("given lock"), [None]);
 }
+
+mod native;

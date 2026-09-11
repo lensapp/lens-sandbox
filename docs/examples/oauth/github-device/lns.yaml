@@ -1,0 +1,30 @@
+apiVersion: lns.run/v1
+kind: connector
+name: github-native
+spec:
+  serves:
+    - api.github.com
+  methods:
+    - name: device
+      auth:
+        kind: oauth_device
+        label: GitHub account
+        help: Use your own GitHub OAuth app with device flow enabled.
+        clientId: REPLACE_WITH_REGISTERED_PUBLIC_CLIENT_ID
+        deviceAuthorizationEndpoint: https://github.com/login/device/code
+        tokenEndpoint: https://github.com/login/oauth/access_token
+        verificationHosts:
+          - github.com
+        scopes:
+          - read:user
+      egress:
+        http:
+          - match: api.github.com
+            verdict: allow
+      credentials:
+        - envVar: GITHUB_TOKEN
+          placeholder: github_LNSPLACEHOLDER0000000000
+          field: access_token
+          injections:
+            - kind: bearer_header
+              domain: api.github.com

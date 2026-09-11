@@ -249,7 +249,7 @@ fn render(asked: Entry, id: &str, outcome: AnswerOutcome) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::approval_flow::entries::{EntryState, EntryStore, FileEntryStore};
     use crate::approval_flow::notification::NoopNotifier;
@@ -599,11 +599,22 @@ mod tests {
 
     /// Grants whatever it is asked to, so the tests here pin the routing rather than the connector store.
     #[derive(Default)]
-    struct WillingPort {
+    pub(crate) struct WillingPort {
         granted: std::sync::Mutex<Vec<String>>,
     }
 
     impl crate::approval_flow::session::ConnectorPort for WillingPort {
+        fn current_offers(&self) -> Option<Vec<lns_ipc::ConnectorView>> {
+            None
+        }
+        fn current_supply(
+            &self,
+        ) -> Option<
+            std::collections::BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>,
+        > {
+            None
+        }
+
         fn connect(
             &self,
             _: &str,

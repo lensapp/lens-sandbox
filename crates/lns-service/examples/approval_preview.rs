@@ -90,6 +90,7 @@ fn dismiss_card(snapshot: &mut Snapshot, action: &CardAction) {
         CardAction::Decline { .. }
         | CardAction::BeginConnect { .. }
         | CardAction::AnswerConnect { .. }
+        | CardAction::OpenConnectBrowser { .. }
         | CardAction::OpenBrowser { .. }
         | CardAction::CloseAll => None,
     };

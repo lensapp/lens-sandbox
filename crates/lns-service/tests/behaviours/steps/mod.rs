@@ -35,3 +35,5 @@ pub mod sandbox_filesets;
 pub mod volume_management;
 pub mod volumes;
 pub mod workdir;
+
+pub mod connector_oauth;

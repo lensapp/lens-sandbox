@@ -71,3 +71,41 @@ fn a_method_with_nothing_to_authenticate_has_no_mechanism_to_run() {
 
     assert!(format!("{err:#}").contains("no authentication"), "{err:#}");
 }
+
+#[test]
+fn native_mechanism_selection_does_not_initialize_wasmtime() {
+    let native = engine();
+    native
+        .for_method(
+            "provider",
+            &method(serde_json::json!({"kind":"token"})),
+            None,
+        )
+        .unwrap();
+    for auth in [
+        serde_json::json!({"kind":"oauth_device","clientId":"id","deviceAuthorizationEndpoint":"https://auth.example/device","tokenEndpoint":"https://auth.example/token","verificationHosts":["auth.example"]}),
+        serde_json::json!({"kind":"oauth_authorization_code","clientId":"id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback"}}),
+    ] {
+        let prepared = native.for_method("provider", &method(auth), None).unwrap();
+        assert!(prepared.mechanism.native().is_some());
+        assert_eq!(prepared.host.bounds().call_seconds, 30);
+    }
+    assert!(
+        !native.runtime_initialized(),
+        "native authentication must not initialize Wasmtime"
+    );
+}
+
+#[test]
+fn unknown_authentication_cannot_fall_back_to_collecting_a_token() {
+    let native = engine();
+    let Err(error) = native.for_method(
+        "provider",
+        &method(serde_json::json!({"kind":"future_oauth_kind"})),
+        None,
+    ) else {
+        panic!("unknown mechanism")
+    };
+    assert!(error.to_string().contains("newer lns"));
+    assert!(!native.runtime_initialized());
+}

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 /// One connect in progress.
+#[derive(Clone)]
 pub struct Session {
     pub connector: String,
     /// The bytes the connect began against. A reinstall mid-exchange is a different implementation, and state is only ever handed back to the one that produced it (§3.2.6).
@@ -39,6 +40,7 @@ mod tests;
 
 /// Where a connect in progress lives. A handle this store did not mint is not one it will resume.
 pub trait Sessions: Send + Sync {
+    fn operations(&self) -> &super::operations::Operations;
     /// Opening also drops what nobody came back for: an abandoned connect holds secret material, and no one will ever call `take` on it.
     fn open(&self, session: Session, now_millis: u64) -> String;
     /// The session a handle names, taken rather than read, so one handle answers once.
@@ -50,11 +52,15 @@ pub trait Sessions: Send + Sync {
 /// The sessions this process holds. Nothing survives a restart, which is the point.
 #[derive(Default)]
 pub struct InMemorySessions {
+    native: super::operations::Operations,
     pub(super) open: Mutex<BTreeMap<String, Session>>,
     minted: Mutex<u64>,
 }
 
 impl Sessions for InMemorySessions {
+    fn operations(&self) -> &super::operations::Operations {
+        &self.native
+    }
     fn open(&self, session: Session, now_millis: u64) -> String {
         let mut minted = self.minted.lock().unwrap_or_else(|e| e.into_inner());
         *minted += 1;

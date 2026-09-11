@@ -26,6 +26,8 @@ You drive everything through one binary: the `lns` CLI.
 - **[Policy and approvals](policy.md)** — a run's own `decisions.yaml`, being asked
   about what no rule decides, closing a directory, the approval window, and editing
   the rules by hand.
+- **[Native OAuth examples](examples/oauth/)** — register public clients for
+  GitHub device authorization and Linear browser sign-in, then connect and grant.
 - **[Audit](audit.md)** — the per-run audit chain and verifying it with
   `lns audit`.
 - **[The background service](service.md)** — what `lns-service` does and managing

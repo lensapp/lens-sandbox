@@ -8,15 +8,28 @@ use super::{Answers, CallError, ExecOutput, HttpRequest, HttpResponse, Outcome, 
 
 /// What a mechanism exports. `token` implements it natively; a `code` method implements it in a component (§3.2.6).
 pub trait Mechanism: Send + Sync {
+    fn native(&self) -> Option<&super::oauth::flow::Native> {
+        None
+    }
     fn connect(&self, host: &Host, now_millis: u64) -> Result<Step>;
     fn resume(&self, host: &Host, state: &[u8], answers: &Answers, now_millis: u64)
     -> Result<Step>;
     fn refresh(&self, host: &Host, values: &Answers, now_millis: u64) -> Result<Outcome>;
+    fn refresh_private(
+        &self,
+        host: &Host,
+        connection: &crate::connector::store::Connection,
+        now_millis: u64,
+    ) -> Result<Outcome> {
+        self.refresh(host, &connection.values, now_millis)
+    }
     fn revoke(&self, host: &Host, values: &Answers, now_millis: u64) -> Result<()>;
 }
 
 /// The mechanism a method connects with, and the bounds lns holds around it. One implementation reads `token` natively; the other compiles the component the method carries (§3.2.6).
 pub trait Mechanisms: Send + Sync {
+    fn cancel_native(&self, state: &[u8]);
+
     fn for_method(
         &self,
         connector: &str,

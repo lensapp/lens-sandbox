@@ -19,6 +19,8 @@ fn view(name: &str, serves: &str, connections: Vec<&str>) -> ConnectorView {
         serves: vec![serves.to_string()],
         methods: vec![
             ConnectorMethodView {
+                oauth: None,
+
                 name: "token".to_string(),
                 label: "API token".to_string(),
                 auth_label: Some("token".to_string()),
@@ -35,6 +37,8 @@ fn view(name: &str, serves: &str, connections: Vec<&str>) -> ConnectorView {
                 carries_code: false,
             },
             ConnectorMethodView {
+                oauth: None,
+
                 name: "open".to_string(),
                 label: "open".to_string(),
                 auth_label: None,
@@ -241,6 +245,9 @@ impl FakeConnectorService {
 }
 
 impl ConnectorService for FakeConnectorService {
+    fn wait_for_oauth(&self) -> lns_cli::local_future::LocalBoxFuture<'_, bool> {
+        Box::pin(async { true })
+    }
     fn request(&self, req: Request) -> LocalBoxFuture<'_, Option<Response>> {
         self.requests.lock().unwrap().push(req.clone());
         let resp = self.respond(&req);

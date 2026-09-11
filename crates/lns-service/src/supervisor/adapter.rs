@@ -122,6 +122,9 @@ async fn decision_delivery_loop(
             RequestAction::BeginConnect { method, label } => {
                 session.begin_connect(&delivery.id, &method, &label);
             }
+            RequestAction::OpenConnectBrowser => {
+                session.open_connect_browser(&delivery.id);
+            }
             RequestAction::AnswerConnect { values } => {
                 session.answer_connect(&delivery.id, values);
             }
@@ -445,6 +448,11 @@ mod tests {
             action: RequestAction::AnswerConnect {
                 values: lns_ipc::SecretValues::default(),
             },
+        })
+        .unwrap();
+        tx.send(DecisionDelivery {
+            id: "r1".into(),
+            action: RequestAction::OpenConnectBrowser,
         })
         .unwrap();
         drop(tx);

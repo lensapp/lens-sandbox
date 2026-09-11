@@ -10,6 +10,9 @@ use tempfile::TempDir;
 
 #[derive(Debug, Default, World)]
 pub struct E2eWorld {
+    pub native_pending: Option<String>,
+    pub native_provider: Option<std::net::TcpListener>,
+    pub native_transport: Option<std::net::TcpStream>,
     pub result: Option<CliResult>,
     pub results: Vec<CliResult>,
     pub home: Option<TempDir>,

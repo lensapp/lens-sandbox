@@ -10,7 +10,13 @@ use crate::sandbox::FilesetEntry;
 use crate::spec;
 
 /// The values each built-in `auth.kind` produces, which a credential's `field` names. A `code` method declares its own instead, and any other kind parses and leaves its method unofferable (§3.2.2).
-const BUILT_IN_OUTPUTS: [(&str, &[&str]); 1] = [("token", &["token"])];
+const BUILT_IN_OUTPUTS: [(&str, &[&str]); 3] = [
+    ("token", &["token"]),
+    ("oauth_device", &["access_token"]),
+    ("oauth_authorization_code", &["access_token"]),
+];
+
+pub mod oauth;
 
 /// The kind whose mechanism the connector carries itself, so what it produces is the document's to say rather than this version's (§3.2.6).
 const CODE: &str = "code";
@@ -157,6 +163,17 @@ impl Default for Limits {
 const CODE_ONLY_FIELDS: [&str; 5] = ["component", "outputs", "hosts", "exec", "limits"];
 
 impl Auth {
+    pub fn oauth(&self) -> Option<Result<oauth::OAuth>> {
+        match self.kind.as_str() {
+            "oauth_device" | "oauth_authorization_code" => {
+                let mut block = self.extra.clone();
+                block.insert("kind".into(), self.kind.clone().into());
+                Some(oauth::parse(serde_json::json!(block)))
+            }
+            _ => None,
+        }
+    }
+
     /// The `code` block this auth carries, decoded strictly. `None` for every other kind, and an error where the kind is `code` and the block will not read.
     pub fn code(&self) -> Option<Result<CodeAuth>> {
         if self.kind != CODE {
@@ -503,6 +520,10 @@ fn validate_auth(auth: &Auth) -> Result<()> {
             auth.kind
         );
     }
+    if let Some(oauth) = auth.oauth() {
+        oauth?;
+        return Ok(());
+    }
     if let Some(unknown) = auth.extra.keys().next() {
         bail!(
             "unknown field {unknown:?} in a {:?} auth: strict decoding holds for a kind this version knows",
@@ -684,6 +705,68 @@ mod tests {
         with_methods(&format!(
             r#"[{{"name":"token","auth":{{"kind":"token"}},"credentials":[{{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"{field}}}]}}]"#
         ))
+    }
+
+    #[test]
+    fn native_oauth_has_one_public_output_and_strict_registration() {
+        for kind in ["oauth_device", "oauth_authorization_code"] {
+            let auth = if kind == "oauth_device" {
+                serde_json::json!({"kind":kind,"clientId":"public-id","deviceAuthorizationEndpoint":"https://auth.example/device","tokenEndpoint":"https://auth.example/token","verificationHosts":["auth.example"],"scopes":["read"]})
+            } else {
+                serde_json::json!({"kind":kind,"clientId":"public-id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback","port":53682},"scopes":["read"]})
+            };
+            let read = |auth: &serde_json::Value| {
+                parse(&with_methods(
+                    &serde_json::json!([{"name":"sign-in","auth":auth}]).to_string(),
+                ))
+            };
+            let valid = read(&auth).unwrap();
+            assert!(
+                valid.spec.methods[0].is_offerable(),
+                "native OAuth must be offerable"
+            );
+            assert_eq!(
+                valid.spec.methods[0].auth.as_ref().unwrap().outputs(),
+                Some(vec!["access_token".into()])
+            );
+            let mut invalid = auth.clone();
+            invalid["clientSecret"] = "secret".into();
+            assert!(format!("{:#}", read(&invalid).unwrap_err()).contains("confidential"));
+            for (field, value) in [
+                ("clientId", serde_json::json!("")),
+                ("clientId", serde_json::json!("two words")),
+                ("scopes", serde_json::json!(["read write"])),
+                ("scopes", serde_json::json!([""])),
+                (
+                    "tokenEndpoint",
+                    serde_json::json!("http://auth.example/token"),
+                ),
+                (
+                    "tokenEndpoint",
+                    serde_json::json!("https://user@auth.example/token"),
+                ),
+                (
+                    "tokenEndpoint",
+                    serde_json::json!("https://auth.example/token?secret=x"),
+                ),
+                (
+                    "tokenEndpoint",
+                    serde_json::json!("https://auth.example/token#fragment"),
+                ),
+                ("component", serde_json::json!("./a.wasm")),
+                ("outputs", serde_json::json!(["refresh_token"])),
+                ("hosts", serde_json::json!(["auth.example"])),
+                ("exec", serde_json::json!(false)),
+                ("limits", serde_json::json!({})),
+                ("resource", serde_json::json!("api")),
+            ] {
+                let mut invalid = auth.clone();
+                invalid[field] = value;
+                assert!(read(&invalid).is_err(), "{kind}: {field} must fail");
+            }
+            let credential = serde_json::json!([{"name":"sign-in","auth":auth,"credentials":[{"placeholder":"LNSPLACEHOLDER0000000000","field":"refresh_token"}]}]);
+            assert!(parse(&with_methods(&credential.to_string())).is_err());
+        }
     }
 
     #[test]
@@ -963,7 +1046,7 @@ mod tests {
     #[test]
     fn a_kind_this_version_does_not_know_is_still_unofferable_beside_one_it_does() {
         let document = with_methods(
-            r#"[{"name":"sign-in","auth":{"kind":"oauth_device"}},{"name":"paste","auth":{"kind":"token"}}]"#,
+            r#"[{"name":"sign-in","auth":{"kind":"future_oauth_kind"}},{"name":"paste","auth":{"kind":"token"}}]"#,
         );
         let parsed = parse(&document).expect("both methods parse");
         assert!(
@@ -988,7 +1071,7 @@ mod tests {
     fn a_kind_this_version_does_not_know_may_carry_a_field_this_version_reserves() {
         // §3.2.2: an unknown kind decodes nothing, so a future kind that legitimately declares hosts must not make today's lns refuse the whole connector.
         let document = with_methods(
-            r#"[{"name":"browser","auth":{"kind":"oauth_device","hosts":["auth.some-provider.example"]}},{"name":"token","auth":{"kind":"token"}}]"#,
+            r#"[{"name":"browser","auth":{"kind":"future_oauth_kind","hosts":["auth.some-provider.example"]}},{"name":"token","auth":{"kind":"token"}}]"#,
         );
         let parsed =
             parse(&document).expect("an unknown kind carrying a reserved field still parses");
@@ -1006,7 +1089,7 @@ mod tests {
             r#""component":{"path":"x"}"#,
         ] {
             let document = with_methods(&format!(
-                r#"[{{"name":"browser","auth":{{"kind":"oauth_device",{future}}}}},{{"name":"token","auth":{{"kind":"token"}}}}]"#
+                r#"[{{"name":"browser","auth":{{"kind":"future_oauth_kind",{future}}}}},{{"name":"token","auth":{{"kind":"token"}}}}]"#
             ));
             let parsed = parse(&document).expect("an unknown kind decodes nothing of its auth");
             assert!(!parsed.spec.methods[0].is_offerable(), "{future}");
@@ -1017,7 +1100,7 @@ mod tests {
     #[test]
     fn a_kind_this_version_does_not_know_may_carry_exec() {
         let document = with_methods(
-            r#"[{"name":"browser","auth":{"kind":"oauth_device","exec":true}},{"name":"token","auth":{"kind":"token"}}]"#,
+            r#"[{"name":"browser","auth":{"kind":"future_oauth_kind","exec":true}},{"name":"token","auth":{"kind":"token"}}]"#,
         );
         let parsed = parse(&document).expect("an unknown kind decodes nothing of its auth");
         assert!(!parsed.spec.methods[0].is_offerable());
@@ -1172,7 +1255,7 @@ mod tests {
     fn a_field_under_a_kind_this_version_does_not_know_is_not_judged() {
         // §3.2.2: a reader that does not know a kind does not decode that auth at all, so what it produces is not this version's to check.
         let document = with_methods(
-            r#"[{"name":"future","auth":{"kind":"oauth_device"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","field":"access_token"}]}]"#,
+            r#"[{"name":"future","auth":{"kind":"future_oauth_kind"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000","field":"access_token"}]}]"#,
         );
         let parsed = parse(&document).expect("an unknown kind parses");
         let method = &parsed.spec.methods[0];
@@ -1187,7 +1270,7 @@ mod tests {
     #[test]
     fn a_credential_naming_no_field_under_an_unknown_kind_draws_on_nothing_this_version_can_name() {
         let document = with_methods(
-            r#"[{"name":"future","auth":{"kind":"oauth_device"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}]"#,
+            r#"[{"name":"future","auth":{"kind":"future_oauth_kind"},"credentials":[{"envVar":"SOME_TOKEN","placeholder":"some_LNSPLACEHOLDER0000000000"}]}]"#,
         );
         let parsed = parse(&document).expect("an unknown kind parses");
         let method = &parsed.spec.methods[0];
@@ -1345,7 +1428,7 @@ mod tests {
     #[test]
     fn an_unknown_auth_kind_parses_and_leaves_its_method_unofferable() {
         let def = parse(&with_methods(
-            r#"[{"name":"browser","auth":{"kind":"oauth_device","clientId":"abc","scopes":["read"]}},{"name":"token","auth":{"kind":"token"}}]"#,
+            r#"[{"name":"browser","auth":{"kind":"future_oauth_kind","clientId":"abc","scopes":["read"]}},{"name":"token","auth":{"kind":"token"}}]"#,
         ))
         .expect(
             "§3.2.2 makes an unknown kind a stated exception to strict decoding: refusing the document would make every improved connector uninstallable on a machine that had not upgraded",

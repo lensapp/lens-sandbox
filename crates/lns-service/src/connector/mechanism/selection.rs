@@ -12,6 +12,10 @@ use super::real::RealMechanisms;
 use super::traits::{Mechanisms, Prepared};
 
 impl Mechanisms for RealMechanisms {
+    fn cancel_native(&self, state: &[u8]) {
+        super::oauth::flow::cancel(self.browser.as_ref(), state);
+    }
+
     fn for_method(
         &self,
         connector: &str,
@@ -21,7 +25,47 @@ impl Mechanisms for RealMechanisms {
         let Some(auth) = method.auth.as_ref() else {
             bail!("method {} has no authentication to run", method.name);
         };
+        if let Some(config) = auth.oauth() {
+            let config = config?;
+            let mut hosts = vec![config.token_endpoint().to_string()];
+            match &config {
+                lns_artifact::connector::oauth::OAuth::Device {
+                    device_authorization_endpoint,
+                    ..
+                } => hosts.push(device_authorization_endpoint.clone()),
+                lns_artifact::connector::oauth::OAuth::AuthorizationCode { .. } => {}
+            }
+            let hosts = hosts
+                .iter()
+                .map(|endpoint| {
+                    let url = lns_artifact::connector::oauth::endpoint(endpoint)?;
+                    Ok(format!(
+                        "{}:{}",
+                        url.host_str().unwrap_or_default(),
+                        url.port_or_known_default().unwrap_or(443)
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Prepared {
+                mechanism: Box::new(super::oauth::flow::Native {
+                    config,
+                    browser: self.browser.clone(),
+                }),
+                host: self.host(
+                    connector,
+                    Bounds {
+                        hosts,
+                        exec: false,
+                        call_seconds: 30,
+                        session_seconds: 900,
+                    },
+                ),
+            });
+        }
         let Some(code) = auth.code() else {
+            if auth.kind != "token" {
+                bail!("this authentication kind requires a newer lns");
+            }
             let outputs = auth.outputs().unwrap_or_else(|| vec![auth.kind.clone()]);
             return Ok(Prepared {
                 mechanism: Box::new(super::token::Token::new(outputs, auth.label())),
@@ -36,7 +80,7 @@ impl Mechanisms for RealMechanisms {
             );
         };
         Ok(Prepared {
-            mechanism: Box::new(self.runtime.compile(&bytes)?),
+            mechanism: Box::new(self.runtime()?.compile(&bytes)?),
             host: self.host(connector, Bounds::of(&code)),
         })
     }

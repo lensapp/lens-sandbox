@@ -13,7 +13,8 @@ use crate::connector::session::Sessions as _;
 
 /// The engine every component on this machine runs in, and the thread that spends their deadlines.
 pub struct RealMechanisms {
-    pub(super) runtime: Runtime,
+    pub(super) runtime: std::sync::OnceLock<Result<Runtime, String>>,
+    pub(super) browser: Arc<dyn super::oauth::browser::Browser>,
     http: Arc<dyn Http>,
     exec: Arc<dyn Exec>,
     entropy: Arc<dyn Entropy>,
@@ -21,6 +22,11 @@ pub struct RealMechanisms {
 }
 
 impl RealMechanisms {
+    #[cfg(test)]
+    pub(super) fn runtime_initialized(&self) -> bool {
+        self.runtime.get().is_some()
+    }
+
     pub fn new() -> Result<Self> {
         Self::lending(
             Arc::new(RealHttp),
@@ -38,7 +44,8 @@ impl RealMechanisms {
         recorder: Arc<dyn Recorder>,
     ) -> Result<Self> {
         Ok(Self {
-            runtime: Runtime::new()?,
+            runtime: std::sync::OnceLock::new(),
+            browser: Arc::new(RealBrowser::default()),
             http,
             exec,
             entropy,
@@ -48,11 +55,15 @@ impl RealMechanisms {
 
     /// Spends one second of every running component's deadline, and sweeps what nobody came back for. This thread does nothing else: whatever ran a component here would stop the clock its own deadline is measured in.
     pub fn tick(self: &Arc<Self>) {
+        self.native_worker();
         let ticking = Arc::clone(self);
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
-                ticking.runtime.tick_once();
+                if let Some(Ok(runtime)) = ticking.runtime.get() {
+                    runtime.tick_once();
+                }
+                ticking.browser.sweep(now_millis());
                 sessions().sweep(now_millis());
             }
         });
@@ -60,6 +71,65 @@ impl RealMechanisms {
 }
 
 impl RealMechanisms {
+    fn native_worker(self: &Arc<Self>) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let mechanisms = self.clone();
+        let slots = Arc::new(tokio::sync::Semaphore::new(8));
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let swept = crate::connector::real::with_stores(|store| {
+                    crate::connector::connect::Driver {
+                        store: *store,
+                        mechanisms: mechanisms.as_ref(),
+                        sessions: sessions(),
+                        now_millis: now_millis(),
+                    }
+                    .sweep_native();
+                    Ok(())
+                });
+                if let Err(error) = swept {
+                    crate::log::warn!("could not expire OAuth operations: {error:#}");
+                }
+                for operation in sessions().operations().due(now_millis()) {
+                    let Ok(slot) = slots.clone().try_acquire_owned() else {
+                        break;
+                    };
+                    let mechanisms = mechanisms.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _slot = slot;
+                        let result = crate::connector::real::with_stores(|store| {
+                            crate::connector::connect::Driver {
+                                store: *store,
+                                mechanisms: mechanisms.as_ref(),
+                                sessions: sessions(),
+                                now_millis: now_millis(),
+                            }
+                            .advance_native(&operation, now_millis)
+                        });
+                        if let Err(error) = result {
+                            crate::log::warn!("OAuth background operation failed: {error:#}");
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn with_browser(mut self, browser: Arc<dyn super::oauth::browser::Browser>) -> Self {
+        self.browser = browser;
+        self
+    }
+
+    pub(super) fn runtime(&self) -> Result<&Runtime> {
+        self.runtime
+            .get_or_init(|| Runtime::new().map_err(|e| e.to_string()))
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!(e.clone()))
+    }
+
     pub(super) fn host(&self, connector: &str, bounds: Bounds) -> Host {
         Host::new(
             connector,
@@ -345,5 +415,162 @@ mod tests {
             .expect_err("nothing is listening there");
 
         assert!(matches!(refused, CallError::Failed(_)), "{refused:?}");
+    }
+}
+
+#[derive(Default)]
+struct RealBrowser {
+    listeners: std::sync::Mutex<std::collections::BTreeMap<String, Listener>>,
+}
+
+struct Listener {
+    lease: super::oauth::browser::Lease,
+    socket: std::net::TcpListener,
+}
+
+impl super::oauth::browser::Browser for RealBrowser {
+    fn prepare(
+        &self,
+        owner: &str,
+        path: &str,
+        port: Option<u16>,
+        state: &str,
+        expires: u64,
+    ) -> Result<(String, String)> {
+        let socket = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port.unwrap_or(0)))
+            .map_err(|_| anyhow::anyhow!("could not bind OAuth callback on 127.0.0.1:{}; close the application using that port or register another callback", port.unwrap_or(0)))?;
+        socket.set_nonblocking(true)?;
+        let actual = socket.local_addr()?.port();
+        let handle = hex::encode(RealEntropy.bytes(32));
+        let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+        if listeners.len() >= 8 {
+            anyhow::bail!("too many OAuth callbacks are open");
+        }
+        listeners.insert(
+            handle.clone(),
+            Listener {
+                lease: super::oauth::browser::Lease::new(owner, path, state, expires),
+                socket,
+            },
+        );
+        Ok((handle, format!("http://127.0.0.1:{actual}{path}")))
+    }
+
+    fn open(&self, url: &str) -> Result<()> {
+        let handle = tokio::runtime::Handle::try_current()?;
+        off_the_runtime_thread(|| {
+            handle.block_on(async {
+                #[cfg(target_os = "macos")]
+                let program = "open";
+                #[cfg(not(target_os = "macos"))]
+                let program = "xdg-open";
+                let status = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    tokio::process::Command::new(program)
+                        .arg(url)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .kill_on_drop(true)
+                        .status(),
+                )
+                .await;
+                match status {
+                    Ok(Ok(status)) if status.success() => Ok(()),
+                    _ => anyhow::bail!("could not open the system browser"),
+                }
+            })
+        })
+    }
+
+    fn poll(&self, owner: &str, handle: &str, now: u64) -> Result<super::oauth::browser::Callback> {
+        let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = listeners
+            .get_mut(handle)
+            .ok_or_else(|| anyhow::anyhow!("OAuth callback is no longer open"))?;
+        listener.lease.live(owner, now)?;
+        let request = read_callback(&listener.socket)?;
+        let callback = listener.lease.accept(owner, now, &request)?;
+        if !matches!(callback, super::oauth::browser::Callback::Ignore) {
+            listeners.remove(handle);
+        }
+        Ok(callback)
+    }
+
+    fn cancel(&self, handle: &str) {
+        self.listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(handle);
+    }
+    fn sweep(&self, now: u64) {
+        self.listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, l| !l.lease.expired(now));
+    }
+}
+
+fn read_callback(listener: &std::net::TcpListener) -> Result<String> {
+    use std::io::{Read, Write};
+    let (mut stream, _) = match listener.accept() {
+        Ok(pair) => pair,
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(String::new()),
+        Err(_) => anyhow::bail!("OAuth callback listener failed"),
+    };
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(100)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_millis(100)))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 1024];
+    while bytes.len() <= 8192 && std::time::Instant::now() < deadline {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+        }
+        if bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let result = if bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+        String::from_utf8(bytes).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let body = "<!doctype html><meta charset=utf-8><title>LNS authorization</title><script>history.replaceState(null,'',location.pathname)</script><p>Return to LNS to see authorization status.</p>";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    Ok(result)
+}
+
+pub(crate) struct NativeAccess;
+impl crate::connector::real::NativeAccess for NativeAccess {
+    fn status(&self, session: &str) -> Result<crate::connector::connect::Turn> {
+        crate::connector::real::with_stores(|store| driver(*store)?.native_status(session))
+    }
+    fn open_browser(&self, session: &str) -> Result<()> {
+        crate::connector::real::with_stores(|store| driver(*store)?.open_native_browser(session))
+    }
+    fn cancel(&self, session: &str) -> Result<()> {
+        crate::connector::real::with_stores(|store| {
+            driver(*store)?.abandon_handle(session);
+            Ok(())
+        })
+    }
+    fn offers(
+        &self,
+        holder: &crate::connector::store::GrantHolder,
+    ) -> Result<Vec<lns_ipc::ConnectorView>> {
+        crate::connector::real::read_offers(holder)
+    }
+    fn supply(
+        &self,
+        holder: &crate::connector::store::GrantHolder,
+    ) -> Result<std::collections::BTreeMap<String, crate::approval_flow::protocol::GrantedPayload>>
+    {
+        crate::connector::real::read_granted_supply(holder)
     }
 }

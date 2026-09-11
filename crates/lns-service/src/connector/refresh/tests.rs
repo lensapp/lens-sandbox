@@ -10,6 +10,9 @@ use crate::connector::mechanism::{Answers, Bounds, Outcome, Step};
 
 fn connection(expires_at_millis: Option<u64>) -> Connection {
     Connection {
+        oauth: None,
+        generation: 0,
+
         method: "sign-in".to_string(),
         authority: Authority::default(),
         values: [("access_token".to_string(), "old".to_string())].into(),
@@ -134,6 +137,7 @@ impl Renewing {
 }
 
 impl Mechanisms for Renewing {
+    fn cancel_native(&self, _: &[u8]) {}
     fn for_method(
         &self,
         _connector: &str,
@@ -183,6 +187,9 @@ fn holding(expires_at_millis: Option<u64>) -> Rig {
             "some-provider",
             "work",
             Connection {
+                oauth: None,
+                generation: 0,
+
                 method: "sign-in".to_string(),
                 authority: Authority::of(["repo:read"]),
                 values: [("access_token".to_string(), "old".to_string())].into(),
@@ -205,6 +212,8 @@ fn only_connection(rig: &Rig) -> Connection {
 fn a_renewal_replaces_the_values_and_the_expiry_it_came_with() {
     let rig = holding(Some(1_000));
     let mechanisms = Renewing::answering(Ok(Outcome {
+        oauth: None,
+
         values: [("access_token".to_string(), "fresh".to_string())].into(),
         authority: std::collections::BTreeSet::new(),
         expires_at_millis: Some(9_000_000),
@@ -241,6 +250,8 @@ fn a_renewal_that_reports_scopes_replaces_the_ones_the_connection_held() {
     // Carry-forward is for what a renewal omits; what it reports is what the connection now records (§3.2.4).
     let rig = holding(Some(1_000));
     let mechanisms = Renewing::answering(Ok(Outcome {
+        oauth: None,
+
         values: [("access_token".to_string(), "fresh".to_string())].into(),
         authority: std::collections::BTreeSet::from(["repo:write".to_string()]),
         expires_at_millis: Some(9_000_000),
@@ -269,6 +280,8 @@ fn a_renewal_keeps_only_what_the_method_says_it_produces() {
     // A renewal returns the same shape a connect does, so it is filtered by the same rule (§3.2.6).
     let rig = holding(Some(1_000));
     let mechanisms = Renewing::answering(Ok(Outcome {
+        oauth: None,
+
         values: [
             ("access_token".to_string(), "fresh".to_string()),
             ("id_token".to_string(), "never declared".to_string()),
@@ -301,6 +314,8 @@ fn a_renewal_missing_what_the_method_produces_leaves_the_connection_as_it_was() 
     // A renewal replaces the connection whole, so a hole would overwrite a working value and push the expiry that disarms it forward (§4.1).
     let rig = holding(Some(1_000));
     let mechanisms = Renewing::answering(Ok(Outcome {
+        oauth: None,
+
         values: std::collections::BTreeMap::new(),
         authority: std::collections::BTreeSet::new(),
         expires_at_millis: Some(9_000_000),
@@ -397,6 +412,8 @@ fn a_renewal_reporting_different_authority_names_the_runs_that_must_decide_again
         )
         .expect("a run that granted this connection");
     let mechanisms = Renewing::answering(Ok(Outcome {
+        oauth: None,
+
         values: [("access_token".to_string(), "fresh".to_string())].into(),
         authority: std::collections::BTreeSet::from(["repo:write".to_string()]),
         expires_at_millis: Some(9_000_000),
@@ -516,6 +533,8 @@ fn a_renewal_that_ran_while_nobody_watched_is_written_down() {
     // It leaves no state behind, so the entry is the only record there will ever be that it happened (§3.2.6).
     let rig = holding(Some(1_000));
     let mechanisms = Renewing::answering(Ok(Outcome {
+        oauth: None,
+
         values: [("access_token".to_string(), "fresh".to_string())].into(),
         authority: std::collections::BTreeSet::new(),
         expires_at_millis: Some(9_000_000),
@@ -544,6 +563,8 @@ fn a_renewal_this_machine_could_not_store_is_still_a_renewal_that_ran() {
     let rig = holding(Some(1_000));
     *rig.values.fail_save.lock().expect("map lock") = true;
     let mechanisms = Renewing::answering(Ok(Outcome {
+        oauth: None,
+
         values: [("access_token".to_string(), "fresh".to_string())].into(),
         authority: std::collections::BTreeSet::new(),
         expires_at_millis: Some(9_000_000),
@@ -681,4 +702,57 @@ fn a_connection_reporting_no_expiry_is_left_alone_by_the_pass() {
     .expect("the pass runs");
 
     assert!(renewed.is_empty());
+}
+
+#[test]
+fn native_renewal_retries_back_off_and_stop_when_reconnect_or_no_refresh_is_required() {
+    let schedule = Schedule::default();
+    let mut connection = connection(Some(100));
+    connection.oauth = Some(crate::connector::mechanism::oauth::token::OAuthState {
+        client_id: "public".into(),
+        token_endpoint: "https://auth.example/token".into(),
+        kind: "oauth_device".into(),
+        refresh_token: Some("refresh".into()),
+        reconnect_required: false,
+    });
+    let mut held = BTreeMap::from([("work".into(), connection)]);
+    for (attempt, delay) in [
+        (0, 60_000),
+        (60_000, 120_000),
+        (180_000, 240_000),
+        (420_000, 480_000),
+        (900_000, 900_000),
+        (1_800_000, 900_000),
+    ] {
+        schedule.tried("provider", Of::Connection("work"), attempt);
+        schedule.failed_native("provider", "work");
+        assert!(
+            schedule
+                .due("provider", &held, attempt + delay - 1)
+                .is_empty()
+        );
+        assert_eq!(schedule.due("provider", &held, attempt + delay).len(), 1);
+    }
+    schedule.succeeded("provider", "work");
+    assert_eq!(schedule.due("provider", &held, 1_860_000).len(), 1);
+    held.get_mut("work")
+        .unwrap()
+        .oauth
+        .as_mut()
+        .unwrap()
+        .reconnect_required = true;
+    assert!(schedule.due("provider", &held, u64::MAX).is_empty());
+    held.get_mut("work")
+        .unwrap()
+        .oauth
+        .as_mut()
+        .unwrap()
+        .reconnect_required = false;
+    held.get_mut("work")
+        .unwrap()
+        .oauth
+        .as_mut()
+        .unwrap()
+        .refresh_token = None;
+    assert!(schedule.due("provider", &held, u64::MAX).is_empty());
 }

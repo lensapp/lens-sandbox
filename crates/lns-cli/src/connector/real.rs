@@ -40,6 +40,14 @@ impl RealConnectorService {
 }
 
 impl ConnectorService for RealConnectorService {
+    fn wait_for_oauth(&self) -> LocalBoxFuture<'_, bool> {
+        Box::pin(async {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => false,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => true,
+            }
+        })
+    }
     fn request(&self, req: Request) -> LocalBoxFuture<'_, Option<Response>> {
         Box::pin(async move { crate::service::real::send_request(&self.socket, &req).await })
     }

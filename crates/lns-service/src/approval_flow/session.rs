@@ -46,6 +46,7 @@ pub struct PendingPrompt {
 /// The round a card is waiting on the person to answer, as it must draw it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectAsk {
+    pub oauth: Option<lns_ipc::OAuthProgress>,
     /// Whose words the message and the field labels are, when they came from code nobody can read (§3.2.6).
     pub connector: String,
     pub method: String,
@@ -133,6 +134,10 @@ pub enum ConnectionChoice {
 /// One round of a connect the card is driving, because a mechanism decides what to ask and how many times to ask it (§3.2.6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectRound {
+    Pending {
+        session: String,
+        progress: lns_ipc::OAuthProgress,
+    },
     Asks {
         session: String,
         message: String,
@@ -149,6 +154,10 @@ pub enum ConnectRound {
 
 /// The connector store's side of a card decision. Every method writes to disk, so the session takes it as a port (§3.2.4).
 pub trait ConnectorPort: Send + Sync {
+    fn current_offers(&self) -> Option<Vec<ConnectorView>>;
+
+    fn current_supply(&self) -> Option<BTreeMap<String, GrantedPayload>>;
+
     /// Stores what an authentication returned, answering with the runs whose grant its authority no longer matches.
     fn connect(
         &self,
@@ -172,6 +181,8 @@ pub trait ConnectorPort: Send + Sync {
 
 /// Driving one sign-in round by round. It is its own port because only the card drives rounds: the Approvals row grants through a connection this machine already holds (§3.2.6).
 pub trait ConnectRoundPort: Send + Sync {
+    fn poll_connect(&self, session: &str) -> Result<ConnectRound, String>;
+    fn open_connect_browser(&self, session: &str) -> Result<(), String>;
     /// Opens an exchange, rather than collecting one form and pressing once.
     fn begin_connect(&self, name: &str, method: &str, label: &str) -> Result<ConnectRound, String>;
 
@@ -554,6 +565,42 @@ impl ApprovalSession {
         } = signing;
         self.count_settled(id);
         match round {
+            Ok(ConnectRound::Pending { session, progress }) => {
+                if !self.still_holding(id, &offer.name) {
+                    port.abandon_connect(&session);
+                    return DecisionOutcome::Resolved;
+                }
+                if matches!(
+                    progress,
+                    lns_ipc::OAuthProgress::Canceled | lns_ipc::OAuthProgress::Expired
+                ) {
+                    port.abandon_connect(&session);
+                    self.tell(if progress == lns_ipc::OAuthProgress::Canceled {
+                        "OAuth authorization canceled"
+                    } else {
+                        "OAuth authorization expired"
+                    });
+                } else {
+                    self.hold_round(
+                        id,
+                        OpenRound {
+                            port,
+                            ask: ConnectAsk {
+                                oauth: Some(progress),
+                                connector: offer.name.clone(),
+                                method: method.clone(),
+                                message: String::new(),
+                                fields: Vec::new(),
+                                from_code: false,
+                            },
+                            offer,
+                            method,
+                            handle: session,
+                        },
+                    );
+                }
+                self.represent(&[id.to_string()]);
+            }
             Ok(ConnectRound::Asks {
                 session,
                 message,
@@ -570,6 +617,7 @@ impl ApprovalSession {
                     OpenRound {
                         port,
                         ask: ConnectAsk {
+                            oauth: None,
                             connector: offer.name.clone(),
                             method: method.clone(),
                             message,
@@ -615,6 +663,54 @@ impl ApprovalSession {
     /// Whether this card is still the one that opened the sign-in: it exists, and it still holds the offer that was disclosed. Anything else settled it while the component was working — another surface answering, or the run going away.
     fn still_holding(&self, id: &str, connector: &str) -> bool {
         self.offer_of(id).is_some_and(|held| held.name == connector)
+    }
+
+    pub fn open_connect_browser(&self, id: &str) {
+        if let Some(open) = self.round_of(id)
+            && let Err(why) = open.port.open_connect_browser(&open.handle)
+        {
+            self.tell(&why);
+        }
+    }
+
+    fn poll_native_rounds(&self) {
+        let rounds: Vec<_> = self
+            .rounds
+            .lock()
+            .expect("rounds mutex poisoned")
+            .iter()
+            .filter(|(_, open)| open.ask.oauth.is_some())
+            .map(|(id, open)| (id.clone(), open.clone()))
+            .collect();
+        for (id, open) in rounds {
+            let round = open.port.poll_connect(&open.handle);
+            if matches!(&round,Ok(ConnectRound::Pending{progress,..}) if Some(progress)==open.ask.oauth.as_ref())
+            {
+                continue;
+            }
+            let removed = {
+                let mut rounds = self.rounds.lock().expect("rounds mutex poisoned");
+                if rounds
+                    .get(&id)
+                    .is_some_and(|current| current.handle == open.handle)
+                {
+                    rounds.remove(&id)
+                } else {
+                    None
+                }
+            };
+            if removed.is_some() {
+                self.settle_round(
+                    &id,
+                    Signing {
+                        port: open.port,
+                        offer: open.offer,
+                        method: open.method,
+                    },
+                    round,
+                );
+            }
+        }
     }
 
     fn count_settled(&self, id: &str) {
@@ -1240,6 +1336,8 @@ impl ApprovalSession {
     }
 
     pub fn tick_timeouts(&self, now: Instant) -> usize {
+        self.poll_native_rounds();
+        self.refresh_connector_supply();
         let expired: Vec<String> = {
             let pending = self.pending.lock().expect("pending mutex poisoned");
             pending
@@ -1249,6 +1347,35 @@ impl ApprovalSession {
                 .collect()
         };
         expired.iter().filter(|id| self.timeout_one(id)).count()
+    }
+
+    fn refresh_connector_supply(&self) {
+        let Some(port) = self.connectors.get() else {
+            return;
+        };
+        let supply_changed = port
+            .current_supply()
+            .is_some_and(|current| replace_changed(&self.granted, current));
+        let offers_changed = port
+            .current_offers()
+            .is_some_and(|current| replace_changed(&self.offers, current));
+        if !supply_changed && !offers_changed {
+            return;
+        }
+        let own = self
+            .persisted
+            .lock()
+            .expect("persisted mutex poisoned")
+            .clone();
+        *self.policy.lock().expect("policy mutex poisoned") = self.effective_over(&own);
+        let mut message = self.policy_message();
+        if supply_changed {
+            let supply = self.granted_layer().unwrap_or_default();
+            message.credentials = Some(supply.credentials);
+            message.env = Some(supply.env);
+            message.files = Some(supply.files);
+        }
+        let _ = self.sink.send(HostFrame::Policy(message));
     }
 
     fn timeout_one(&self, id: &str) -> bool {
@@ -1441,6 +1568,15 @@ fn raw_destination<'a>(action: &'a str, host: &str) -> Option<&'a str> {
     let (named, _) = split_destination(destination);
     // The gate strips the port from `host` before sending it, so only brackets come off here.
     (named == unbracketed(host)).then_some(destination)
+}
+
+fn replace_changed<T: PartialEq>(state: &Mutex<T>, current: T) -> bool {
+    let mut state = state.lock().expect("connector state mutex poisoned");
+    if *state == current {
+        return false;
+    }
+    *state = current;
+    true
 }
 
 #[cfg(test)]
@@ -2370,6 +2506,12 @@ pub(crate) mod tests {
     }
 
     impl ConnectRoundPort for ScriptedRounds {
+        fn open_connect_browser(&self, _: &str) -> Result<(), String> {
+            Err("browser is unavailable".into())
+        }
+        fn poll_connect(&self, _: &str) -> Result<ConnectRound, String> {
+            self.next()
+        }
         fn begin_connect(&self, _: &str, _: &str, _: &str) -> Result<ConnectRound, String> {
             self.next()
         }
@@ -2388,6 +2530,140 @@ pub(crate) mod tests {
                 .expect("abandoned lock")
                 .push(session.to_string());
         }
+    }
+
+    #[test]
+    fn native_oauth_card_keeps_its_operation_open_without_a_continue_press() {
+        let f = raising_a_card(None, Policy::default());
+        let rounds = ScriptedRounds::answering(vec![ConnectRound::Pending {
+            session: "oauth/1".into(),
+            progress: lns_ipc::OAuthProgress::DeviceAuthorization {
+                verification_uri: "https://auth.example/device".into(),
+                user_code: "ABCD".into(),
+            },
+        }]);
+        f.0.set_connect_round_port(rounds.clone());
+        f.0.begin_connect("r1", "token", "work");
+        assert!(
+            rounds.abandoned.lock().unwrap().is_empty(),
+            "native OAuth must keep waiting automatically"
+        );
+        assert!(f.0.round_of("r1").is_some());
+    }
+
+    #[test]
+    fn native_oauth_card_polls_automatically_and_grants_only_while_its_run_still_waits() {
+        for close in [false, true] {
+            let f = raising_a_card(None, Policy::default());
+            let session = Arc::new(f.0);
+            let port = Arc::new(FakeConnectorPort::default());
+            session.set_connector_port(port.clone());
+            let progress = ConnectRound::Pending {
+                session: "oauth/1".into(),
+                progress: lns_ipc::OAuthProgress::WaitingForBrowser {
+                    authorization_endpoint: "https://auth.example/authorize".into(),
+                    redirect_uri: "http://127.0.0.1:53682/callback".into(),
+                },
+            };
+            let mut script = vec![progress; 20];
+            script.push(ConnectRound::Connected {
+                connection: "work".into(),
+                invalidated: vec![],
+            });
+            let rounds = ScriptedRounds::answering(script);
+            session.set_connect_round_port(rounds.clone());
+            session.begin_connect("r1", "token", "work");
+            for _ in 0..19 {
+                session.poll_native_rounds();
+            }
+            assert!(port.granted.lock().unwrap().is_empty());
+            if close {
+                let session = session.clone();
+                *rounds.interleave.lock().unwrap() = Some(Box::new(move || session.withdraw_run()));
+            }
+            session.poll_native_rounds();
+            assert!(session.round_of("r1").is_none());
+            assert_eq!(port.granted.lock().unwrap().len(), usize::from(!close));
+        }
+    }
+
+    #[test]
+    fn native_oauth_card_close_and_terminal_states_cancel_without_granting() {
+        for terminal in [
+            None,
+            Some(lns_ipc::OAuthProgress::Canceled),
+            Some(lns_ipc::OAuthProgress::Expired),
+        ] {
+            let f = raising_a_card(None, Policy::default());
+            let port = Arc::new(FakeConnectorPort::default());
+            f.0.set_connector_port(port.clone());
+            let mut script = vec![ConnectRound::Pending {
+                session: "oauth/1".into(),
+                progress: lns_ipc::OAuthProgress::Starting {
+                    destinations: vec![],
+                    scopes: vec![],
+                },
+            }];
+            if let Some(progress) = &terminal {
+                script.push(ConnectRound::Pending {
+                    session: "oauth/1".into(),
+                    progress: progress.clone(),
+                });
+            }
+            let rounds = ScriptedRounds::answering(script);
+            f.0.set_connect_round_port(rounds.clone());
+            f.0.begin_connect("r1", "token", "work");
+            if terminal.is_some() {
+                f.0.poll_native_rounds();
+            } else {
+                f.0.dismiss_request("r1");
+            }
+            assert!(f.0.round_of("r1").is_none());
+            assert_eq!(rounds.abandoned.lock().unwrap().as_slice(), ["oauth/1"]);
+            assert!(port.granted.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn native_browser_retry_reports_failure_without_losing_the_pending_card() {
+        let f = raising_a_card(None, Policy::default());
+        let rounds = ScriptedRounds::answering(vec![ConnectRound::Pending {
+            session: "oauth/1".into(),
+            progress: lns_ipc::OAuthProgress::Starting {
+                destinations: vec![],
+                scopes: vec![],
+            },
+        }]);
+        f.0.set_connect_round_port(rounds);
+        f.0.begin_connect("r1", "token", "work");
+        f.0.open_connect_browser("r1");
+        assert!(f.0.round_of("r1").is_some());
+        assert!(
+            f.1.informed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message.contains("browser is unavailable"))
+        );
+        f.0.open_connect_browser("missing");
+    }
+    #[test]
+    fn a_native_operation_started_after_its_card_closes_is_canceled() {
+        let f = raising_a_card(None, Policy::default());
+        let session = Arc::new(f.0);
+        let rounds = ScriptedRounds::answering(vec![ConnectRound::Pending {
+            session: "oauth/1".into(),
+            progress: lns_ipc::OAuthProgress::Starting {
+                destinations: vec![],
+                scopes: vec![],
+            },
+        }]);
+        let closing = session.clone();
+        *rounds.interleave.lock().unwrap() = Some(Box::new(move || closing.withdraw_run()));
+        session.set_connect_round_port(rounds.clone());
+        session.begin_connect("r1", "token", "work");
+        assert!(session.round_of("r1").is_none());
+        assert_eq!(rounds.abandoned.lock().unwrap().as_slice(), ["oauth/1"]);
     }
 
     /// A card mid-sign-in: one round drawn, the next answer finishing it.
@@ -2720,11 +2996,21 @@ pub(crate) mod tests {
         connected: StdMutex<Vec<Connected>>,
         granted: StdMutex<Vec<Granted>>,
         opens: Option<GrantedPayload>,
+        supply: StdMutex<Option<BTreeMap<String, GrantedPayload>>>,
+        offers: StdMutex<Option<Vec<ConnectorView>>>,
         invalidated: Vec<String>,
         refuse: Option<String>,
     }
 
     impl ConnectorPort for FakeConnectorPort {
+        fn current_offers(&self) -> Option<Vec<ConnectorView>> {
+            self.offers.lock().unwrap().clone()
+        }
+
+        fn current_supply(&self) -> Option<BTreeMap<String, GrantedPayload>> {
+            self.supply.lock().unwrap().clone()
+        }
+
         fn connect(
             &self,
             name: &str,
@@ -2777,6 +3063,8 @@ pub(crate) mod tests {
             digest: "sha256:abc".to_string(),
             serves: vec!["api.some-provider.example".to_string()],
             methods: vec![lns_ipc::ConnectorMethodView {
+                oauth: None,
+
                 name: method.to_string(),
                 label: method.to_string(),
                 auth_label: (!connections.is_empty()).then(|| "token".to_string()),
@@ -4004,6 +4292,81 @@ pub(crate) mod tests {
             placeholder: Some(format!("{id}-LNSPLACEHOLDER00")),
             injections: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_port_without_a_reconciliation_snapshot_preserves_the_existing_grant() {
+        let (session, _, _, mut rx) = fixture();
+        session.set_connector_port(Arc::new(
+            crate::approval_flow::answering::tests::WillingPort::default(),
+        ));
+        session.apply_granted_egress(
+            "provider",
+            GrantedPayload {
+                egress: allowing("api.example.test"),
+                credentials: vec![credential("TOKEN")],
+                ..Default::default()
+            },
+        );
+        let original = session.policy_message();
+        let _ = policy_frame(&mut rx);
+        session.refresh_connector_supply();
+        assert_eq!(session.policy_message(), original);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn renewed_authority_reoffers_the_connector_to_a_running_sandbox() {
+        let (s, _, _, mut rx) = fixture();
+        let port = Arc::new(FakeConnectorPort::default());
+        s.set_connector_port(port.clone());
+        *port.offers.lock().unwrap() = Some(vec![offering("token", &["work"])]);
+        s.refresh_connector_supply();
+        assert_eq!(s.held_patterns(), vec!["api.some-provider.example"]);
+        let _ = policy_frame(&mut rx);
+        *port.offers.lock().unwrap() = Some(vec![]);
+        s.refresh_connector_supply();
+        assert!(s.held_patterns().is_empty());
+        let _ = policy_frame(&mut rx);
+    }
+
+    #[test]
+    fn connector_updates_disarm_running_credentials_and_clear_removed_grants() {
+        let (s, _n, _store, mut rx) = fixture();
+        let port = Arc::new(FakeConnectorPort::default());
+        s.set_connector_port(port.clone());
+        let mut active = GrantedPayload {
+            egress: allowing("api.example.test"),
+            credentials: vec![credential("TOKEN")],
+            ..Default::default()
+        };
+        active.credentials[0].injections.push(
+            crate::approval_flow::protocol::WireInjection::Header {
+                domain: "api.example.test".into(),
+                header: "Authorization".into(),
+                value: "Bearer old".into(),
+            },
+        );
+        s.apply_granted_egress("provider", active.clone());
+        let _ = policy_frame(&mut rx);
+        *port.supply.lock().unwrap() = Some(BTreeMap::from([("provider".into(), active.clone())]));
+        s.refresh_connector_supply();
+        assert!(
+            rx.try_recv().is_err(),
+            "an unchanged snapshot sends no frame"
+        );
+        active.credentials[0].injections.clear();
+        *port.supply.lock().unwrap() = Some(BTreeMap::from([("provider".into(), active)]));
+        s.refresh_connector_supply();
+        let updated = policy_frame(&mut rx);
+        assert!(updated.credentials.unwrap()[0].injections.is_empty());
+        *port.supply.lock().unwrap() = Some(BTreeMap::new());
+        s.refresh_connector_supply();
+        let removed = policy_frame(&mut rx);
+        assert_eq!(removed.credentials, Some(vec![]));
+        assert_eq!(removed.env, Some(BTreeMap::new()));
+        assert_eq!(removed.files, Some(vec![]));
+        assert!(s.current_policy().network.egress.http.is_empty());
     }
 
     #[test]
