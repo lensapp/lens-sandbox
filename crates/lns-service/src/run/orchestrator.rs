@@ -507,13 +507,28 @@ async fn orchestrate(
     );
 
     #[cfg(target_os = "macos")]
-    let console_fd = {
-        let run_dir = upper_disk_path
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        vm::diag_console::spawn(run_dir.join("console.log"), args.debug)?
-    };
+    let run_dir = upper_disk_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    #[cfg(target_os = "macos")]
+    let console_fd = vm::diag_console::spawn(run_dir.join("console.log"), args.debug)?;
+
+    // Before the VM, so a backend that cannot serve the link refuses the run rather than booting a guest with no network.
+    #[cfg(target_os = "macos")]
+    let netdev = vm::netdev::real::start(&run_dir, |k| std::env::var_os(k)).await?;
+    #[cfg(target_os = "macos")]
+    {
+        let backend = netdev.backend;
+        log::info!("Network", "{} ({})", backend.label(), backend.detail());
+        crate::audit::record_net_backend(
+            &run_id,
+            &microvm,
+            backend.label(),
+            backend.detail(),
+            &crate::clock::RealClock,
+        )?;
+    }
 
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
@@ -543,6 +558,8 @@ async fn orchestrate(
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
+        #[cfg(target_os = "macos")]
+        net: netdev.attachment(),
         debug: args.debug,
         exec,
     };
@@ -612,6 +629,8 @@ async fn orchestrate(
     let boot_start = std::time::Instant::now();
     let mut vm_task = tokio::spawn(async move {
         let _volume_leases = volume_leases;
+        #[cfg(target_os = "macos")]
+        let _netdev = netdev;
         vm::boot(spec, None).await
     });
 
