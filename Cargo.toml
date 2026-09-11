@@ -18,6 +18,7 @@ members = [
     "crates/bump-mise",
     "crates/coverage-strip-ast",
     "crates/e2e-tests",
+    "tests/parity",
 ]
 # Workspace members NOT in default-members are opt-in:
 #   - bump-kernel       : operator tooling for kernel pin bumps
@@ -26,6 +27,10 @@ members = [
 #   - e2e-tests         : Layer 1 (E2E) cucumber harness; spawns real
 #                         binaries with side effects — excluded from
 #                         the coverage gate. Run via `make e2e`.
+#   - parity            : phase-one guest-network parity harness
+#                         (tests/parity). Needs a macOS host, two signed
+#                         builds and a real microVM; CI compiles it and
+#                         runs its unit tests, never the harness itself.
 #   - lns-supervisor    : in-guest supervisor binary built on
 #                         lens-sandbox-core (git-pinned). Cross-built to
 #                         linux-musl for the guest; excluded from
