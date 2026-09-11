@@ -8,7 +8,6 @@ use anyhow::{Context, Result};
 use etherparse::{IpNumber, Ipv4Header, PacketBuilder, TcpHeader, UdpHeader};
 use futures_util::{SinkExt, StreamExt};
 use netstack_smoltcp::StackBuilder;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinSet;
 
@@ -272,10 +271,8 @@ fn note_refusal(refused: &Refused, destination: SocketAddr, refusal: Refusal) {
         .expect("refusals poisoned")
         .insert(destination)
     {
-        log::debug!(
-            "the guest network refused {destination}: {}",
-            refusal.reason()
-        );
+        let reason = refusal.reason();
+        log::debug!("the guest network refused {destination}: {reason}");
     }
 }
 
@@ -286,10 +283,9 @@ async fn accept_tcp(mut listener: netstack_smoltcp::TcpListener) {
 }
 
 async fn carry_tcp(mut guest: netstack_smoltcp::TcpStream, destination: SocketAddr) {
+    // copy_bidirectional shuts each write half down on the other's EOF, and dropping both ends closes what is left.
     if let Ok(mut host) = tokio::net::TcpStream::connect(destination).await {
         let _ = tokio::io::copy_bidirectional(&mut guest, &mut host).await;
-        let _ = host.shutdown().await;
-        let _ = guest.shutdown().await;
     }
 }
 
@@ -373,13 +369,9 @@ async fn relay_udp(
     }
 }
 
+/// The link is IPv4-only, so every flow the boundary lets through is carried from an IPv4 socket.
 async fn host_socket(destination: SocketAddr) -> std::io::Result<tokio::net::UdpSocket> {
-    let bind = if destination.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let socket = tokio::net::UdpSocket::bind(bind).await?;
+    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
     socket.connect(destination).await?;
     Ok(socket)
 }
@@ -410,11 +402,14 @@ mod tests {
     use smoltcp::socket::{dhcpv4, tcp, udp};
     use smoltcp::time::Instant;
     use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, IpEndpoint, Ipv4Address};
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const GUEST_MAC: [u8; 6] = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
     const SUBNET: Ipv4Addr = Ipv4Addr::new(192, 168, 127, 0);
     const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// What the test's upstream nameserver answers a question this gateway does not resolve itself.
+    const FORWARDED: &[u8] = b"from the upstream";
 
     struct TestResolver;
 
@@ -429,7 +424,7 @@ mod tests {
         }
 
         fn forward(&self, _query: Vec<u8>) -> BoxFuture<'static, std::io::Result<Vec<u8>>> {
-            Box::pin(async { Err(std::io::Error::other("no upstream in a test")) })
+            Box::pin(async { Ok(FORWARDED.to_vec()) })
         }
     }
 
@@ -486,6 +481,7 @@ mod tests {
 
     /// A real guest for the stack under test: smoltcp over the other end of the frame channels, with nothing of this crate in it.
     struct FakeGuest {
+        next_port: u16,
         device: GuestDevice,
         iface: Interface,
         sockets: SocketSet<'static>,
@@ -525,6 +521,7 @@ mod tests {
             let mut sockets = SocketSet::new(Vec::new());
             let dhcp = sockets.add(dhcpv4::Socket::new());
             Self {
+                next_port: 6000,
                 device,
                 iface,
                 sockets,
@@ -612,7 +609,12 @@ mod tests {
             }
         }
 
-        async fn resolve(&mut self, name: &str, gateway: Ipv4Addr) -> Vec<u8> {
+        async fn question(
+            &mut self,
+            gateway: Ipv4Addr,
+            name: &str,
+            kind: hickory_proto::rr::RecordType,
+        ) -> Vec<u8> {
             let mut question = hickory_proto::op::Message::new(
                 0x1234,
                 hickory_proto::op::MessageType::Query,
@@ -620,12 +622,20 @@ mod tests {
             );
             question.add_query(hickory_proto::op::Query::query(
                 hickory_proto::rr::Name::from_ascii(format!("{name}.")).unwrap(),
-                hickory_proto::rr::RecordType::A,
+                kind,
             ));
             let server = SocketAddr::new(IpAddr::V4(gateway), dns::PORT);
-            let handle = self.bind_udp(5353);
+            let handle = self.bind_udp(self.next_port);
+            self.next_port += 1;
             self.exchange(handle, server, &question.to_vec().unwrap())
                 .await
+        }
+
+        async fn ask(&mut self, name: &str, gateway: Ipv4Addr) -> hickory_proto::op::Message {
+            let answer = self
+                .question(gateway, name, hickory_proto::rr::RecordType::A)
+                .await;
+            hickory_proto::op::Message::from_vec(&answer).expect("a DNS answer")
         }
 
         fn open(&mut self, destination: SocketAddr, local_port: u16) -> SocketHandle {
@@ -641,46 +651,19 @@ mod tests {
             handle
         }
 
-        async fn connected(&mut self, handle: SocketHandle, within: Duration) -> bool {
+        async fn wait_until(
+            &mut self,
+            handle: SocketHandle,
+            within: Duration,
+            ready: impl Fn(&tcp::Socket) -> bool,
+        ) -> bool {
             let deadline = tokio::time::Instant::now() + within;
-            loop {
+            let mut reached = false;
+            while !reached && tokio::time::Instant::now() < deadline {
                 self.settle().await;
-                if self.sockets.get::<tcp::Socket>(handle).may_send() {
-                    return true;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return false;
-                }
+                reached = ready(self.sockets.get::<tcp::Socket>(handle));
             }
-        }
-
-        async fn half_closed(&mut self, handle: SocketHandle, within: Duration) -> bool {
-            let deadline = tokio::time::Instant::now() + within;
-            loop {
-                self.settle().await;
-                if matches!(
-                    self.sockets.get::<tcp::Socket>(handle).state(),
-                    tcp::State::Closed | tcp::State::CloseWait | tcp::State::TimeWait
-                ) {
-                    return true;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return false;
-                }
-            }
-        }
-
-        async fn closed(&mut self, handle: SocketHandle, within: Duration) -> bool {
-            let deadline = tokio::time::Instant::now() + within;
-            loop {
-                self.settle().await;
-                if self.sockets.get::<tcp::Socket>(handle).state() == tcp::State::Closed {
-                    return true;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return false;
-                }
-            }
+            reached
         }
     }
 
@@ -688,24 +671,38 @@ mod tests {
         Config::for_subnet(SUBNET, boundary)
     }
 
+    type Refusal3 = (SocketAddr, Refusal, Option<Vec<u8>>);
+
+    fn refused_by(ingress: Option<Ingress>) -> Option<Refusal3> {
+        match ingress {
+            Some(Ingress::Refused {
+                destination,
+                refusal,
+                reset,
+            }) => Some((destination, refusal, reset)),
+            _ => None,
+        }
+    }
+
+    fn leased_by(ingress: Option<Ingress>) -> Option<dhcp::Reply> {
+        match ingress {
+            Some(Ingress::Dhcp(reply)) => Some(reply),
+            _ => None,
+        }
+    }
+
     fn udp_packet(destination: &str, payload: &[u8]) -> Vec<u8> {
-        let to: SocketAddr = destination.parse().unwrap();
-        let IpAddr::V4(ip) = to.ip() else {
-            unreachable!("the fixtures are IPv4")
-        };
-        let builder =
-            PacketBuilder::ipv4([192, 168, 127, 2], ip.octets(), PACKET_TTL).udp(45_000, to.port());
+        let to: std::net::SocketAddrV4 = destination.parse().unwrap();
+        let builder = PacketBuilder::ipv4([192, 168, 127, 2], to.ip().octets(), PACKET_TTL)
+            .udp(45_000, to.port());
         let mut packet = Vec::with_capacity(builder.size(payload.len()));
         builder.write(&mut packet, payload).unwrap();
         packet
     }
 
     fn tcp_packet(destination: &str, syn: bool) -> Vec<u8> {
-        let to: SocketAddr = destination.parse().unwrap();
-        let IpAddr::V4(ip) = to.ip() else {
-            unreachable!("the fixtures are IPv4")
-        };
-        let builder = PacketBuilder::ipv4([192, 168, 127, 2], ip.octets(), PACKET_TTL).tcp(
+        let to: std::net::SocketAddrV4 = destination.parse().unwrap();
+        let builder = PacketBuilder::ipv4([192, 168, 127, 2], to.ip().octets(), PACKET_TTL).tcp(
             45_000,
             to.port(),
             0x1000,
@@ -730,10 +727,9 @@ mod tests {
         };
         let packet = udp_packet("255.255.255.255:67", &discover);
 
-        let Some(Ingress::Dhcp(reply)) = classify(&config(Boundary::around(SUBNET, 24)), &packet)
-        else {
-            panic!("the guest's own gateway leases its address");
-        };
+        let reply = leased_by(classify(&config(Boundary::around(SUBNET, 24)), &packet))
+            .expect("the guest's own gateway leases its address");
+
         assert_eq!(
             reply.to,
             ReplyTo::Unicast {
@@ -757,17 +753,12 @@ mod tests {
 
     #[test]
     fn a_datagram_for_any_other_gateway_port_is_dropped_without_a_reply() {
-        let Some(Ingress::Refused {
-            destination,
-            refusal,
-            reset,
-        }) = classify(
+        let (destination, refusal, reset) = refused_by(classify(
             &config(Boundary::around(SUBNET, 24)),
             &udp_packet("192.168.127.1:8080", b"x"),
-        )
-        else {
-            panic!("there is no control API on this gateway");
-        };
+        ))
+        .expect("there is no control API on this gateway");
+
         assert_eq!(destination, "192.168.127.1:8080".parse().unwrap());
         assert_eq!(refusal, Refusal::GuestSubnet);
         assert_eq!(reset, None, "a refused datagram is dropped, not answered");
@@ -775,18 +766,13 @@ mod tests {
 
     #[test]
     fn a_syn_to_a_refused_destination_is_answered_with_a_reset() {
-        let Some(Ingress::Refused {
-            refusal,
-            reset: Some(reset),
-            ..
-        }) = classify(
+        let (_, refusal, reset) = refused_by(classify(
             &config(Boundary::around(SUBNET, 24)),
             &tcp_packet("127.0.0.1:8080", true),
-        )
-        else {
-            panic!("a refused connection fails at once");
-        };
+        ))
+        .expect("a refused connection fails at once");
         assert_eq!(refusal, Refusal::Loopback);
+        let reset = reset.expect("the guest is answered rather than left waiting");
 
         let (header, rest) = Ipv4Header::from_slice(&reset).unwrap();
         assert_eq!(Ipv4Addr::from(header.source), Ipv4Addr::new(127, 0, 0, 1));
@@ -804,22 +790,23 @@ mod tests {
 
     #[test]
     fn a_later_packet_of_a_refused_connection_is_dropped_without_another_reset() {
-        let Some(Ingress::Refused { reset, .. }) = classify(
+        let (_, _, reset) = refused_by(classify(
             &config(Boundary::around(SUBNET, 24)),
             &tcp_packet("127.0.0.1:8080", false),
-        ) else {
-            panic!("every packet of a refused flow stays refused");
-        };
+        ))
+        .expect("every packet of a refused flow stays refused");
+
         assert_eq!(reset, None, "only the opening SYN is worth an answer");
     }
 
     #[test]
     fn an_allowed_destination_is_forwarded_to_the_stack() {
         let boundary = Boundary::around(SUBNET, 24);
-        assert_eq!(
-            classify(&config(boundary), &tcp_packet("93.184.216.34:443", true)),
-            Some(Ingress::Forward)
-        );
+        let carried = || classify(&config(boundary), &tcp_packet("93.184.216.34:443", true));
+
+        assert_eq!(carried(), Some(Ingress::Forward));
+        assert_eq!(refused_by(carried()), None, "nothing was refused");
+        assert_eq!(leased_by(carried()), None, "nothing was leased");
         assert_eq!(
             classify(&config(boundary), &udp_packet("1.1.1.1:443", b"x")),
             Some(Ingress::Forward)
@@ -832,6 +819,7 @@ mod tests {
             .icmpv4_echo_request(1, 1);
         let mut packet = Vec::with_capacity(builder.size(0));
         builder.write(&mut packet, &[]).unwrap();
+
         assert_eq!(
             classify(&config(Boundary::around(SUBNET, 24)), &packet),
             Some(Ingress::Forward)
@@ -851,14 +839,14 @@ mod tests {
         truncated_tcp.truncate(24);
         assert_eq!(classify(&config(boundary), &truncated_tcp), None);
 
-        let mut not_dhcp = udp_packet("255.255.255.255:67", b"not a lease request");
-        not_dhcp.truncate(not_dhcp.len());
+        let not_dhcp = udp_packet("255.255.255.255:67", b"not a lease request");
         assert_eq!(classify(&config(boundary), &not_dhcp), None);
     }
 
     #[test]
     fn the_link_leases_the_second_address_of_the_subnet_from_its_first() {
         let config = Config::for_subnet(Ipv4Addr::new(10, 9, 8, 0), Boundary::Permissive);
+
         assert_eq!(config.lease.gateway, Ipv4Addr::new(10, 9, 8, 1));
         assert_eq!(config.lease.guest, Ipv4Addr::new(10, 9, 8, 2));
         assert_eq!(config.lease.netmask, Ipv4Addr::new(255, 255, 255, 0));
@@ -958,10 +946,8 @@ mod tests {
         assert_eq!(lease.router, Some(Ipv4Address::new(192, 168, 127, 1)));
         assert_eq!(lease.dns, vec![Ipv4Address::new(192, 168, 127, 1)]);
 
-        let answer = guest
-            .resolve("example.test", Ipv4Addr::new(192, 168, 127, 1))
-            .await;
-        let answer = hickory_proto::op::Message::from_vec(&answer).expect("a DNS answer");
+        let gateway = Ipv4Addr::new(192, 168, 127, 1);
+        let answer = guest.ask("example.test", gateway).await;
         assert_eq!(answer.metadata.id, 0x1234);
         assert_eq!(
             answer.answers[0].data,
@@ -992,9 +978,28 @@ mod tests {
             "the second datagram of a flow reuses the host socket the first opened"
         );
 
+        assert_eq!(
+            guest
+                .ask("nowhere.test", gateway)
+                .await
+                .metadata
+                .response_code,
+            hickory_proto::op::ResponseCode::ServFail,
+            "a name the host cannot resolve is a failure the guest can see"
+        );
+        assert_eq!(
+            guest
+                .question(gateway, "example.test", hickory_proto::rr::RecordType::MX)
+                .await,
+            FORWARDED,
+            "a question this gateway does not answer itself goes upstream"
+        );
+
         let handle = guest.open(address, 40_000);
         assert!(
-            guest.connected(handle, PATIENCE).await,
+            guest
+                .wait_until(handle, PATIENCE, |socket| socket.may_send())
+                .await,
             "a permitted destination is connected to on the host"
         );
         guest
@@ -1023,8 +1028,20 @@ mod tests {
         }
         assert_eq!(back, b"pong");
         assert!(
-            guest.half_closed(handle, PATIENCE).await,
+            guest
+                .wait_until(handle, PATIENCE, |socket| !socket.may_recv())
+                .await,
             "the host closing its end closes the guest's"
+        );
+
+        guest.sockets.get_mut::<tcp::Socket>(handle).close();
+        assert!(
+            guest
+                .wait_until(handle, PATIENCE, |socket| {
+                    socket.state() == tcp::State::Closed
+                })
+                .await,
+            "the guest closing its own end ends the connection"
         );
         assert_eq!(&served.await.unwrap(), b"ping!", "the host heard the guest");
     }
@@ -1040,7 +1057,11 @@ mod tests {
         for destination in [loopback, "192.168.127.1:80".parse().unwrap()] {
             let handle = guest.open(destination, 40_001 + destination.port() % 100);
             assert!(
-                guest.closed(handle, PATIENCE).await,
+                guest
+                    .wait_until(handle, PATIENCE, |socket| {
+                        socket.state() == tcp::State::Closed
+                    })
+                    .await,
                 "{destination} must be refused at once, not opened and not left to time out"
             );
         }

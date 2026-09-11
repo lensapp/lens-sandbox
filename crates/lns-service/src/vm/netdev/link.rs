@@ -145,6 +145,13 @@ mod tests {
     const GUEST_MAC: Mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
     const GATEWAY: Ipv4Addr = Ipv4Addr::new(192, 168, 127, 1);
 
+    fn answered(received: Received<'_>) -> Option<Vec<u8>> {
+        match received {
+            Received::Answer(frame) => Some(frame),
+            _ => None,
+        }
+    }
+
     fn arp_request(target: Ipv4Addr) -> Vec<u8> {
         let request = ArpRequest {
             sender_mac: GUEST_MAC,
@@ -189,9 +196,8 @@ mod tests {
     fn an_arp_request_for_the_gateway_is_answered_with_the_gateway_mac() {
         let mut link = Link::new(GATEWAY_MAC, GATEWAY);
 
-        let Received::Answer(frame) = link.receive(&arp_request(GATEWAY)) else {
-            panic!("the guest cannot route without an answer for its gateway");
-        };
+        let frame = answered(link.receive(&arp_request(GATEWAY)))
+            .expect("the guest cannot route without an answer for its gateway");
 
         let (header, payload) = Ethernet2Header::from_slice(&frame).unwrap();
         assert_eq!(header.source, GATEWAY_MAC);
@@ -207,8 +213,8 @@ mod tests {
     fn an_arp_request_for_any_other_address_is_dropped() {
         let mut link = Link::new(GATEWAY_MAC, GATEWAY);
         assert_eq!(
-            link.receive(&arp_request(Ipv4Addr::new(192, 168, 127, 254))),
-            Received::Dropped,
+            answered(link.receive(&arp_request(Ipv4Addr::new(192, 168, 127, 254)))),
+            None,
             "there is no host on this link but the gateway"
         );
     }

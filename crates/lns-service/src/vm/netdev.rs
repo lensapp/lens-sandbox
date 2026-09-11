@@ -267,25 +267,6 @@ mod tests {
         std::mem::forget(vm);
     }
 
-    struct SilentResolver;
-
-    impl dns::Resolver for SilentResolver {
-        fn lookup(
-            &self,
-            _name: String,
-        ) -> futures_util::future::BoxFuture<'static, std::io::Result<Vec<std::net::IpAddr>>>
-        {
-            Box::pin(async { Err(std::io::Error::other("not asked in this test")) })
-        }
-
-        fn forward(
-            &self,
-            _query: Vec<u8>,
-        ) -> futures_util::future::BoxFuture<'static, std::io::Result<Vec<u8>>> {
-            Box::pin(async { Err(std::io::Error::other("not asked in this test")) })
-        }
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_served_device_answers_the_guests_first_question_over_the_socket_pair() {
         let pair = device_pair().unwrap();
@@ -294,7 +275,7 @@ mod tests {
         let vm = UnixDatagram::from_std(vm).unwrap();
         let _running = serve(
             pair.host,
-            Arc::new(SilentResolver),
+            Arc::new(resolver::SystemResolver::from_resolv_conf("")),
             Boundary::around(GUEST_NETWORK, GUEST_PREFIX),
         )
         .expect("the stack comes up over a socket pair");

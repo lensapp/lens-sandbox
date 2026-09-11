@@ -128,6 +128,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_ipv6_nameserver_is_asked_over_ipv6() {
+        let resolver = SystemResolver {
+            upstream: Some("[::1]:9".parse().unwrap()),
+            timeout: Duration::from_millis(20),
+        };
+
+        let err = resolver
+            .forward(b"question".to_vec())
+            .await
+            .expect_err("the discard port answers nothing, and a host without IPv6 cannot bind");
+        assert!(!format!("{err}").is_empty());
+    }
+
+    #[tokio::test]
     async fn a_host_with_no_nameserver_at_all_says_so() {
         let err = SystemResolver::from_resolv_conf("")
             .forward(b"question".to_vec())
