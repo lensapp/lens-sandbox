@@ -84,6 +84,9 @@ const UNUSABLE_WAIT: Duration = Duration::from_millis(100);
 
 const PACKET_TTL: u8 = 64;
 
+/// A relay still running this long after its run was cancelled is a leak, and the service says so.
+const RELAY_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 /// How many distinct refused destinations one run logs before it only counts them.
 const MAX_LOGGED_REFUSALS: usize = 1024;
 
@@ -174,6 +177,27 @@ impl Drop for Running {
         self.relays.token.cancel();
         self.relays.tracker.close();
         self.tasks.abort_all();
+        watch_relays(self.relays.clone());
+    }
+}
+
+/// A cancelled relay gives its host socket back at its next poll; the run is over either way, so the wait is detached.
+fn watch_relays(relays: Relays) {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(outliving_relays(relays));
+    }
+}
+
+async fn outliving_relays(relays: Relays) {
+    if tokio::time::timeout(RELAY_SHUTDOWN_GRACE, relays.tracker.wait())
+        .await
+        .is_err()
+    {
+        let alive = relays.tracker.len();
+        log::warn!(
+            "{alive} network relays of a stopped run are still running after {} seconds",
+            RELAY_SHUTDOWN_GRACE.as_secs()
+        );
     }
 }
 
@@ -3011,6 +3035,11 @@ mod tests {
         tokio::time::timeout(PATIENCE, relays.tracker.wait())
             .await
             .expect("the relay that carried the flow has ended");
+        assert_eq!(
+            relays.tracker.len(),
+            0,
+            "no relay of the run outlives the run itself"
+        );
         let unheld = tokio::time::timeout(PATIENCE, async {
             loop {
                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -3028,6 +3057,58 @@ mod tests {
             guest.device.outbound.send(Vec::new()).await.is_err(),
             "and nothing reads the link"
         );
+    }
+
+    /// One wait for the relays of a stopped run, driven with time under the test's own control.
+    fn waited_for(relays: Relays) -> Vec<String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a runtime with a clock");
+        crate::test_env::captured_messages(|| {
+            runtime.block_on(async {
+                tokio::time::pause();
+                outliving_relays(relays).await;
+            });
+        })
+    }
+
+    #[test]
+    fn a_relay_that_outlives_the_run_it_belonged_to_is_named_in_the_service_log() {
+        let relays = Relays::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime to spawn the relay on");
+        runtime.block_on(async {
+            let _parked = relays.tracker.spawn(std::future::pending::<()>());
+        });
+        relays.tracker.close();
+
+        let said = waited_for(relays);
+
+        assert!(
+            said.iter()
+                .any(|message| message.contains("1 network relay")
+                    && message.contains("still running")),
+            "a run that leaves a relay behind is visible in the service log, said: {said:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_relays_have_all_ended_says_nothing() {
+        let relays = Relays::new();
+        relays.tracker.close();
+
+        assert_eq!(
+            waited_for(relays),
+            Vec::<String>::new(),
+            "a stop that leaves nothing behind is not worth a word"
+        );
+    }
+
+    #[test]
+    fn a_run_dropped_where_there_is_no_runtime_left_waits_for_nothing() {
+        watch_relays(Relays::new());
     }
 
     #[test]
