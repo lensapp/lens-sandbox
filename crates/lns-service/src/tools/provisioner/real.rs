@@ -219,11 +219,12 @@ async fn run_provisioner(
         exec,
     };
 
-    let mut vm_task = tokio::spawn(async move {
-        #[cfg(target_os = "macos")]
-        let _netdev = netdev;
-        vm::boot(spec, None).await
-    });
+    #[cfg(target_os = "macos")]
+    let held = Box::new(netdev);
+    #[cfg(not(target_os = "macos"))]
+    let held = Box::new(());
+    let mut vm_task =
+        tokio::spawn(async move { vm::boot_with_attachments(spec, None, held).await });
     let mut connector_rx = connector_rx;
     let connector = tokio::select! {
         biased;

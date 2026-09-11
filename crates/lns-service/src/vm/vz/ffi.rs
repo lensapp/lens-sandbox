@@ -370,7 +370,7 @@ fn build_and_start(
 
 /// Vz owns nothing but the descriptor here: the run's netdev guard holds the socket open and closes it, so the handle must not close it too.
 unsafe fn network_attachment(net: NetAttachment) -> Retained<VZNetworkDeviceAttachment> {
-    // SAFETY: both constructors take ownership of the +1 retained refs; the fd outlives the VM because the netdev guard is dropped after `boot` returns.
+    // SAFETY: both constructors take ownership of the +1 retained refs; the fd outlives the VM because the blocking closure that runs the VMM owns the netdev guard and drops it only after `backend.run` returns.
     unsafe {
         match net {
             NetAttachment::Nat => Retained::cast_unchecked(VZNATNetworkDeviceAttachment::new()),

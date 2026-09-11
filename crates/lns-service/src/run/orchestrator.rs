@@ -628,12 +628,13 @@ async fn orchestrate(
     let frame_tx_for_session = frame_tx.clone();
     log::progress("Booting", "microVM", 0, 0);
     let boot_start = std::time::Instant::now();
-    let mut vm_task = tokio::spawn(async move {
-        let _volume_leases = volume_leases;
-        #[cfg(target_os = "macos")]
-        let _netdev = netdev;
-        vm::boot(spec, None).await
-    });
+    // The guest's network and its volume leases belong to the VMM, not to this task: an abort here must not take them from a guest that still runs.
+    #[cfg(target_os = "macos")]
+    let held = Box::new((volume_leases, netdev));
+    #[cfg(not(target_os = "macos"))]
+    let held = Box::new(volume_leases);
+    let mut vm_task =
+        tokio::spawn(async move { vm::boot_with_attachments(spec, None, held).await });
 
     let connector = tokio::select! {
         biased;
