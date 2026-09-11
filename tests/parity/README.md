@@ -25,9 +25,12 @@ nothing.
 - **A LAN IPv4 address of this host** (`ipconfig getifaddr en0`). The host
   fixtures bind it, because the netstack refuses the host's loopback and the
   guest's own subnet. A loopback or guest-subnet address is refused before
-  anything starts.
+  anything starts. Where this host cannot serve a fixture to its own guests, put
+  the fixtures on a second machine and name it with `--fixtures-at` instead —
+  see [Fixtures on another machine](#fixtures-on-another-machine).
 - **Ten free TCP ports and one UDP port** from `--base-port` upward (47200 by
-  default), plus one loopback port for the witness.
+  default), plus one loopback port for the witness, and `--base-port + 20` when
+  the fixtures serve their report.
 - **A `tcp` rule per fixture destination in the guest's definition.** The harness
   writes this for you, and you have to know why it is there. The sandbox puts its
   own nftables in front of every TCP stream the guest opens, and redirects it to
@@ -137,8 +140,9 @@ heading instead of failing the diff. Timings (`throughput_*`, `duration*`,
 
 ## Host fixtures
 
-The runner starts the fixtures in process. `parity fixtures` serves the same
-ones on their own, for a manual probe from a guest:
+The runner starts the fixtures in process. `parity fixtures` runs the same ones
+on their own, for a manual probe from a guest — and with `--serve`, for a runner
+on another machine:
 
 ```
 $ cargo run -p net-parity -- fixtures --bind 192.168.1.50 --base-port 47200
@@ -168,6 +172,93 @@ writing fixtures.json every second; stop with ctrl-c
 
 Every fixture writes what it saw — bytes, hashes, EOF, reset, open and close
 times — to a JSON file the runner reads.
+
+## Fixtures on another machine
+
+Some hosts cannot serve a fixture to their own guests at all. Put the fixtures
+on a second machine and read them over HTTP.
+
+**On the fixture machine** (macOS or Linux, on the same LAN), build the harness
+from **this same revision** and serve the report:
+
+```
+$ cargo build -p net-parity --release
+$ ./target/release/parity fixtures --bind 192.168.1.77 --base-port 47200 --serve
+bidirectional   192.168.1.77:47202
+echo            192.168.1.77:47206
+...
+report  http://192.168.1.77:47220/report
+reset   http://192.168.1.77:47220/reset
+health  http://192.168.1.77:47220/health
+a runner on another machine reads these with: parity run --fixtures-at 192.168.1.77:47200
+writing fixtures.json every second; stop with ctrl-c
+```
+
+The report server binds the same address as the fixtures, on
+`--base-port + 20`. It serves three routes and nothing else:
+
+| Route | What it does |
+|---|---|
+| `GET /health` | The harness version and every fixture this process bound. |
+| `GET /report` | The current fixtures JSON — the same document `fixtures.json` holds. |
+| `POST /reset` | Clears the counters. The runner calls this before every case. |
+
+**On the machine with the guests**, name that address instead of `--bind`:
+
+```
+$ cargo run -p net-parity -- run \
+    --config parity.toml --backend netstack \
+    --fixtures-at 192.168.1.77:47200 --out netstack.json
+```
+
+The runner asks `/health` first and refuses to start when nothing answers, or
+when the fixtures were built from another harness version — two halves of
+different builds measure different things. It then calls `/reset` before every
+case and reads `/report` while the case runs. The generated `egress.tcp` rules
+and the `fixture-reachable` preflight use the remote address, so the guest is
+granted the destinations it will actually meet.
+
+The **loopback witness stays on this machine**. It has to bind the service
+host's own `127.0.0.1` for `loopback-witness` to prove anything, so the runner
+binds it here and folds its accepts into the report it reads.
+
+The result records which fixtures the run met:
+
+```json
+"fixtures": { "host": "192.168.1.77:47220", "mode": "remote", "version": "0.25.0" }
+```
+
+`diff` compares two runs only when all three agree. When they do not, it says so
+and exits 1:
+
+```
+$ cargo run -p net-parity -- diff netstack.json vmnet.json
+netstack (lns 0.25.0) vs vmnet (lns 0.25.0)
+these runs are not comparable: netstack used in-process fixtures on 192.168.1.49 (harness 0.25.0), vmnet used remote fixtures on 192.168.1.77:47220 (harness 0.25.0)
+put both backends to the same fixtures before you read the differences below
+no unexpected difference
+```
+
+### Why a second machine is sometimes the only way
+
+On a Mac with endpoint-security network extensions — SentinelOne network
+monitoring and the Cato Client, for two — a TCP connection to the **host's own**
+LAN address or to the bridge address completes its handshake and is then
+black-holed. **The symptom is that the handshake succeeds and the accept never
+fires.** `nc -zv 192.168.1.49 47200` from a plain shell reports the port open, a
+listener bound to that address never gets the accept, and the same listener on
+`127.0.0.1` accepts every time. It happens to a plain shell and to a guest
+alike, so it is not the sandbox and not a backend.
+
+Loopback is no way out: the netstack refuses `127.0.0.1` by design, which is
+what `loopback-witness` pins. So on such a host no fixture is reachable from a
+guest, and the fixtures have to live somewhere else. `--fixtures-at` is that
+somewhere else.
+
+Run the preflight first to tell this apart from a policy fault. A
+`fixture-reachable` that fails against fixtures on a second machine is a real
+backend finding; one that fails only against local fixtures, while a plain shell
+on the host shows the same black hole, is this.
 
 ## The cases
 
@@ -217,11 +308,11 @@ case skipped says so on stderr: it pins nothing.
 
 ## The result schema
 
-One `result.json` per backend run, `schema_version = 1`:
+One `result.json` per backend run, `schema_version = 2`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "harness_revision": "9f1c…",
   "backend": {
     "name": "netstack",
@@ -239,6 +330,7 @@ One `result.json` per backend run, `schema_version = 1`:
     { "reference": "docker.io/library/alpine:3.20", "digest": "sha256:…" }
   ],
   "host": { "os": "macos", "os_version": "15.5", "arch": "aarch64", "dns_scope_count": 6 },
+  "fixtures": { "host": "192.168.1.50", "mode": "in-process", "version": "0.25.0" },
   "started_unix_ms": 1757577600000,
   "finished_unix_ms": 1757578320000,
   "cases": [
@@ -263,6 +355,10 @@ whatever its verdict. A stall is therefore readable from `result.json` alone: a
 case that failed on its budget with `fixture_seen_bytes_in: 0` never moved a
 byte, and one with a partial count stopped partway.
 
+`fixtures` names the machine the cases were put to, whether it was this process
+(`in-process`) or a second machine (`remote`), and the harness version that
+served them. Two results diff only when all three agree.
+
 `status` is one of `pass`, `fail`, `skip`, `blocked-by-product`. A case that
 failed carries `error`; one that skipped or is blocked carries `reason`.
 `measures` holds what was measured on both ends — bytes, hashes, exit codes,
@@ -274,6 +370,7 @@ descriptor counts. The diff compares `status` and `measures`.
 tests/parity/
   src/cases/        one file per group of cases; `cases::all()` is the registry
   src/fixtures/     the host fixtures and their report
+                    report_server.rs serves it over HTTP; remote.rs reads it
   src/result.rs     the result schema
   src/diff.rs       the diff
   scripts/          the macOS build-and-codesign check
