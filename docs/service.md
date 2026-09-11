@@ -149,7 +149,11 @@ frame of this link. An answer that does not fit comes back with its question,
 its OPT record and the TC bit set, per RFC 2181 §9, so the guest asks again
 over TCP. Over TCP the gateway serves the same relay, with the two-byte
 length prefix of RFC 1035 §4.2.2: one connection carries one or more queries,
-and an idle connection is closed after 10 seconds.
+and an idle connection is closed after 10 seconds. These connections have an
+allowance of their own, apart from the guest's TCP flows: 64 at a time, 64
+queries each, and an answer that does not reach the guest in 5 seconds closes
+the connection. A guest cannot fill its own flow table with idle connections
+to the resolver.
 
 ### Bounds
 
@@ -160,10 +164,13 @@ One guest holds no more of the host than this:
 | Concurrent TCP flows | 1024 |
 | Concurrent UDP flows | 512 |
 | DNS queries in flight | 256 |
+| Concurrent DNS connections over TCP | 64 |
+| Queries per DNS connection | 64 |
 | TCP connect timeout | 10 s |
 | TCP buffer per direction per flow | 256 KiB |
 | UDP flow idle timeout | 60 s |
 | DNS connection idle timeout | 10 s |
+| DNS answer write timeout | 5 s |
 | Largest DNS answer over UDP | 1472 bytes |
 | Frames queued between the device and the stack | 512 |
 

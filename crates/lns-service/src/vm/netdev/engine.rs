@@ -44,6 +44,15 @@ pub const MAX_UDP_FLOWS: usize = 512;
 /// At most this many of a guest's DNS queries are in flight at once.
 pub const MAX_DNS_IN_FLIGHT: usize = 256;
 
+/// At most this many of a guest's DNS connections over TCP are carried at once, so idle ones cannot fill its flow table.
+pub const MAX_DNS_TCP_CONNECTIONS: usize = 64;
+
+/// How many queries one DNS connection carries before the gateway closes it.
+const MAX_DNS_TCP_QUERIES: usize = 64;
+
+/// How long an answer has to reach a guest that stopped reading before its connection is closed.
+const DNS_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a flow the guest opened but never finished opening holds its place.
@@ -95,6 +104,7 @@ pub struct Limits {
     pub tcp_flows: usize,
     pub udp_flows: usize,
     pub dns_in_flight: usize,
+    pub dns_tcp_connections: usize,
 }
 
 impl Default for Limits {
@@ -103,6 +113,7 @@ impl Default for Limits {
             tcp_flows: MAX_TCP_FLOWS,
             udp_flows: MAX_UDP_FLOWS,
             dns_in_flight: MAX_DNS_IN_FLIGHT,
+            dns_tcp_connections: MAX_DNS_TCP_CONNECTIONS,
         }
     }
 }
@@ -222,6 +233,7 @@ pub struct Allowance {
     tcp: Arc<Semaphore>,
     udp: Arc<Semaphore>,
     dns: Arc<Semaphore>,
+    dns_tcp: Arc<Semaphore>,
 }
 
 impl Allowance {
@@ -230,7 +242,12 @@ impl Allowance {
             tcp: Arc::new(Semaphore::new(limits.tcp_flows)),
             udp: Arc::new(Semaphore::new(limits.udp_flows)),
             dns: Arc::new(Semaphore::new(limits.dns_in_flight)),
+            dns_tcp: Arc::new(Semaphore::new(limits.dns_tcp_connections)),
         }
+    }
+
+    pub fn dns_tcp_connection(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.dns_tcp).try_acquire_owned().ok()
     }
 
     pub fn tcp_flow(&self) -> Option<OwnedSemaphorePermit> {
@@ -255,10 +272,12 @@ enum Admission {
     Fresh,
     Repeated,
     Full,
+    DnsFull,
 }
 
 struct Admitted {
     _permit: OwnedSemaphorePermit,
+    _dns_permit: Option<OwnedSemaphorePermit>,
     serial: u64,
     since: tokio::time::Instant,
     established: bool,
@@ -286,11 +305,19 @@ impl Admissions {
         }
     }
 
-    fn admit(&self, flow: Flow) -> Admission {
+    fn admit(&self, flow: Flow, to_resolver: bool) -> Admission {
         let mut open = self.open.lock().expect("admissions poisoned");
         if open.flows.contains_key(&flow) {
             return Admission::Repeated;
         }
+        let dns_permit = if to_resolver {
+            let Some(permit) = self.allowance.dns_tcp_connection() else {
+                return Admission::DnsFull;
+            };
+            Some(permit)
+        } else {
+            None
+        };
         let Some(permit) = self.allowance.tcp_flow() else {
             return Admission::Full;
         };
@@ -300,6 +327,7 @@ impl Admissions {
             flow,
             Admitted {
                 _permit: permit,
+                _dns_permit: dns_permit,
                 serial,
                 since: tokio::time::Instant::now(),
                 established: false,
@@ -391,6 +419,9 @@ pub const DROPPED_TCP_HALF_OPEN: &str = "a TCP flow the guest never finished ope
 pub const DROPPED_TCP_UNADMITTED: &str = "a TCP stream whose flow had already ended";
 pub const DROPPED_UDP_FLOWS: &str = "a UDP flow over the guest's limit";
 pub const DROPPED_DNS_IN_FLIGHT: &str = "a DNS query over the guest's limit";
+pub const DROPPED_DNS_TCP_CONNECTIONS: &str = "a DNS connection over the guest's limit";
+pub const DROPPED_DNS_TCP_QUERIES: &str = "a DNS connection over its own query limit";
+pub const DROPPED_DNS_TCP_WRITE: &str = "a DNS answer the guest would not read";
 pub const DROPPED_FRAGMENT: &str = "an IPv4 fragment, which this gateway does not reassemble";
 pub const DROPPED_PROTOCOL: &str = "a packet of a protocol this gateway does not carry";
 pub const DROPPED_MALFORMED: &str = "a packet too short or malformed to read";
@@ -639,9 +670,8 @@ fn tcp_ingress(
     };
     let to = SocketAddr::new(IpAddr::V4(destination), tcp.destination_port);
     let reset = reset_packet(source, destination, &tcp);
-    if to != gateway_resolver(config)
-        && let Some(refusal) = config.boundary.refusal(to)
-    {
+    let to_resolver = to == gateway_resolver(config);
+    if !to_resolver && let Some(refusal) = config.boundary.refusal(to) {
         return Ingress::Refused {
             destination: to,
             refusal,
@@ -653,12 +683,16 @@ fn tcp_ingress(
         admissions.established(flow);
         return Ingress::Forward;
     }
-    match admissions.admit(flow) {
+    match admissions.admit(flow, to_resolver) {
         Admission::Fresh => Ingress::Forward,
         Admission::Repeated => Ingress::Dropped(DROPPED_TCP_REPEATED),
         Admission::Full => Ingress::OverLimit {
             answer: reset,
             counted: DROPPED_TCP_FLOWS,
+        },
+        Admission::DnsFull => Ingress::OverLimit {
+            answer: reset,
+            counted: DROPPED_DNS_TCP_CONNECTIONS,
         },
     }
 }
@@ -836,7 +870,13 @@ async fn accept_tcp<G, S>(
 
 /// The gateway answers a query over TCP as it does over UDP, so a guest that sees TC set has somewhere to ask again.
 async fn serve_dns_over_tcp<G: AsyncRead + AsyncWrite + Unpin>(mut guest: G, resolving: Resolving) {
+    let mut asked = 0usize;
     while let Ok(Some(query)) = tokio::time::timeout(DNS_TCP_IDLE, read_query(&mut guest)).await {
+        asked += 1;
+        if asked > MAX_DNS_TCP_QUERIES {
+            resolving.counters.note(DROPPED_DNS_TCP_QUERIES);
+            return;
+        }
         let Some(answer) = answered(&resolving, &query).await else {
             return;
         };
@@ -878,8 +918,18 @@ async fn write_answer<G: AsyncWrite + Unpin>(
         counters.note(DROPPED_DNS_ANSWER);
         return None;
     };
-    guest.write_all(&length.to_be_bytes()).await.ok()?;
-    guest.write_all(answer).await.ok()
+    let written = tokio::time::timeout(DNS_TCP_WRITE_TIMEOUT, async {
+        guest.write_all(&length.to_be_bytes()).await.ok()?;
+        guest.write_all(answer).await.ok()
+    })
+    .await;
+    match written {
+        Ok(written) => written,
+        Err(_) => {
+            counters.note(DROPPED_DNS_TCP_WRITE);
+            None
+        }
+    }
 }
 
 async fn carry_tcp<G: AsyncRead + AsyncWrite + Unpin>(mut guest: G, destination: SocketAddr) {
@@ -1606,9 +1656,13 @@ mod tests {
     }
 
     fn tcp_packet(destination: &str, syn: bool) -> Vec<u8> {
+        tcp_packet_from(45_000, destination, syn)
+    }
+
+    fn tcp_packet_from(source_port: u16, destination: &str, syn: bool) -> Vec<u8> {
         let to: std::net::SocketAddrV4 = destination.parse().unwrap();
         let builder = PacketBuilder::ipv4([192, 168, 127, 2], to.ip().octets(), PACKET_TTL).tcp(
-            45_000,
+            source_port,
             to.port(),
             0x1000,
             65_535,
@@ -1785,16 +1839,106 @@ mod tests {
     }
 
     #[test]
+    fn a_dns_connection_over_its_own_bound_is_reset_before_the_stack_allocates_for_it() {
+        let admissions = admissions(Limits::default());
+        let config = config(Boundary::around(SUBNET, 24));
+        let resolver = "192.168.127.1:53";
+
+        for connection in 0..MAX_DNS_TCP_CONNECTIONS {
+            let port = 45_000 + u16::try_from(connection).unwrap();
+            assert_eq!(
+                classify(&config, &admissions, &tcp_packet_from(port, resolver, true)),
+                Ingress::Forward,
+                "connection {connection} is under the bound"
+            );
+        }
+
+        let over = classify(
+            &config,
+            &admissions,
+            &tcp_packet_from(46_000, resolver, true),
+        );
+
+        let (answer, counted) =
+            reset_of(over).expect("a guest is told at once that it may hold no more");
+        assert_eq!(counted, DROPPED_DNS_TCP_CONNECTIONS);
+        let (_, rest) = Ipv4Header::from_slice(&answer).unwrap();
+        assert!(TcpHeader::from_slice(rest).unwrap().0.rst);
+        assert_eq!(
+            admissions.held(),
+            MAX_DNS_TCP_CONNECTIONS,
+            "and nothing was allocated for it"
+        );
+        assert_eq!(
+            classify(
+                &config,
+                &admissions,
+                &tcp_packet_from(46_001, "93.184.216.34:443", true)
+            ),
+            Ingress::Forward,
+            "the guest's real flows are untouched by a resolver connection bound of their own"
+        );
+    }
+
+    #[test]
+    fn a_dns_connection_that_ends_gives_its_place_back_to_the_next_one() {
+        let admissions = admissions(Limits {
+            dns_tcp_connections: 1,
+            ..Limits::default()
+        });
+        let resolver = flow("192.168.127.2:45000", "192.168.127.1:53");
+        assert_eq!(admissions.admit(resolver, true), Admission::Fresh);
+        assert_eq!(
+            admissions.admit(flow("192.168.127.2:45001", "192.168.127.1:53"), true),
+            Admission::DnsFull
+        );
+        let claim = admissions
+            .claim(resolver)
+            .expect("the stream is the flow's");
+
+        drop(claim);
+
+        assert_eq!(
+            admissions.admit(flow("192.168.127.2:45001", "192.168.127.1:53"), true),
+            Admission::Fresh,
+            "a connection that ended gives its allowance back"
+        );
+    }
+
+    #[test]
+    fn a_dns_connection_the_flow_table_has_no_room_for_gives_its_allowance_back() {
+        let admissions = admissions(Limits {
+            tcp_flows: 1,
+            ..Limits::default()
+        });
+        admissions.admit(flow("192.168.127.2:45000", "93.184.216.34:443"), false);
+
+        assert_eq!(
+            admissions.admit(flow("192.168.127.2:45001", "192.168.127.1:53"), true),
+            Admission::Full
+        );
+
+        let allowed: Vec<_> = (0..MAX_DNS_TCP_CONNECTIONS)
+            .filter_map(|_| admissions.allowance.dns_tcp_connection())
+            .collect();
+        assert_eq!(
+            allowed.len(),
+            MAX_DNS_TCP_CONNECTIONS,
+            "a connection the flow table refused holds no DNS allowance"
+        );
+    }
+
+    #[test]
     fn a_flow_whose_relay_has_ended_gives_its_place_back_to_a_later_syn() {
         let admissions = admissions(Limits {
             tcp_flows: 1,
             ..Limits::default()
         });
         let carried = flow("192.168.127.2:45000", "93.184.216.34:443");
-        assert_eq!(admissions.admit(carried), Admission::Fresh);
+        assert_eq!(admissions.admit(carried, false), Admission::Fresh);
         let claim = admissions.claim(carried).expect("the stream is the flow's");
         assert_eq!(
-            admissions.admit(flow("192.168.127.2:45001", "93.184.216.34:443")),
+            admissions.admit(flow("192.168.127.2:45001", "93.184.216.34:443"), false),
             Admission::Full,
             "the one flow this guest may hold is held"
         );
@@ -1802,14 +1946,14 @@ mod tests {
         drop(claim);
 
         assert_eq!(admissions.held(), 0, "the permit goes back with the place");
-        assert_eq!(admissions.admit(carried), Admission::Fresh);
+        assert_eq!(admissions.admit(carried, false), Admission::Fresh);
     }
 
     #[test]
     fn a_stream_of_a_flow_that_ended_before_it_arrived_is_not_claimed_twice() {
         let admissions = admissions(Limits::default());
         let carried = flow("192.168.127.2:45000", "93.184.216.34:443");
-        admissions.admit(carried);
+        admissions.admit(carried, false);
         let claim = admissions.claim(carried).expect("the stream is the flow's");
 
         assert!(
@@ -1828,8 +1972,8 @@ mod tests {
         let counters = Arc::new(Counters::default());
         let half_open = flow("192.168.127.2:45000", "93.184.216.34:443");
         let carried = flow("192.168.127.2:45001", "93.184.216.34:443");
-        admissions.admit(half_open);
-        admissions.admit(carried);
+        admissions.admit(half_open, false);
+        admissions.admit(carried, false);
         admissions.established(carried);
         let relaying = admissions
             .claim(half_open)
@@ -1903,7 +2047,7 @@ mod tests {
             "192.168.127.2:45000".parse::<SocketAddr>().unwrap(),
             address,
         );
-        admissions.admit(carried);
+        admissions.admit(carried, false);
         let accepting = tokio::spawn(accept_tcp(
             Arc::clone(&admissions),
             resolving(Limits::default(), &Arc::new(Counters::default()), &relays),
@@ -2417,6 +2561,57 @@ mod tests {
             .await
             .expect("the connection ends when the guest closes it")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_asks_more_questions_than_one_connection_carries_is_closed() {
+        let counters = Arc::new(Counters::default());
+        let (guest, mut asking) = tokio::io::duplex(8192);
+        let serving = tokio::spawn(serve_dns_over_tcp(
+            guest,
+            resolving(Limits::default(), &counters, &Relays::new()),
+        ));
+
+        for id in 0..MAX_DNS_TCP_QUERIES {
+            let query = question_of(
+                "example.test",
+                hickory_proto::rr::RecordType::A,
+                u16::try_from(id).unwrap(),
+                None,
+            );
+            let answer = asked_over_tcp(&mut asking, &query).await;
+            assert_eq!(
+                Message::from_vec(&answer).unwrap().metadata.id,
+                u16::try_from(id).unwrap()
+            );
+        }
+        let over = question_of("example.test", hickory_proto::rr::RecordType::A, 999, None);
+        asking
+            .write_all(&u16::try_from(over.len()).unwrap().to_be_bytes())
+            .await
+            .unwrap();
+        asking.write_all(&over).await.unwrap();
+
+        tokio::time::timeout(PATIENCE, serving)
+            .await
+            .expect("the gateway closes a connection that asks past its own query limit")
+            .unwrap();
+        assert_eq!(counters.seen(DROPPED_DNS_TCP_QUERIES), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_a_guest_never_reads_does_not_hold_its_connection_open() {
+        let counters = Counters::default();
+        let (mut guest, asking) = tokio::io::duplex(8);
+
+        let written = write_answer(&mut guest, &vec![0u8; 4096], &counters).await;
+
+        assert_eq!(
+            written, None,
+            "a guest that never reads its answer loses the connection instead of holding it"
+        );
+        assert_eq!(counters.seen(DROPPED_DNS_TCP_WRITE), 1);
+        drop(asking);
     }
 
     #[tokio::test]
