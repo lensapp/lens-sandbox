@@ -4,7 +4,7 @@
 # produces, so a stale fixture cannot pass silently. Unlike
 # connectors/github/mechanism/build.sh it does not yet run fmt or clippy over
 # this out-of-workspace crate, so nothing lints it; adding them means
-# reformatting the source and recommitting all twenty components, because a
+# reformatting the source and recommitting all twenty-three components, because a
 # trapping fixture embeds its own file and line.
 set -eu
 # Part of the contract, not convenience: a panicking fixture embeds the path cargo
@@ -12,7 +12,7 @@ set -eu
 cd "$(dirname "$0")"
 check=${1:-}
 stale=""
-for name in fetching running asking hanging expiring trapping prying hoarding showing shouting forging labelling straying granting failing picking hurrying refusing keeping clinging; do
+for name in fetching running asking hanging expiring trapping prying hoarding showing shouting forging labelling straying granting failing picking hurrying refusing keeping clinging boasting sprawling swarming; do
     # --locked: a gate compares these bytes, so a resolution that drifted must fail loudly rather than rewrite the lock and change what is built.
     cargo build --locked --release --target wasm32-wasip2 --no-default-features --features "$name"
     built=target/wasm32-wasip2/release/mechanism_fixture.wasm

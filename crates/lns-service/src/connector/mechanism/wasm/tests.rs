@@ -602,6 +602,77 @@ fn bytes_that_are_not_a_component_are_refused_when_the_connector_is_read() {
     );
 }
 
+#[test]
+fn authority_a_component_claims_is_rendered_before_anything_shows_it() {
+    // The grant card prints this beside the disclosure, so a scope that could redraw a line could imitate the sentence that asks for consent (§3.2.6).
+    let (_runtime, component) = compiled("boasting");
+    let parts = Parts::new();
+
+    let step = component
+        .connect(&parts.host(reaching(&[])), 0)
+        .expect("the component answers");
+
+    let Step::Done(outcome) = step else {
+        panic!("a claimed authority finishes the connect, not {step:?}");
+    };
+    let claimed = outcome.authority.iter().next().expect("one authority");
+    assert!(!claimed.contains('\u{1b}'), "{claimed:?}");
+    assert!(
+        !claimed.contains('…'),
+        "the ellipsis lns cuts with is lns's own to write: {claimed:?}"
+    );
+    assert!(
+        claimed.starts_with("read"),
+        "the words survive: {claimed:?}"
+    );
+}
+
+#[test]
+fn authority_a_renewal_claims_is_rendered_too_although_nobody_is_watching_it() {
+    // A renewal runs unattended and writes what it claims straight to the store and onto the next card, so the path with nobody at the terminal is the one that most needs this.
+    let (_runtime, component) = compiled("boasting");
+    let parts = Parts::new();
+
+    let renewed = component
+        .refresh(&parts.host(reaching(&[])), &Answers::new(), 0)
+        .expect("the component renews");
+
+    let claimed = renewed.authority.iter().next().expect("one authority");
+    assert!(!claimed.contains('\u{1b}'), "{claimed:?}");
+    assert!(
+        claimed.starts_with("read"),
+        "the words survive: {claimed:?}"
+    );
+}
+
+#[test]
+fn a_component_claiming_more_authority_than_it_may_speak_finishes_nothing() {
+    let (_runtime, component) = compiled("sprawling");
+    let parts = Parts::new();
+
+    let refusal = component
+        .connect(&parts.host(reaching(&[])), 0)
+        .expect_err("more than one call may speak");
+
+    assert!(format!("{refusal:#}").contains("4096 bytes"), "{refusal:#}");
+}
+
+#[test]
+fn a_component_claiming_more_separate_authorities_than_one_line_names_finishes_nothing() {
+    // Bounded by count as well as by length, because the card joins them onto one line and a thousand one-byte scopes would bury the disclosure beside them.
+    let (_runtime, component) = compiled("swarming");
+    let parts = Parts::new();
+
+    let refusal = component
+        .connect(&parts.host(reaching(&[])), 0)
+        .expect_err("more than one line may name");
+
+    assert!(
+        format!("{refusal:#}").contains("authorities"),
+        "and not the field-count refusal, whose text also carries 32: {refusal:#}"
+    );
+}
+
 /// The connector this repository ships, driven as a user drives it. Committed bytes prove nothing by being byte-equal to their source; these prove they run.
 mod the_shipped_github_connector {
     use super::*;
@@ -922,6 +993,39 @@ mod the_shipped_github_connector {
                 why.contains("sign-in"),
                 "it names the method that can: {why}"
             );
+        }
+
+        #[test]
+        fn a_scope_github_answered_with_is_rendered_before_it_is_stored() {
+            // The one end-to-end demonstration: the rule is pinned against the fixtures, and this shows it holding for a scope that arrived over the wire.
+            let (_runtime, component) = shipped(METHOD);
+            let (parts, bounds) = answering(&[
+                (200, NAMED_A_CODE),
+                (
+                    200,
+                    r#"{"access_token":"gho_first","scope":"read\u001b[2Juser"}"#,
+                ),
+            ]);
+            let host = parts.host(bounds);
+
+            let showing = component
+                .resume(
+                    &host,
+                    asked(&component.connect(&host, 0).expect("a first round")).2,
+                    &Answers::from([("client_id".to_string(), "Ov23liabc".to_string())]),
+                    0,
+                )
+                .expect("a second round");
+            let finished = component
+                .resume(&host, asked(&showing).2, &Answers::new(), 0)
+                .expect("a third round");
+
+            let Step::Done(outcome) = finished else {
+                panic!("an accepted code finishes the connect, not {finished:?}");
+            };
+            let claimed = outcome.authority.iter().next().expect("one authority");
+            assert!(!claimed.contains('\u{1b}'), "{claimed:?}");
+            assert!(claimed.starts_with("read"), "{claimed:?}");
         }
 
         #[test]

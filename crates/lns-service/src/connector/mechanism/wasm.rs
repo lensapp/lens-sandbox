@@ -32,6 +32,9 @@ const MAX_STATE_BYTES: usize = 64 * 1024;
 /// The most values one round may ask for. A sign-in asks for a handful, and nobody answers more than this to connect one account.
 const MAX_FIELDS: usize = 32;
 
+/// The most separate authorities one outcome may claim. The grant card joins them onto one line, so a component naming thousands of one-byte scopes would bury the disclosure beside them without crossing any ceiling on length (§3.2.6).
+const MAX_AUTHORITIES: usize = 32;
+
 /// The most one field name may run to. It is the key lns stores an answer under, never words anybody reads, so the connector-text ceiling does not cover it; what a name may *contain* is decided for every mechanism in `connect::refuse_a_field_name_no_answer_could_be_keyed_by`.
 const MAX_FIELD_NAME_BYTES: usize = 128;
 
@@ -217,8 +220,8 @@ impl Mechanism for Component {
             .lns_connector_adapter()
             .call_refresh(&mut store, &answers_of(values), now_millis)
             .map_err(|e| stopped(e, host.bounds().call_seconds))?
-            .map(outcome_of)
             .map_err(|why| refused_in_its_own_words(&why))
+            .and_then(outcome_of)
     }
 
     fn revoke(&self, host: &Host, values: &Answers, now_millis: u64) -> Result<()> {
@@ -289,7 +292,7 @@ fn step_of(step: wit::Step) -> Result<Step> {
                 state: ask.state,
             }
         }
-        wit::Step::Done(outcome) => Step::Done(outcome_of(outcome)),
+        wit::Step::Done(outcome) => Step::Done(outcome_of(outcome)?),
         wit::Step::Failed(why) => Step::Failed(connector_text(&why, why.len())?),
     })
 }
@@ -304,16 +307,27 @@ fn connector_text(words: &str, spoken: usize) -> Result<String> {
     Ok(super::text::scrubbed(words))
 }
 
-fn outcome_of(outcome: wit::Outcome) -> Outcome {
-    Outcome {
+/// What a component claims it was granted is connector text, rendered and bounded before the card prints it beside the disclosure — and refused rather than cut, because a grant survives by comparing this against what was consented to (§3.2.6).
+fn outcome_of(outcome: wit::Outcome) -> Result<Outcome> {
+    if outcome.authority.len() > MAX_AUTHORITIES {
+        anyhow::bail!(
+            "this connector's component claimed more than {MAX_AUTHORITIES} authorities at once"
+        );
+    }
+    let spoken: usize = outcome.authority.iter().map(String::len).sum();
+    Ok(Outcome {
         values: outcome
             .values
             .into_iter()
             .map(|answer| (answer.name, answer.value))
             .collect(),
-        authority: outcome.authority.into_iter().collect(),
+        authority: outcome
+            .authority
+            .iter()
+            .map(|claimed| connector_text(claimed, spoken))
+            .collect::<Result<_>>()?,
         expires_at_millis: outcome.expires_at_millis,
-    }
+    })
 }
 
 fn call_error(error: CallError) -> wit::CallError {
