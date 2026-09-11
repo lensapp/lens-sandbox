@@ -18,6 +18,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wit-bindgen = "0.46"
 
+# One build per method, because a method declares what it produces and a
+# component is told nothing about which one invoked it. No default: a build
+# that named neither would silently be one of them.
+[features]
+sign-in = []
+oauth-sign-in = []
+
 [profile.release]
 opt-level = "z"
 lto = true
