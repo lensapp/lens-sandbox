@@ -2091,7 +2091,9 @@ two per connector, 64 KiB per request, response, and private session, 8 KiB per
 callback request, and 16 KiB per token. Public user codes are at most 256 bytes
 and contain no control or hidden formatting characters. A rejected response is
 failed whole rather than truncated. Completed status records contain no secrets
-and expire with the original operation deadline.
+and are retained until 30 seconds after the original operation deadline, so a
+client can observe expiry. The service holds at most 64 status records; inactive
+records may be evicted first to admit a new operation.
 
 CLI and Rust approval UI share structured device-authorization, waiting-for-browser,
 completed, canceled, expired, and failed states. The service owns polling and
