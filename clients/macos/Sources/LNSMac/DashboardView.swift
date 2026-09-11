@@ -67,15 +67,6 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     navigationGroup("WORKSPACE", pages: [.sandboxes, .connectors, .registries])
                     navigationGroup("ACTIVITY", pages: [.audit, .approvals])
-                    if model.page == .audit || model.page == .approvals {
-                        VStack(alignment: .leading, spacing: 4) {
-                            sectionLabel("SANDBOXES")
-                            sandboxButton(id: nil, name: "All sandboxes", image: "", status: "")
-                            ForEach(model.data.sandboxes) { sandbox in
-                                sandboxButton(id: sandbox.id, name: sandbox.name, image: sandbox.image, status: sandbox.status)
-                            }
-                        }
-                    }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 24)
             }
@@ -115,27 +106,6 @@ struct DashboardView: View {
     private func sectionLabel(_ title: String) -> some View {
         Text(title).font(.system(size: 10, weight: .semibold)).tracking(1)
             .foregroundStyle(LNSTheme.muted).padding(.horizontal, 12).padding(.bottom, 6)
-    }
-
-    private func sandboxButton(id: String?, name: String, image: String, status: String) -> some View {
-        Button { model.selectSandbox(id) } label: {
-            HStack(alignment: .top) {
-                Image(systemName: id == nil ? "square.stack.3d.up" : "shippingbox")
-                    .foregroundStyle(status == "running" ? LNSTheme.success : LNSTheme.muted)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(name).lineLimit(1)
-                    if !image.isEmpty { Text(image).font(.caption).foregroundStyle(LNSTheme.muted).lineLimit(1) }
-                    if !status.isEmpty { Text(status).font(.caption2).foregroundStyle(LNSTheme.muted) }
-                }
-                Spacer()
-                if model.filters.sandbox == id { Image(systemName: "checkmark").accessibilityLabel("Selected") }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(LNSNavigationStyle(selected: model.filters.sandbox == id))
-        .accessibilityElement(children: .combine)
-        .accessibilityValue(model.filters.sandbox == id ? "Selected" : "")
-        .help(id ?? "Every sandbox's audit and approval history")
     }
 
     @ViewBuilder private var notices: some View {
@@ -194,6 +164,11 @@ struct AuditTimeline: View {
                     .textFieldStyle(.roundedBorder).focused($searchFocused)
                     .accessibilityLabel("Search all sandboxes’ audit events")
                     .onExitCommand { model.filters.search = ""; searchFocused = false }
+            }
+            .padding(.horizontal, 24).padding(.bottom, 12)
+            HStack {
+                SandboxFilter(model: model)
+                    .disabled(!model.filters.search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Menu {
                     Button("All event kinds") { model.filters.kinds = [] }
                     Divider()
