@@ -13,6 +13,8 @@ use netstack_smoltcp::StackBuilder;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use super::dhcp::{self, Lease, ReplyTo};
 use super::dns::{self, Resolvers, Upstream};
@@ -106,6 +108,7 @@ pub struct Frames {
 /// Every task serving one guest's network. Dropping it aborts them all, so a stopped run leaves nothing behind.
 pub struct Running {
     tasks: JoinSet<()>,
+    relays: Relays,
 }
 
 impl Running {
@@ -117,7 +120,35 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
+        self.relays.token.cancel();
+        self.relays.tracker.close();
         self.tasks.abort_all();
+    }
+}
+
+/// The owner of every relay a listener starts, so a flow opened mid-run ends with the run and not with its own sockets.
+#[derive(Clone)]
+struct Relays {
+    tracker: TaskTracker,
+    token: CancellationToken,
+}
+
+impl Relays {
+    fn new() -> Self {
+        Self {
+            tracker: TaskTracker::new(),
+            token: CancellationToken::new(),
+        }
+    }
+
+    fn carry<F: Future<Output = ()> + Send + 'static>(&self, relay: F) {
+        let token = self.token.clone();
+        self.tracker.spawn(async move {
+            tokio::select! {
+                () = token.cancelled() => {}
+                () = relay => {}
+            }
+        });
     }
 }
 
@@ -206,6 +237,7 @@ pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running
     let (udp_read, udp_write) = udp.split();
     let (replies_tx, replies_rx) = channel(CHANNEL_DEPTH);
 
+    let relays = Relays::new();
     let mut tasks = JoinSet::new();
     tasks.spawn(async move {
         let _ = runner.await;
@@ -223,13 +255,20 @@ pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running
     tasks.spawn(accept_tcp(
         Arc::clone(&allowance),
         Arc::clone(&counters),
+        relays.clone(),
         tcp,
     ));
     tasks.spawn(accept_udp(
-        config, gateway, allowance, counters, udp_read, replies_tx,
+        config,
+        gateway,
+        allowance,
+        counters,
+        relays.clone(),
+        udp_read,
+        replies_tx,
     ));
     tasks.spawn(write_udp(udp_write, replies_rx));
-    Ok(Running { tasks })
+    Ok(Running { tasks, relays })
 }
 
 type StackSink = futures_util::stream::SplitSink<netstack_smoltcp::Stack, Vec<u8>>;
@@ -474,12 +513,13 @@ fn note_refusal(refused: &Refused, counters: &Counters, destination: SocketAddr,
 async fn accept_tcp(
     allowance: Arc<Allowance>,
     counters: Arc<Counters>,
+    relays: Relays,
     mut listener: netstack_smoltcp::TcpListener,
 ) {
     while let Some((guest, _, destination)) = listener.next().await {
         match allowance.tcp_flow() {
             Some(permit) => {
-                tokio::spawn(async move {
+                relays.carry(async move {
                     let _permit = permit;
                     carry_tcp(guest, destination).await;
                 });
@@ -505,11 +545,13 @@ async fn write_udp(mut write: netstack_smoltcp::udp::WriteHalf, mut replies: Rec
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn accept_udp(
     config: Config,
     gateway: Gateway,
     allowance: Arc<Allowance>,
     counters: Arc<Counters>,
+    relays: Relays,
     mut datagrams: netstack_smoltcp::udp::ReadHalf,
     replies: Sender<UdpReply>,
 ) {
@@ -517,13 +559,15 @@ async fn accept_udp(
     let mut flows: HashMap<(SocketAddr, SocketAddr), Sender<Vec<u8>>> = HashMap::new();
     while let Some((payload, source, destination)) = datagrams.next().await {
         if destination == resolver {
-            answer_dns(&gateway, &allowance, &counters, payload, source, &replies);
+            answer_dns(
+                &gateway, &allowance, &counters, &relays, payload, source, &replies,
+            );
             continue;
         }
         let key = (source, destination);
         let open = match flows.get(&key) {
             Some(open) if !open.is_closed() => Some(open.clone()),
-            _ => open_flow(&allowance, &counters, &mut flows, key, &replies),
+            _ => open_flow(&allowance, &counters, &relays, &mut flows, key, &replies),
         };
         if let Some(open) = open {
             let _ = open.send(payload).await;
@@ -534,6 +578,7 @@ async fn accept_udp(
 fn open_flow(
     allowance: &Allowance,
     counters: &Counters,
+    relays: &Relays,
     flows: &mut HashMap<(SocketAddr, SocketAddr), Sender<Vec<u8>>>,
     key: (SocketAddr, SocketAddr),
     replies: &Sender<UdpReply>,
@@ -545,7 +590,7 @@ fn open_flow(
     };
     let (tx, rx) = channel(CHANNEL_DEPTH);
     let replies = replies.clone();
-    tokio::spawn(async move {
+    relays.carry(async move {
         let _permit = permit;
         carry_udp(key.0, key.1, rx, replies).await;
     });
@@ -553,10 +598,12 @@ fn open_flow(
     Some(tx)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn answer_dns(
     gateway: &Gateway,
     allowance: &Allowance,
     counters: &Counters,
+    relays: &Relays,
     query: Vec<u8>,
     source: SocketAddr,
     replies: &Sender<UdpReply>,
@@ -573,7 +620,7 @@ fn answer_dns(
     let upstream = Arc::clone(&gateway.upstream);
     let replies = replies.clone();
     let resolver = SocketAddr::new(gateway.address, dns::PORT);
-    tokio::spawn(async move {
+    relays.carry(async move {
         let _permit = permit;
         relay_query(resolvers, upstream, query, name, source, resolver, replies).await;
     });
@@ -800,7 +847,7 @@ mod tests {
         iface: Interface,
         sockets: SocketSet<'static>,
         dhcp: SocketHandle,
-        _running: Running,
+        running: Option<Running>,
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -847,8 +894,20 @@ mod tests {
                 iface,
                 sockets,
                 dhcp,
-                _running: running,
+                running: Some(running),
             }
+        }
+
+        fn adopt<F: Future<Output = ()> + Send + 'static>(&mut self, task: F) {
+            self.running.as_mut().expect("the run is up").adopt(task);
+        }
+
+        fn relays(&self) -> Relays {
+            self.running.as_ref().expect("the run is up").relays.clone()
+        }
+
+        fn stop(&mut self) {
+            self.running = None;
         }
 
         fn poll(&mut self) {
@@ -1386,6 +1445,7 @@ mod tests {
             &gateway_of(SUBNET),
             &allowance,
             &counters,
+            &Relays::new(),
             b"not a question".to_vec(),
             "192.168.127.2:5353".parse().unwrap(),
             &replies,
@@ -1420,6 +1480,7 @@ mod tests {
             &gateway_of(SUBNET),
             &allowance,
             &counters,
+            &Relays::new(),
             query,
             "192.168.127.2:5353".parse().unwrap(),
             &replies,
@@ -1466,39 +1527,61 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropping_the_guard_aborts_every_task_of_the_run() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut opening = [0u8; 5];
+            stream.read_exact(&mut opening).await.unwrap();
+            let mut after = Vec::new();
+            stream.read_to_end(&mut after).await.unwrap();
+            after
+        });
+
         let held = Arc::new(());
-        let (to_stack, from_guest) = channel(1);
-        let (to_guest, _from_stack) = channel(1);
-        let mut running = start(
-            Config::for_subnet(SUBNET, Boundary::Permissive),
-            gateway_of(SUBNET),
-            Frames {
-                from_guest,
-                to_guest,
-            },
-        )
-        .expect("the stack comes up");
+        let mut guest = FakeGuest::on(Boundary::Permissive);
+        guest.lease().await;
         let carried = Arc::clone(&held);
-        running.adopt(async move {
+        guest.adopt(async move {
             let _carried = carried;
             std::future::pending::<()>().await;
         });
-        tokio::task::yield_now().await;
-
-        drop(running);
+        let flow = guest.open(address, 7000);
+        assert!(
+            guest
+                .wait_until(flow, PATIENCE, |socket| socket.may_send())
+                .await,
+            "the guest's flow is carried to the host"
+        );
+        guest
+            .sockets
+            .get_mut::<tcp::Socket>(flow)
+            .send_slice(b"ping!")
+            .expect("the guest sends on its open flow");
         for _ in 0..100 {
-            tokio::task::yield_now().await;
+            guest.settle().await;
         }
+        let relays = guest.relays();
 
+        guest.stop();
+
+        let after = tokio::time::timeout(PATIENCE, host)
+            .await
+            .expect("the host's side of the relayed flow closes with the run")
+            .unwrap();
+        assert!(after.is_empty(), "and nothing more is copied to it");
+        tokio::time::timeout(PATIENCE, relays.tracker.wait())
+            .await
+            .expect("the relay that carried the flow has ended");
         assert_eq!(
             Arc::strong_count(&held),
             1,
             "every task the run owned has been aborted"
         );
         assert!(
-            to_stack.send(Vec::new()).await.is_err(),
+            guest.device.outbound.send(Vec::new()).await.is_err(),
             "and nothing reads the link"
         );
     }
