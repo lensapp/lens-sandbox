@@ -1,11 +1,12 @@
 import Foundation
 
 public struct SandboxDraft {
-    public enum Source: String, CaseIterable { case local, published }
+    public enum Source: String, Codable, CaseIterable { case local, published }
     public var kind = Source.local
     public var source = ""
     public var name = ""
     public var allowSetup = false
+    public var mixins: [String] = []
     public init() {}
 
     public func arguments() throws -> [String] {
@@ -30,8 +31,19 @@ public struct SandboxDraft {
         var arguments = ["run", "--detach"]
         if !name.isEmpty { arguments.append("--name=\(name)") }
         if allowSetup { arguments.append("--yes") }
+        for mixin in mixins {
+            try Self.validateMixin(mixin)
+            arguments.append("--mixin=\(mixin)")
+        }
         arguments.append(source)
         return arguments
+    }
+
+    public static func validateMixin(_ source: String) throws {
+        guard !source.isEmpty, !source.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              source.hasPrefix("/") || (!source.hasPrefix("-") && !source.hasPrefix(".") && !source.hasPrefix("~") && !source.contains(where: \.isWhitespace)) else {
+            throw ServiceError(message: "Choose a mixin using its full local path or enter a published reference.")
+        }
     }
 
     static func isLowerHex(_ byte: UInt8) -> Bool { (48...57).contains(byte) || (97...102).contains(byte) }

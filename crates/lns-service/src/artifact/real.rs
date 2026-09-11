@@ -20,6 +20,8 @@ pub(crate) struct ResolvedForRun {
     resolved: crate::artifact::assembly::ResolvedSandbox,
     /// The merged sandbox document, kept so the run can be written back out as one document (`docs/sandbox-spec.md` §8.4).
     pub(crate) document: Vec<u8>,
+    pub(crate) sources: lns_ipc::ConfigurationSources,
+    pub(crate) authored_egress: String,
 }
 
 /// Peek a run reference's manifest and, when it is a published sandbox, resolve it; a plain image returns `None` so the caller runs it directly (a bare `verify_sandbox` reference that resolves to a plain image is refused as "not a sandbox").
@@ -67,6 +69,13 @@ pub(crate) async fn resolve_for_run(
                 &resolution.authored_egress,
             );
             Ok(Some(ResolvedForRun {
+                sources: lns_ipc::ConfigurationSources {
+                    definition: image_ref.to_string(),
+                    mixins: resolution.mixins,
+                    added_mixins: resolution.pinned_extra,
+                    contributions: crate::artifact::mixin::on_the_wire(&resolution.contributions),
+                },
+                authored_egress: serde_json::to_string(&resolution.authored_egress)?,
                 reference: image_ref.to_string(),
                 digest,
                 resolved,
@@ -88,6 +97,8 @@ pub(crate) async fn plan_resolved(
         digest,
         resolved,
         document: _,
+        sources: _,
+        authored_egress: _,
     } = resolved;
     record_sandbox_run(run_id, microvm, &reference, &digest, &resolved);
     crate::image_store::record_artifact_run(&reference, &digest, &resolved.base_image)
@@ -432,6 +443,37 @@ pub(crate) async fn inspect(image_ref: &str, mixins: &[String]) -> Result<Artifa
         &resolution,
         lns_artifact::resources::host::probe(),
     )
+}
+
+pub(crate) async fn preview_sandbox(source: &str, mixins: &[String]) -> Result<lns_ipc::Response> {
+    use crate::artifact::mixin::Locator;
+    let (document, home) = if std::path::Path::new(source).is_absolute() {
+        let fetched = crate::artifact::mixin_dir::read_path_mixin(
+            &RealMixinDir,
+            std::path::Path::new(source),
+        )?;
+        (fetched.document, Locator::Local(fetched.pinned.into()))
+    } else {
+        let reference: Reference = source.parse().context("invalid sandbox reference")?;
+        let registry = crate::image::caching_registry_for(source)?;
+        let (manifest, digest, config) = registry.pull_manifest_and_config(&reference).await?;
+        crate::image::verify_digest_pin(&reference, &digest, source)?;
+        dispatch_run(
+            manifest.artifact_type.as_deref(),
+            Some(&manifest.config.media_type),
+            source,
+            true,
+        )?;
+        (
+            config,
+            Locator::Reference(reference.clone_with_digest(digest).to_string()),
+        )
+    };
+    crate::run::configuration::preview(document.as_bytes(), &home, mixins, &RegistryMixins)
+        .await
+        .map(|configuration| lns_ipc::Response::SandboxConfiguration {
+            configuration: Box::new(configuration),
+        })
 }
 
 #[cfg(test)]

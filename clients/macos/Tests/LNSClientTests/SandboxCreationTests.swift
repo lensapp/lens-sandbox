@@ -4,6 +4,16 @@ import XCTest
 
 @MainActor
 final class SandboxCreationTests: XCTestCase {
+    func testMixinsReachTheLaunchInTheirChosenOrder() throws {
+        var draft = localDraft()
+        draft.mixins = ["/My Tools/lns.yaml", "ghcr.io/team/network:latest"]
+        XCTAssertEqual(try draft.arguments(), ["run", "--detach", "--mixin=/My Tools/lns.yaml", "--mixin=ghcr.io/team/network:latest", "/project/lns.yaml"])
+        for invalid in ["", "--yes", "./tools", "repo\nother"] {
+            draft.mixins = [invalid]
+            XCTAssertThrowsError(try draft.arguments())
+        }
+    }
+
     func testLocalLaunchUsesAnExplicitPathAndTheBundledCLIWithTheAppsSocket() async throws {
         var draft = SandboxDraft()
         draft.source = "/Users/person/My Project/lns.yaml"

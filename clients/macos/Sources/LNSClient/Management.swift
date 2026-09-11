@@ -13,8 +13,22 @@ public struct ManagementCommand: Encodable {
     public private(set) var stdin: Bool?
     public private(set) var timeout_secs: UInt64?
     public private(set) var force: Bool?
+    public private(set) var kind: String?
+    public private(set) var mixins: [String]?
 
     private init(type: String) { self.type = type }
+    public static func configuration(_ run: String) -> Self {
+        var command = Self(type: "ReadRunConfiguration"); command.run = run
+        return command
+    }
+    public static func preview(_ draft: SandboxDraft) -> Self {
+        var command = Self(type: "PreviewSandbox"); command.source = draft.source.trimmingCharacters(in: .whitespacesAndNewlines); command.mixins = draft.mixins
+        return command
+    }
+    public static func save(_ run: String, name: String) -> Self {
+        var command = Self(type: "SaveRun"); command.run = run; command.kind = "sandbox"; command.name = name
+        return command
+    }
     public static func start(_ run: String) -> Self {
         var command = Self(type: "StartRun")
         command.run = run; command.attach = false; command.stdin = false
