@@ -499,14 +499,11 @@ mod tests {
     const PATIENCE: Duration = Duration::from_secs(5);
 
     async fn eventually(mut settled: impl FnMut() -> bool) {
-        let until = Instant::now() + PATIENCE;
-        while Instant::now() < until {
-            if settled() {
-                return;
-            }
+        let deadline = Instant::now() + PATIENCE;
+        while !settled() {
+            assert!(Instant::now() < deadline, "the refresh never landed");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("the refresh never landed");
     }
 
     /// A host whose configuration takes a while to read: the first read answers at once, every later one blocks.
