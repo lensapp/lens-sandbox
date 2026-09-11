@@ -386,6 +386,20 @@ place.** Where the authentication comes back with different authority, the grant
 naming that connection are invalidated and asked again
 ([sandbox-spec §3.2.4](sandbox-spec.md#324-installing-connecting-and-applying)).
 
+**Native OAuth progresses automatically.** `oauth_device` prints its trusted
+verification destination and user code, and waits while the service polls.
+`oauth_authorization_code` reports that it opened the browser and waits for the
+service-owned loopback callback. Both disclose requested scopes and authentication
+destinations, support Ctrl-C cancellation, and report completed, canceled,
+expired, or failed distinctly. No Continue presses drive OAuth. Without an
+interactive terminal they fail before starting authorization. The Rust approval
+UI shows the same structured progress with Open browser, Copy code, and Cancel
+where applicable; closing cancels. A sign-in-and-grant card still grants only the
+run and operation the user authorized. Status reads trigger no provider requests.
+Disconnect reports local credential deletion, never provider-side revocation.
+See [sandbox-spec §3.2.7](sandbox-spec.md#327-native-oauth) for registration,
+loopback callbacks, bounds, and the separation of public outputs and private state.
+
 **A method carrying code discloses bounds, because it has no behaviour to show.**
 A `code` method ([sandbox-spec §3.2.6](sandbox-spec.md#326-kind-code)) is a
 component lns runs and nobody can read, so the card names the hosts it may contact
