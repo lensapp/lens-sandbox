@@ -345,6 +345,11 @@ impl Admissions {
         before - open.flows.len()
     }
 
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        self.open.lock().expect("admissions poisoned").flows.len()
+    }
+
     fn release(&self, flow: Flow, serial: u64) {
         let mut open = self.open.lock().expect("admissions poisoned");
         if open
@@ -354,10 +359,6 @@ impl Admissions {
         {
             open.flows.remove(&flow);
         }
-    }
-
-    fn held(&self) -> usize {
-        self.open.lock().expect("admissions poisoned").flows.len()
     }
 }
 
@@ -1723,6 +1724,22 @@ mod tests {
         let (tcp, _) = TcpHeader::from_slice(rest).unwrap();
         assert!(tcp.rst);
         assert_eq!(admissions.held(), 1, "and nothing was allocated for it");
+
+        let counters = Counters::default();
+        let sent_back = received_by(
+            &config,
+            &admissions,
+            &counters,
+            &tcp_packet("93.184.216.36:443", true),
+        );
+
+        let Outcome::Frame(frame) = sent_back else {
+            panic!("the reset goes back to the guest over its own link");
+        };
+        let (_, refused) = etherparse::Ethernet2Header::from_slice(&frame).unwrap();
+        let (_, segment) = Ipv4Header::from_slice(refused).unwrap();
+        assert!(TcpHeader::from_slice(segment).unwrap().0.rst);
+        assert_eq!(counters.seen(DROPPED_TCP_FLOWS), 1);
     }
 
     #[test]
@@ -2072,11 +2089,25 @@ mod tests {
 
     /// One packet judged the way a run judges it, from the link inwards.
     fn received(config: &Config, packet: &[u8]) -> Outcome {
+        received_by(
+            config,
+            &admissions(Limits::default()),
+            &Counters::default(),
+            packet,
+        )
+    }
+
+    fn received_by(
+        config: &Config,
+        admissions: &Admissions,
+        counters: &Counters,
+        packet: &[u8],
+    ) -> Outcome {
         ingress(
             config,
             &Arc::new(Mutex::new(Refusals::default())),
-            &Counters::default(),
-            &admissions(Limits::default()),
+            counters,
+            admissions,
             &Link::new(GATEWAY_MAC, config.lease.gateway),
             packet,
         )
