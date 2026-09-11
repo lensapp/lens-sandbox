@@ -28,6 +28,33 @@ nothing.
   anything starts.
 - **Ten free TCP ports and one UDP port** from `--base-port` upward (47200 by
   default), plus one loopback port for the witness.
+- **A `tcp` rule per fixture destination in the guest's definition.** The harness
+  writes this for you, and you have to know why it is there. The sandbox puts its
+  own nftables in front of every TCP stream the guest opens, and redirects it to
+  the in-guest transparent proxy. The proxy accepts the connect — so `nc -zv`
+  reports the port open — and then asks the policy what to do with the stream. An
+  `egress.http` catch-all does not decide a raw stream, and a destination no rule
+  decides is asked about; headless (`LNS_HEADLESS=1`) there is nobody to ask, so
+  the stream is held and no byte reaches the host. Each generated definition
+  therefore carries one `egress.tcp` entry per fixture destination:
+
+  ```yaml
+  spec:
+    image: docker.io/library/alpine:3.20
+    egress:
+      http:
+        - match: "*"
+          verdict: allow
+      tcp:
+        - match: "192.168.1.50:47200"
+          verdict: allow
+          description: parity host fixture
+  ```
+
+  A `tcp` rule must name a port, and no wildcard or range of ports exists, so
+  there is one entry per fixture port: the seven TCP fixtures and the UDP echo
+  port. The witness is left out on purpose — it binds `127.0.0.1`, and
+  `loopback-witness` proves the guest cannot reach it.
 - **The running service must be your own private one.** The harness never
   touches the service in your menu bar: it starts its own on its own socket.
 
@@ -38,12 +65,14 @@ $ cp tests/parity/parity.example.toml parity.toml     # then set `bind`
 $ cargo run -p net-parity -- run \
     --config parity.toml --backend netstack --out netstack.json
 [service]  pid 54120 home /tmp/parity-54098/home socket /tmp/parity-54098/service.sock
-[case]  lease-and-resolver
+[case]  fixture-reachable (budget 120s)
+[pass]  fixture-reachable
+[case]  lease-and-resolver (budget 120s)
 [pass]  lease-and-resolver
-[case]  upload-100m
+[case]  upload-100m (budget 120s)
 [pass]  upload-100m
 ...
-netstack: 10 pass, 1 skip, 1 blocked-by-product
+netstack: 11 pass, 1 skip, 1 blocked-by-product
 written to netstack.json
 ```
 
@@ -56,7 +85,35 @@ $ cargo run -p net-parity -- run \
 ```
 
 `--case NAME` (repeatable) runs a subset. The order is always the registry
-order, so `service-stop-with-guests` stays last — it stops the service.
+order, so `service-stop-with-guests` stays last — it stops the service. A
+selection that needs a raw stream to the fixtures always runs `fixture-reachable`
+first, whether you named it or not.
+
+Every case declares a budget, and the run prints it. A case past its budget is a
+**fail** — `budget exceeded after 121s, 0 bytes seen by the fixture` — and its
+guests are killed and removed before the next case starts. The budget covers the
+whole case, the guest boot included:
+
+| Case | Budget |
+|---|---|
+| `upload-100m`, `download-100m`, `bidirectional-100m`, the half closes, `reset-mid-transfer` | 120 s at the 100 MB size |
+| `kill-mid-transfer`, `service-stop-with-guests` | 120 s — one cycle group plus one boot |
+| `create-destroy-20` | 240 s — 60 s per group of five cycles |
+| `fixture-reachable`, `lease-and-resolver`, `udp-echo`, `loopback-witness` | 120 s |
+
+Raise one where your host is slower, either on the command line or in the config:
+
+```
+$ cargo run -p net-parity -- run --config parity.toml --backend netstack \
+    --budget download-100m=300 --out netstack.json
+```
+
+```toml
+budgets = { "download-100m" = 300 }
+```
+
+The result is written after **every** case, not once at the end, so a run you
+stop halfway still leaves a readable `result.json`.
 
 `run` exits 1 when a case failed, 0 otherwise. A skip never fails the run.
 
@@ -122,6 +179,7 @@ first, and the result records each image's digest.
 
 | Case | What it proves | Pass criteria |
 |---|---|---|
+| `fixture-reachable` | One raw TCP stream to the host fixtures carries bytes both ways. Runs **first**. | The guest sends 16 bytes to the TCP echo fixture and reads the same 16 back within 10 s. A fail skips every case that needs a raw stream, with `fixture unreachable from the guest: <the preflight error>`, rather than letting each one stall to its own budget. |
 | `lease-and-resolver` | The guest gets an address and a resolver. | `ip -4 addr show eth0` gives an address and prefix; `/etc/resolv.conf` names a nameserver. Both recorded. |
 | `upload-100m` | A long guest-to-host transfer is byte-exact. | The sink read 104857600 bytes and hashed them to the hash of 100 MiB of zeros. Throughput recorded. |
 | `download-100m` | A long host-to-guest transfer is byte-exact. | The guest's `sha256sum` equals the host's hash of the 100 MiB pattern. Throughput recorded. |
@@ -149,7 +207,9 @@ for the harness's own gaps. It skips when:
 - the image has no tool that sends a zero-length datagram, so the
   empty-datagram half of `udp-echo` cannot be put (a custom image closes this
   in a later phase);
-- the host reports no descriptor count for the service.
+- the host reports no descriptor count for the service;
+- `fixture-reachable` failed, so no raw stream reaches the fixtures and every
+  case that needs one is skipped with the preflight's own error.
 
 A case **fails** only when a backend did something measurably wrong, and is
 **blocked-by-product** when a known product defect stops it. A run where every
@@ -196,6 +256,12 @@ One `result.json` per backend run, `schema_version = 1`:
   "samples": [{ "at_ms": 5000, "rss_kib": 120400, "open_fds": 48 }]
 }
 ```
+
+Every case records what the host fixtures saw while it ran —
+`fixture_seen_connections`, `fixture_seen_bytes_in`, `fixture_seen_bytes_out` —
+whatever its verdict. A stall is therefore readable from `result.json` alone: a
+case that failed on its budget with `fixture_seen_bytes_in: 0` never moved a
+byte, and one with a partial count stopped partway.
 
 `status` is one of `pass`, `fail`, `skip`, `blocked-by-product`. A case that
 failed carries `error`; one that skipped or is blocked carries `reason`.

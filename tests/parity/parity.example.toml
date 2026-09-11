@@ -7,6 +7,17 @@ guest_subnet = "192.168.127"
 
 images = { curl = "docker.io/curlimages/curl:8.11.1", alpine = "docker.io/library/alpine:3.20" }
 
+# Each case has a budget in seconds, and a case past it fails and has its guests
+# killed. Raise one here where this host is slower than the defaults assume.
+# budgets = { "download-100m" = 300 }
+
+# The harness writes the guest definitions itself. Each one allows the fixture
+# destinations in `egress.tcp` — one entry per fixture port, because a tcp rule
+# must name a port. The guest's own nftables send every TCP stream to the
+# in-guest transparent proxy first, and a raw destination no `egress.tcp` entry
+# decides is held there, not carried: headless there is nobody to ask. An
+# `egress.http` catch-all decides HTTP requests, never a raw stream.
+
 [[backend]]
 name = "netstack"
 lns = "bin/lns"
