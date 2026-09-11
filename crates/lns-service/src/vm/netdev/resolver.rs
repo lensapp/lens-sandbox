@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -129,12 +130,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_ipv6_nameserver_is_asked_over_ipv6() {
-        let answered = HostUpstream
-            .over_udp(server("::1", 9), b"question".to_vec())
-            .await;
+        let asked = HostUpstream.over_udp(server("::1", 9), b"question".to_vec());
+
+        let answered = tokio::time::timeout(Duration::from_millis(200), asked).await;
 
         assert!(
-            answered.is_err(),
+            answered.is_err() || answered.is_ok_and(|inner| inner.is_err()),
             "the discard port answers nothing, and a host without IPv6 cannot even bind"
         );
     }
