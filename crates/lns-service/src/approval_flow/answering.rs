@@ -662,6 +662,7 @@ mod tests {
         let port = Arc::new(WillingPort::default());
         session.set_connector_port(port.clone());
         session.hold_for_offers(vec![lns_ipc::ConnectorView {
+            description: None,
             name: name.to_string(),
             digest: "sha256:test".into(),
             serves: vec!["api.linear.app".into()],

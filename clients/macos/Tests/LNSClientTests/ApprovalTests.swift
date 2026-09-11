@@ -3,6 +3,12 @@ import XCTest
 @testable import LNSClient
 
 final class ApprovalTests: XCTestCase {
+    func testConnectorDescriptionIsDecodedForPresentation() throws {
+        let data = Data(#"{"name":"issues","digest":"one","description":"Work with projects and issues.","serves":["api.example.com"],"methods":[],"connections":[]}"#.utf8)
+        let offer = try JSONDecoder().decode(ConnectorOffer.self, from: data)
+        XCTAssertEqual(offer.description, "Work with projects and issues.")
+    }
+
     func testDisconnectDisablesAnswersAndReconnectReplacesOldState() throws {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "live-approvals", withExtension: "json", subdirectory: "Fixtures"))
         let snapshot = try JSONDecoder().decode(ApprovalSnapshot.self, from: Data(contentsOf: url))

@@ -103,6 +103,29 @@ final class ManagementSessionTests: XCTestCase {
         XCTAssertFalse(session.busy)
     }
 
+    func testDismissingAnActionMessageDoesNotRepeatTheActionAndAllowsTheNextResult() async {
+        let client = Client()
+        client.frames = [#"{"type":"ConnectorList","connectors":[]}"#]
+        let session = ManagementSession(service: client)
+        await session.refresh()
+        for _ in 0..<2 {
+            client.streams = [AsyncThrowingStream { continuation in
+                continuation.yield(Data(#"{"type":"RunStopped","forced":false}"#.utf8)); continuation.finish()
+            }]
+            let result = await session.perform(.stop("run-1"))
+            XCTAssertTrue(result)
+            XCTAssertEqual(session.message, "Sandbox stopped.")
+            let requests = client.requests.count
+            var changed = false
+            session.onChange = { changed = true }
+            session.dismissMessage()
+            XCTAssertNil(session.message)
+            XCTAssertTrue(changed, "The banner must update when dismissed")
+            XCTAssertEqual(client.requests.count, requests, "Dismissal must not submit an action")
+            XCTAssertTrue(session.connected)
+        }
+    }
+
     func testBrokenConnectorInventoryCannotPreventStoppingASandbox() async {
         let client = Client()
         let session = ManagementSession(service: client)

@@ -20,6 +20,7 @@ public struct LiveApproval: Decodable, Identifiable, Equatable {
 }
 
 public struct ConnectorOffer: Decodable, Equatable {
+    public var description: String? = nil
     public let name: String
     public let digest: String
     public let serves: [String]

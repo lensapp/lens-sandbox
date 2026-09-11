@@ -8,7 +8,7 @@ struct ConnectorCards: View {
 
     private var connectors: [ConnectorOffer] {
         model.management.connectors.filter {
-            search.isEmpty || ([$0.name] + $0.serves).joined(separator: " ").localizedCaseInsensitiveContains(search)
+            search.isEmpty || ([$0.name, $0.description ?? ""] + $0.serves).joined(separator: " ").localizedCaseInsensitiveContains(search)
         }
     }
 
@@ -85,10 +85,12 @@ private struct ConnectorCard: View {
                 } label: { Image(systemName: "ellipsis").accessibilityLabel("Actions for \(connector.name)") }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 24)
             }
-            Text(connector.serves.joined(separator: ", "))
-                .font(.system(size: 11, design: .monospaced)).foregroundStyle(LNSTheme.muted)
-                .lineLimit(2).help(connector.serves.joined(separator: "\n")).textSelection(.enabled)
-                .frame(maxWidth: .infinity, minHeight: 30, alignment: .topLeading)
+            if let description = connector.description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
+                Text(description)
+                    .font(.callout).foregroundStyle(LNSTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if !canGrant {
                 Text(canConnect ? "Connect an account to grant sandbox access." : "This connector is unavailable in this version.")
                     .font(.callout).foregroundStyle(LNSTheme.muted)

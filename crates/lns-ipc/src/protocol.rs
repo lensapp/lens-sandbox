@@ -445,6 +445,8 @@ impl std::fmt::Debug for SecretValues {
 /// One installed connector as `lns connector list` shows it: what it serves, how it can be connected, and the connections this machine holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub name: String,
     pub digest: String,
     pub serves: Vec<String>,
@@ -1250,6 +1252,13 @@ mod secret_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn connector_description_survives_the_wire() {
+        let data = serde_json::json!({"name":"issues","digest":"sha256:one","description":"Work with projects and issues.","serves":["api.example.com"],"methods":[],"connections":[]});
+        let view: super::ConnectorView =
+            serde_json::from_value(data.clone()).expect("decode connector");
+        assert_eq!(serde_json::to_value(view).expect("encode connector"), data);
+    }
 
     fn a_method_setting(env: &[&str], credentials: &[&str]) -> ConnectorMethodView {
         ConnectorMethodView {
@@ -1279,6 +1288,7 @@ mod tests {
 
     fn holding(labels: &[&str]) -> ConnectorView {
         ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],

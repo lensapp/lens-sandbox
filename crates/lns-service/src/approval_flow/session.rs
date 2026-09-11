@@ -1736,6 +1736,7 @@ pub(crate) mod tests {
 
     fn named_serving(name: &str, destination: &str) -> ConnectorView {
         ConnectorView {
+            description: None,
             name: name.to_string(),
             digest: "sha256:abc".to_string(),
             serves: vec![destination.to_string()],
@@ -2105,6 +2106,7 @@ pub(crate) mod tests {
 
     fn offering(method: &str, connections: &[&str]) -> ConnectorView {
         ConnectorView {
+            description: None,
             name: "some-provider".to_string(),
             digest: "sha256:abc".to_string(),
             serves: vec!["api.some-provider.example".to_string()],

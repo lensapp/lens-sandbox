@@ -43,8 +43,11 @@ retrying. Creating a sandbox requires the bundle containing CLI/service helpers.
 Use **Sign In to a Registry…** in this form if its definition or base image
 requires authentication; then retry the launch after signing in.
 
-**Connectors** shows installed connectors as cards with saved connections and
-their authority. An unconnected card leads with **Connect…**; once a connection
+**Connectors** shows installed connectors as cards with the author's
+`spec.description`, saved connections, and their authority. Missing or blank
+descriptions take no space. Search matches names, descriptions, and destinations;
+grant details disclose the destinations a method opens.
+An unconnected card leads with **Connect…**; once a connection
 is available, **Grant Access…** becomes primary and **New connection…** remains
 available. Access that needs no account can be granted directly. Install a registry
 reference or choose a local connector document. **Connect…** saves a named
@@ -191,6 +194,10 @@ Reopen it from Live Requests (⌘3).
 
 Audit details have one **Copy event** action for the raw event. Individual values
 remain selectable and offer Copy in their context menus.
+
+Confirmed management actions appear in a distinct notification at the bottom
+right of the dashboard. It remains visible across page changes until dismissed
+or replaced by the next action. Dismissing it does not repeat or undo the action.
 
 Without an override, the app uses
 `~/Library/Application Support/run.lns/service.sock`.

@@ -211,6 +211,7 @@ mod tests {
         let (tx, _rx) = unbounded_channel();
         let mut offered = prompt("r1", "api.some-provider.example");
         offered.offer = Some(lns_ipc::ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],

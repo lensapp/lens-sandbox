@@ -179,6 +179,7 @@ mod tests {
         use lns_ipc::{ApprovalConnection, ConnectorMethodView, ConnectorView, Request};
         let mut host = Offers {
             offer: Some(ConnectorView {
+                description: None,
                 name: "linear".into(),
                 digest: "sha256:test".into(),
                 serves: vec![],

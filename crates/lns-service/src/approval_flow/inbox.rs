@@ -479,6 +479,7 @@ mod tests {
             treatment: crate::approval_flow::protocol::Treatment::Raw,
             run: Some("run".into()),
             offer: Some(lns_ipc::ConnectorView {
+                description: None,
                 name: "provider".into(),
                 digest: "sha256:fixture".into(),
                 serves: vec!["api.example.com".into()],
