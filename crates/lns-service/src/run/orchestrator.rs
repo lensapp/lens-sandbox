@@ -507,16 +507,17 @@ async fn orchestrate(
     );
 
     #[cfg(target_os = "macos")]
-    let run_dir = upper_disk_path
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    #[cfg(target_os = "macos")]
-    let console_fd = vm::diag_console::spawn(run_dir.join("console.log"), args.debug)?;
+    let console_fd = {
+        let run_dir = upper_disk_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        vm::diag_console::spawn(run_dir.join("console.log"), args.debug)?
+    };
 
-    // Before the VM, so a backend that cannot serve the link refuses the run rather than booting a guest with no network.
+    // Before the VM, so a link that cannot be served refuses the run rather than booting a guest with no network.
     #[cfg(target_os = "macos")]
-    let netdev = vm::netdev::real::start(&run_dir, |k| std::env::var_os(k)).await?;
+    let netdev = vm::netdev::real::start(|k| std::env::var_os(k))?;
     #[cfg(target_os = "macos")]
     {
         let backend = netdev.backend;

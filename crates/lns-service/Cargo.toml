@@ -72,6 +72,13 @@ toml       = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 zerocopy   = { version = "0.8", features = ["derive"] }
 libc       = "0.2"
+
+# The guest network: our own layer 2 (etherparse), smoltcp's TCP/UDP behind
+# netstack-smoltcp, and hickory-proto for the gateway resolver's wire format.
+etherparse = "0.16.0"
+netstack-smoltcp = "0.2.4"
+hickory-proto = "0.26.1"
+
 tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
 anstyle = "1"
@@ -143,6 +150,17 @@ gtk = "0.18"
 tempfile = "3"
 anyhow = "1"
 futures-util = "0.3"
+# smoltcp itself is the fake guest in the netdev integration test: an
+# ethernet Device over a channel, a DHCPv4 client socket and a TCP socket.
+smoltcp = { version = "0.12.0", default-features = false, features = [
+    "std",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-dhcpv4",
+    "socket-dhcpv4",
+    "socket-tcp",
+    "socket-udp",
+] }
 tokio    = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # `#[serial]` for tests that mutate process-wide env state. Without
 # serialization, concurrent set_var / remove_var races make env-driven

@@ -55,19 +55,23 @@ Two environment variables override the defaults (mostly useful for development):
 
 ## The guest network
 
-Each run gets its own network, served by a small userspace process the service
-starts beside the guest and stops with it. There is no bridge on the host, no
-host DHCP server, and no shared packet filter between runs.
+Each run gets its own network, served inside the service by a small
+userspace TCP/IP stack that starts with the guest and stops with it. There is
+no bridge on the host, no host DHCP server, no helper binary, and no state
+shared between runs.
 
-On macOS that process is
-[`gvproxy`](https://github.com/containers/gvisor-tap-vsock). The service starts
-one per run, connects a datagram socket to it, and attaches that socket to the
-virtual machine. `gvproxy` answers DHCP, DNS and NAT itself:
+On macOS the service creates a datagram socket pair, hands one end to the
+virtual machine as its network device, and keeps the other. It then speaks
+ethernet on that socket itself: it answers ARP for the gateway, leases the
+guest its address over DHCP, resolves names on the gateway, and turns the
+guest's TCP and UDP flows into ordinary host sockets.
 
 | | |
 |---|---|
 | Guest subnet | `192.168.127.0/24` |
 | Gateway and DNS resolver | `192.168.127.1` |
+| Guest address | `192.168.127.2` |
+| Gateway MAC | `0e:6c:6e:73:00:01` (locally administered) |
 | MTU | 1500 |
 
 Egress policy is unaffected. Every request still goes through the in-guest
@@ -76,34 +80,37 @@ before. The chain also records which backend a run used:
 
 ```
 $ lns audit
-2026-09-11T09:14:02Z  calm-finch  network  guest network served by gvproxy (192.168.127.0/24)
+2026-09-11T09:14:02Z  calm-finch  network  guest network served by netstack (192.168.127.0/24)
 ```
 
 The launch prints the same thing:
 
 ```
 $ lns run -- curl -sS https://example.com
-  Network  gvproxy (192.168.127.0/24)
+  Network  netstack (192.168.127.0/24)
   Booting  microVM
 ```
 
-### Where gvproxy comes from
+### What the guest can reach
 
-The service looks in three places, in order, and stops at the first hit:
+The stack decides every destination before it opens a host socket. A refused
+TCP connection is answered with a reset, so the guest fails at once; a refused
+datagram is dropped.
 
-1. `LNS_GVPROXY_BIN` — a path you name. If that path is not a file, the run is
-   refused; it does not fall back.
-2. `gvproxy` on `PATH`.
-3. The copy lns manages, at `~/.lns/gvproxy/<version>/gvproxy`. If it is not
-   there, the service downloads the pinned release on first use and checks it
-   against the published SHA-256 before installing it. Bytes that do not match
-   are never installed, and the run is refused.
+| Destination | Result |
+|---|---|
+| `192.168.127.1:53` (UDP) | The gateway resolver answers. |
+| Anything else in `192.168.127.0/24` | Refused. There is no control API on the gateway and no address that forwards to the host. |
+| `127.0.0.0/8` | Refused. The guest cannot reach anything bound to the host's loopback. |
+| `0.0.0.0/8`, `169.254.0.0/16`, `224.0.0.0/4`, `255.255.255.255` | Refused. |
+| Every other address, including the host's own LAN addresses | Carried, exactly as it was on the `vmnet` bridge. |
 
-There is no `brew` or `apt` step. `lns-install.sh` fetches the same pinned
-binary during install on macOS, so the first run needs no download.
+Names are resolved through the host's own resolver, so a VPN or a scoped
+resolver answers for the guest too. Question types the host resolver does not
+answer go to the first nameserver in `/etc/resolv.conf`.
 
-A run that cannot get a verified `gvproxy` fails before the workload starts and
-exits `125`, like every other pre-start refusal.
+Published ports (`-p`, `spec.ports`) are unaffected: they travel over the
+run's vsock channel, not over this link.
 
 ### Going back to the old bridge
 
@@ -115,6 +122,9 @@ LNS_NETDEV=vmnet lns run -- curl -sS https://example.com
 ```
 
 This is an escape hatch for one release. Report anything that needs it.
+`LNS_NETDEV=netstack` names the default explicitly. A run whose link cannot be
+served fails before the workload starts and exits `125`, like every other
+pre-start refusal.
 
 ## Updating
 

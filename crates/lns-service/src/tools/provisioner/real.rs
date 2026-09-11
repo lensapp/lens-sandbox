@@ -183,11 +183,7 @@ async fn run_provisioner(
     )?;
 
     #[cfg(target_os = "macos")]
-    let netdev =
-        vm::netdev::real::start(upper_disk.parent().unwrap_or_else(|| Path::new(".")), |k| {
-            std::env::var_os(k)
-        })
-        .await?;
+    let netdev = vm::netdev::real::start(|k| std::env::var_os(k))?;
 
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();

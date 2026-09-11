@@ -9,9 +9,9 @@ use super::VmSpec;
 
 mod launch;
 mod orchestrate;
-pub(crate) mod process;
+mod process;
 mod real;
-pub(crate) mod vmm_bin;
+mod vmm_bin;
 mod vsock;
 
 use process::Child;

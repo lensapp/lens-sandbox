@@ -1,20 +1,21 @@
 use std::ffi::OsString;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::super::cloud_hypervisor::process::{Child, RealChild, RealSpawner};
-use super::{
-    Backend, NetAttachment, NetLayout, RunningNetDev, START_TIMEOUT, connect_datagram,
-    ensure_gvproxy, start_with,
-};
+use super::engine::Running;
+use super::policy::Boundary;
+use super::resolver::SystemResolver;
+use super::{Backend, GUEST_NETWORK, GUEST_PREFIX, NetAttachment, device_pair, serve};
 
-/// A run's network backend: the gvproxy that serves its link and the socket Vz is attached to, both held for exactly as long as the guest.
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+
+/// A run's network: the socket Vz is attached to and every task serving it, both held for exactly as long as the guest.
 pub struct NetDevice {
     pub backend: Backend,
     socket: Option<OwnedFd>,
-    child: Option<RealChild>,
+    _running: Option<Running>,
 }
 
 impl NetDevice {
@@ -26,39 +27,25 @@ impl NetDevice {
     }
 }
 
-impl Drop for NetDevice {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.start_kill();
-        }
-    }
-}
-
-pub async fn start(
-    run_dir: &Path,
-    env_get: impl Fn(&str) -> Option<OsString>,
-) -> Result<NetDevice> {
+pub fn start(env_get: impl Fn(&str) -> Option<OsString>) -> Result<NetDevice> {
     let backend = Backend::from_env(&env_get)?;
     if backend == Backend::Vmnet {
         return Ok(NetDevice {
             backend,
             socket: None,
-            child: None,
+            _running: None,
         });
     }
-    let program = ensure_gvproxy(&crate::cache::root()?, &env_get).await?;
-    let layout = NetLayout::for_run_dir(run_dir);
-    let RunningNetDev { child, fd } = start_with(
-        &RealSpawner,
-        &program,
-        &layout,
-        START_TIMEOUT,
-        connect_datagram,
-    )
-    .await?;
+    let pair = device_pair()?;
+    let resolv_conf = std::fs::read_to_string(RESOLV_CONF).unwrap_or_default();
+    let running = serve(
+        pair.host,
+        Arc::new(SystemResolver::from_resolv_conf(&resolv_conf)),
+        Boundary::around(GUEST_NETWORK, GUEST_PREFIX),
+    )?;
     Ok(NetDevice {
         backend,
-        socket: Some(fd),
-        child: Some(child),
+        socket: Some(pair.vm),
+        _running: Some(running),
     })
 }

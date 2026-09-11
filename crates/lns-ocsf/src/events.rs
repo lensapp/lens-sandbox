@@ -798,17 +798,17 @@ mod tests {
 
     #[test]
     fn network_backend_names_what_served_the_guest_link() {
-        let ev = network_backend(&ctx(), "gvproxy", "192.168.127.0/24");
+        let ev = network_backend(&ctx(), "netstack", "192.168.127.0/24");
         assert_schema_valid(&ev);
         assert_eq!(
-            ev["message"], "guest network served by gvproxy (192.168.127.0/24)",
+            ev["message"], "guest network served by netstack (192.168.127.0/24)",
             "a reader has to see which backend carried the run's traffic"
         );
         assert_eq!(ev["unmapped"]["lns_kind"], "network");
-        assert_eq!(ev["unmapped"]["lns_network_backend"], "gvproxy");
+        assert_eq!(ev["unmapped"]["lns_network_backend"], "netstack");
         assert_eq!(ev["unmapped"]["lns_network_detail"], "192.168.127.0/24");
         assert_eq!(ev["unmapped"]["lns_origin"], "host");
-        assert_eq!(ev["process"]["name"], "gvproxy");
+        assert_eq!(ev["process"]["name"], "netstack");
         assert_eq!(ev["device"]["name"], "calm-finch");
         assert_eq!(ev["actor"]["app_name"], "lns");
     }

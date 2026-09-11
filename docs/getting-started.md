@@ -9,10 +9,9 @@ LNS boots a real microVM under a hardware hypervisor:
 
 - **macOS on Apple Silicon** (M-series) — uses Apple's Virtualization framework,
   which ships with macOS, so there's nothing extra to install. Intel Macs cannot
-  host the guest VM and are rejected by the installer. The guest's network comes
-  from `gvproxy`, which the installer fetches for you and the service downloads
-  on first use if you skipped that step. See
-  [The background service](service.md#the-guest-network).
+  host the guest VM and are rejected by the installer. The guest's network is
+  served inside the service itself, so there is nothing extra to install for it
+  either. See [The background service](service.md#the-guest-network).
 - **Linux on x86_64 or aarch64** — uses KVM via Cloud Hypervisor. You need
   `/dev/kvm` accessible to your user (typically `sudo usermod -aG kvm $USER`) and
   the `cloud-hypervisor` and `virtiofsd` binaries available on `PATH` (or pointed

@@ -867,11 +867,11 @@ mod tests {
     fn record_net_backend_writes_which_backend_served_the_guest_link() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("audit.jsonl");
-        record_net_backend_at(&path, &cx(), "gvproxy", "192.168.127.0/24").unwrap();
+        record_net_backend_at(&path, &cx(), "netstack", "192.168.127.0/24").unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
-            content.contains("\"lns_network_backend\":\"gvproxy\""),
+            content.contains("\"lns_network_backend\":\"netstack\""),
             "the chain has to say what carried the run's packets: {content}"
         );
         assert!(
