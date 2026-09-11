@@ -8,8 +8,9 @@ use anyhow::{Context, Result};
 use etherparse::{
     IpNumber, Ipv4Header, PacketBuilder, TcpHeader, UdpHeader, icmpv4::DestUnreachableHeader,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
 use netstack_smoltcp::StackBuilder;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -41,6 +42,12 @@ pub const MAX_UDP_FLOWS: usize = 512;
 pub const MAX_DNS_IN_FLIGHT: usize = 256;
 
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a flow the guest opened but never finished opening holds its place.
+const TCP_HALF_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the half-open flows are looked over.
+const TCP_HALF_OPEN_SWEEP: Duration = Duration::from_secs(5);
 
 const CHANNEL_DEPTH: usize = 512;
 
@@ -212,7 +219,148 @@ impl Allowance {
     }
 }
 
+/// One guest TCP flow, by the two ends the guest named. The library allocates one socket per SYN, so the engine decides per flow.
+type Flow = (SocketAddr, SocketAddr);
+
+/// What the engine does with a SYN before the stack may allocate for it.
+#[derive(Debug, PartialEq, Eq)]
+enum Admission {
+    Fresh,
+    Repeated,
+    Full,
+}
+
+struct Admitted {
+    _permit: OwnedSemaphorePermit,
+    serial: u64,
+    since: tokio::time::Instant,
+    established: bool,
+    claimed: bool,
+    cancel: CancellationToken,
+}
+
+#[derive(Default)]
+struct Open {
+    flows: HashMap<Flow, Admitted>,
+    next_serial: u64,
+}
+
+/// The flows one guest's stack holds. A flow takes its place here — and its permit — before the library sees the SYN that would allocate for it.
+pub struct Admissions {
+    open: Mutex<Open>,
+    allowance: Arc<Allowance>,
+}
+
+impl Admissions {
+    fn new(allowance: Arc<Allowance>) -> Self {
+        Self {
+            open: Mutex::new(Open::default()),
+            allowance,
+        }
+    }
+
+    fn admit(&self, flow: Flow) -> Admission {
+        let mut open = self.open.lock().expect("admissions poisoned");
+        if open.flows.contains_key(&flow) {
+            return Admission::Repeated;
+        }
+        let Some(permit) = self.allowance.tcp_flow() else {
+            return Admission::Full;
+        };
+        let serial = open.next_serial;
+        open.next_serial += 1;
+        open.flows.insert(
+            flow,
+            Admitted {
+                _permit: permit,
+                serial,
+                since: tokio::time::Instant::now(),
+                established: false,
+                claimed: false,
+                cancel: CancellationToken::new(),
+            },
+        );
+        Admission::Fresh
+    }
+
+    /// A segment the guest sends after its SYN is the only proof its handshake finished; until one arrives the flow is half-open.
+    fn established(&self, flow: Flow) {
+        let mut open = self.open.lock().expect("admissions poisoned");
+        if let Some(admitted) = open.flows.get_mut(&flow) {
+            admitted.established = true;
+        }
+    }
+
+    /// One admitted flow is one stream: a second claim of the same flow is nobody's, and may not release what the first holds.
+    fn claim(self: &Arc<Self>, flow: Flow) -> Option<Claim> {
+        let mut open = self.open.lock().expect("admissions poisoned");
+        let admitted = open.flows.get_mut(&flow).filter(|held| !held.claimed)?;
+        admitted.claimed = true;
+        Some(Claim {
+            admissions: Arc::clone(self),
+            flow,
+            serial: admitted.serial,
+            cancel: admitted.cancel.clone(),
+        })
+    }
+
+    /// A guest that opens flows it never finishes would hold them all; each one leaves after this long, and its relay ends with it.
+    fn expire(&self, after: Duration) -> usize {
+        let mut open = self.open.lock().expect("admissions poisoned");
+        let before = open.flows.len();
+        open.flows.retain(|_, admitted| {
+            let keep = admitted.established || admitted.since.elapsed() < after;
+            if !keep {
+                admitted.cancel.cancel();
+            }
+            keep
+        });
+        before - open.flows.len()
+    }
+
+    fn release(&self, flow: Flow, serial: u64) {
+        let mut open = self.open.lock().expect("admissions poisoned");
+        if open
+            .flows
+            .get(&flow)
+            .is_some_and(|held| held.serial == serial)
+        {
+            open.flows.remove(&flow);
+        }
+    }
+
+    fn held(&self) -> usize {
+        self.open.lock().expect("admissions poisoned").flows.len()
+    }
+}
+
+/// The place one relay holds in the admissions table. Dropping it gives the place and its permit back.
+struct Claim {
+    admissions: Arc<Admissions>,
+    flow: Flow,
+    serial: u64,
+    cancel: CancellationToken,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.admissions.release(self.flow, self.serial);
+    }
+}
+
+async fn expire_half_open(admissions: Arc<Admissions>, counters: Arc<Counters>) {
+    loop {
+        tokio::time::sleep(TCP_HALF_OPEN_SWEEP).await;
+        for _ in 0..admissions.expire(TCP_HALF_OPEN_TIMEOUT) {
+            counters.note(DROPPED_TCP_HALF_OPEN);
+        }
+    }
+}
+
 pub const DROPPED_TCP_FLOWS: &str = "a TCP flow over the guest's limit";
+pub const DROPPED_TCP_REPEATED: &str = "a repeated SYN for a flow the stack already has";
+pub const DROPPED_TCP_HALF_OPEN: &str = "a TCP flow the guest never finished opening";
+pub const DROPPED_TCP_UNADMITTED: &str = "a TCP stream whose flow had already ended";
 pub const DROPPED_UDP_FLOWS: &str = "a UDP flow over the guest's limit";
 pub const DROPPED_DNS_IN_FLIGHT: &str = "a DNS query over the guest's limit";
 pub const DROPPED_FRAGMENT: &str = "an IPv4 fragment, which this gateway does not reassemble";
@@ -239,6 +387,7 @@ pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running
     let refused = Arc::new(Mutex::new(Refusals::default()));
     let counters = Arc::new(Counters::default());
     let allowance = Arc::new(Allowance::of(config.limits));
+    let admissions = Arc::new(Admissions::new(Arc::clone(&allowance)));
     let (stack_sink, stack_stream) = stack.split();
     let (udp_read, udp_write) = udp.split();
     let (replies_tx, replies_rx) = channel(CHANNEL_DEPTH);
@@ -252,14 +401,19 @@ pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running
         config,
         refused,
         Arc::clone(&counters),
+        Arc::clone(&admissions),
         Arc::clone(&link),
         frames.from_guest,
         frames.to_guest.clone(),
         stack_sink,
     ));
     tasks.spawn(to_guest(link, stack_stream, frames.to_guest));
+    tasks.spawn(expire_half_open(
+        Arc::clone(&admissions),
+        Arc::clone(&counters),
+    ));
     tasks.spawn(accept_tcp(
-        Arc::clone(&allowance),
+        admissions,
         Arc::clone(&counters),
         relays.clone(),
         tcp,
@@ -285,6 +439,7 @@ async fn from_guest(
     config: Config,
     refused: Refused,
     counters: Arc<Counters>,
+    admissions: Arc<Admissions>,
     link: Arc<Mutex<Link>>,
     mut frames: Receiver<Vec<u8>>,
     answers: Sender<Vec<u8>>,
@@ -295,7 +450,9 @@ async fn from_guest(
             let mut link = link.lock().expect("link poisoned");
             match link.receive(&frame) {
                 Received::Answer(reply) => Outcome::Frame(reply),
-                Received::Ipv4(packet) => ingress(&config, &refused, &counters, &link, packet),
+                Received::Ipv4(packet) => {
+                    ingress(&config, &refused, &counters, &admissions, &link, packet)
+                }
                 Received::Dropped(what) => Outcome::Dropped(what),
             }
         };
@@ -317,14 +474,19 @@ fn ingress(
     config: &Config,
     refused: &Refused,
     counters: &Counters,
+    admissions: &Admissions,
     link: &Link,
     packet: &[u8],
 ) -> Outcome {
-    match classify(config, packet) {
+    match classify(config, admissions, packet) {
         Ingress::Dhcp(reply) => Outcome::Frame(dhcp_frame(config, &reply)),
         Ingress::Answer(packet) => Outcome::Frame(link.send_ipv4(&packet)),
         Ingress::Forward => Outcome::Packet(packet.to_vec()),
         Ingress::Dropped(what) => Outcome::Dropped(what),
+        Ingress::OverLimit { answer, counted } => {
+            counters.note(counted);
+            Outcome::Frame(link.send_ipv4(&answer))
+        }
         Ingress::Refused {
             destination,
             refusal,
@@ -346,11 +508,16 @@ enum Ingress {
         refusal: Refusal,
         answer: Vec<u8>,
     },
+    /// Over a bound the guest may not pass, answered the way a refusal is and counted as its own drop.
+    OverLimit {
+        answer: Vec<u8>,
+        counted: &'static str,
+    },
     Forward,
     Dropped(&'static str),
 }
 
-fn classify(config: &Config, packet: &[u8]) -> Ingress {
+fn classify(config: &Config, admissions: &Admissions, packet: &[u8]) -> Ingress {
     let Ok((header, rest)) = Ipv4Header::from_slice(packet) else {
         return Ingress::Dropped(DROPPED_MALFORMED);
     };
@@ -361,7 +528,7 @@ fn classify(config: &Config, packet: &[u8]) -> Ingress {
     let destination = Ipv4Addr::from(header.destination);
     match header.protocol {
         IpNumber::UDP => udp_ingress(config, source, destination, rest),
-        IpNumber::TCP => tcp_ingress(config, source, destination, rest),
+        IpNumber::TCP => tcp_ingress(config, admissions, source, destination, rest),
         IpNumber::ICMP => icmp_ingress(config, source, destination, rest),
         _ => Ingress::Dropped(DROPPED_PROTOCOL),
     }
@@ -385,13 +552,38 @@ fn udp_ingress(config: &Config, source: Ipv4Addr, destination: Ipv4Addr, rest: &
     refused_or_forward(config, to, unreachable)
 }
 
-fn tcp_ingress(config: &Config, source: Ipv4Addr, destination: Ipv4Addr, rest: &[u8]) -> Ingress {
+fn tcp_ingress(
+    config: &Config,
+    admissions: &Admissions,
+    source: Ipv4Addr,
+    destination: Ipv4Addr,
+    rest: &[u8],
+) -> Ingress {
     let Ok((tcp, _)) = TcpHeader::from_slice(rest) else {
         return Ingress::Dropped(DROPPED_MALFORMED);
     };
     let to = SocketAddr::new(IpAddr::V4(destination), tcp.destination_port);
     let reset = reset_packet(source, destination, &tcp);
-    refused_or_forward(config, to, reset)
+    if let Some(refusal) = config.boundary.refusal(to) {
+        return Ingress::Refused {
+            destination: to,
+            refusal,
+            answer: reset,
+        };
+    }
+    let flow = (SocketAddr::new(IpAddr::V4(source), tcp.source_port), to);
+    if !tcp.syn || tcp.ack {
+        admissions.established(flow);
+        return Ingress::Forward;
+    }
+    match admissions.admit(flow) {
+        Admission::Fresh => Ingress::Forward,
+        Admission::Repeated => Ingress::Dropped(DROPPED_TCP_REPEATED),
+        Admission::Full => Ingress::OverLimit {
+            answer: reset,
+            counted: DROPPED_TCP_FLOWS,
+        },
+    }
 }
 
 /// The gateway answers a ping at its own address, so a guest can tell a dead link from a refused destination.
@@ -531,26 +723,33 @@ fn note_refusal(refused: &Refused, counters: &Counters, destination: SocketAddr,
     log::debug!("the guest network refused {destination}: {reason}");
 }
 
-async fn accept_tcp(
-    allowance: Arc<Allowance>,
+/// One stream per admitted flow. The flow took its place at ingress, so here it is only claimed — and given back when the relay ends.
+async fn accept_tcp<G, S>(
+    admissions: Arc<Admissions>,
     counters: Arc<Counters>,
     relays: Relays,
-    mut listener: netstack_smoltcp::TcpListener,
-) {
-    while let Some((guest, _, destination)) = listener.next().await {
-        match allowance.tcp_flow() {
-            Some(permit) => {
-                relays.carry(async move {
-                    let _permit = permit;
-                    carry_tcp(guest, destination).await;
-                });
+    mut listener: S,
+) where
+    S: Stream<Item = (G, SocketAddr, SocketAddr)> + Unpin,
+    G: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    while let Some((guest, source, destination)) = listener.next().await {
+        let Some(claim) = admissions.claim((source, destination)) else {
+            counters.note(DROPPED_TCP_UNADMITTED);
+            continue;
+        };
+        let cancel = claim.cancel.clone();
+        relays.carry(async move {
+            let _claim = claim;
+            tokio::select! {
+                () = cancel.cancelled() => {}
+                () = carry_tcp(guest, destination) => {}
             }
-            None => counters.note(DROPPED_TCP_FLOWS),
-        }
+        });
     }
 }
 
-async fn carry_tcp(mut guest: netstack_smoltcp::TcpStream, destination: SocketAddr) {
+async fn carry_tcp<G: AsyncRead + AsyncWrite + Unpin>(mut guest: G, destination: SocketAddr) {
     let connect = tokio::net::TcpStream::connect(destination);
     // copy_bidirectional shuts each write half down on the other's EOF, and dropping both ends closes what is left.
     if let Ok(Ok(mut host)) = tokio::time::timeout(TCP_CONNECT_TIMEOUT, connect).await {
@@ -1082,6 +1281,15 @@ mod tests {
         Config::for_subnet(SUBNET, boundary)
     }
 
+    fn admissions(limits: Limits) -> Arc<Admissions> {
+        Arc::new(Admissions::new(Arc::new(Allowance::of(limits))))
+    }
+
+    /// One packet judged by a run that has no flow open yet, which is what every classification test but the admission ones asks about.
+    fn decide(config: &Config, packet: &[u8]) -> Ingress {
+        classify(config, &admissions(Limits::default()), packet)
+    }
+
     type Refusal3 = (SocketAddr, Refusal, Vec<u8>);
 
     fn refused_by(ingress: Ingress) -> Option<Refusal3> {
@@ -1145,7 +1353,7 @@ mod tests {
         };
         let packet = udp_packet("255.255.255.255:67", &discover);
 
-        let reply = leased_by(classify(&config(Boundary::around(SUBNET, 24)), &packet))
+        let reply = leased_by(decide(&config(Boundary::around(SUBNET, 24)), &packet))
             .expect("the guest's own gateway leases its address");
 
         assert_eq!(
@@ -1160,7 +1368,7 @@ mod tests {
     #[test]
     fn a_question_for_the_gateway_resolver_is_carried_even_though_the_subnet_is_refused() {
         assert_eq!(
-            classify(
+            decide(
                 &config(Boundary::around(SUBNET, 24)),
                 &udp_packet("192.168.127.1:53", b"q")
             ),
@@ -1171,7 +1379,7 @@ mod tests {
 
     #[test]
     fn a_datagram_for_any_other_gateway_port_is_dropped_without_a_reply() {
-        let (destination, refusal, answer) = refused_by(classify(
+        let (destination, refusal, answer) = refused_by(decide(
             &config(Boundary::around(SUBNET, 24)),
             &udp_packet("192.168.127.1:8080", b"x"),
         ))
@@ -1203,7 +1411,7 @@ mod tests {
 
     #[test]
     fn a_syn_to_a_refused_destination_is_answered_with_a_reset() {
-        let (_, refusal, answer) = refused_by(classify(
+        let (_, refusal, answer) = refused_by(decide(
             &config(Boundary::around(SUBNET, 24)),
             &tcp_packet("127.0.0.1:8080", true),
         ))
@@ -1225,9 +1433,224 @@ mod tests {
         assert_eq!(tcp.destination_port, 45_000);
     }
 
+    fn flow(source: &str, destination: &str) -> Flow {
+        (source.parse().unwrap(), destination.parse().unwrap())
+    }
+
+    fn reset_of(ingress: Ingress) -> Option<(Vec<u8>, &'static str)> {
+        match ingress {
+            Ingress::OverLimit { answer, counted } => Some((answer, counted)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_syn_the_guest_repeats_is_dropped_so_one_flow_allocates_once() {
+        let admissions = admissions(Limits::default());
+        let config = config(Boundary::around(SUBNET, 24));
+        let syn = tcp_packet("93.184.216.34:443", true);
+
+        assert_eq!(classify(&config, &admissions, &syn), Ingress::Forward);
+        for _ in 0..2 {
+            assert_eq!(
+                classify(&config, &admissions, &syn),
+                Ingress::Dropped(DROPPED_TCP_REPEATED),
+                "the stack allocates a socket per SYN it sees, so it sees one"
+            );
+        }
+        assert_eq!(admissions.held(), 1);
+    }
+
+    #[test]
+    fn a_syn_over_the_flow_bound_is_reset_before_the_stack_allocates_for_it() {
+        let admissions = admissions(Limits {
+            tcp_flows: 1,
+            ..Limits::default()
+        });
+        let config = config(Boundary::around(SUBNET, 24));
+        assert_eq!(
+            classify(&config, &admissions, &tcp_packet("93.184.216.34:443", true)),
+            Ingress::Forward
+        );
+
+        let over = classify(&config, &admissions, &tcp_packet("93.184.216.35:443", true));
+
+        let (answer, counted) =
+            reset_of(over).expect("the guest is told at once that it may hold no more");
+        assert_eq!(counted, DROPPED_TCP_FLOWS);
+        let (_, rest) = Ipv4Header::from_slice(&answer).unwrap();
+        let (tcp, _) = TcpHeader::from_slice(rest).unwrap();
+        assert!(tcp.rst);
+        assert_eq!(admissions.held(), 1, "and nothing was allocated for it");
+    }
+
+    #[test]
+    fn a_flow_whose_relay_has_ended_gives_its_place_back_to_a_later_syn() {
+        let admissions = admissions(Limits {
+            tcp_flows: 1,
+            ..Limits::default()
+        });
+        let carried = flow("192.168.127.2:45000", "93.184.216.34:443");
+        assert_eq!(admissions.admit(carried), Admission::Fresh);
+        let claim = admissions.claim(carried).expect("the stream is the flow's");
+        assert_eq!(
+            admissions.admit(flow("192.168.127.2:45001", "93.184.216.34:443")),
+            Admission::Full,
+            "the one flow this guest may hold is held"
+        );
+
+        drop(claim);
+
+        assert_eq!(admissions.held(), 0, "the permit goes back with the place");
+        assert_eq!(admissions.admit(carried), Admission::Fresh);
+    }
+
+    #[test]
+    fn a_stream_of_a_flow_that_ended_before_it_arrived_is_not_claimed_twice() {
+        let admissions = admissions(Limits::default());
+        let carried = flow("192.168.127.2:45000", "93.184.216.34:443");
+        admissions.admit(carried);
+        let claim = admissions.claim(carried).expect("the stream is the flow's");
+
+        assert!(
+            admissions.claim(carried).is_none(),
+            "one admitted flow is one stream, and a second claim may not release the first"
+        );
+        assert_eq!(admissions.held(), 1);
+        drop(claim);
+        assert_eq!(admissions.held(), 0);
+        assert!(admissions.claim(carried).is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flow_the_guest_never_finished_opening_leaves_and_takes_its_stream_with_it() {
+        let admissions = admissions(Limits::default());
+        let counters = Arc::new(Counters::default());
+        let half_open = flow("192.168.127.2:45000", "93.184.216.34:443");
+        let carried = flow("192.168.127.2:45001", "93.184.216.34:443");
+        admissions.admit(half_open);
+        admissions.admit(carried);
+        admissions.established(carried);
+        let relaying = admissions
+            .claim(half_open)
+            .expect("the stream is the flow's");
+        let cancelled = relaying.cancel.clone();
+        let sweep = tokio::spawn(expire_half_open(
+            Arc::clone(&admissions),
+            Arc::clone(&counters),
+        ));
+
+        for _ in 0..16 {
+            tokio::time::advance(TCP_HALF_OPEN_SWEEP).await;
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            cancelled.is_cancelled(),
+            "the relay of a flow that never opened ends, so its stream is dropped"
+        );
+        assert_eq!(counters.seen(DROPPED_TCP_HALF_OPEN), 1);
+        assert_eq!(
+            admissions.held(),
+            1,
+            "the flow whose handshake the guest finished is left alone"
+        );
+        sweep.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stream_whose_flow_has_already_ended_is_dropped_rather_than_carried() {
+        let admissions = admissions(Limits::default());
+        let counters = Arc::new(Counters::default());
+        let (guest, _test_side) = tokio::io::duplex(64);
+        let arriving = flow("192.168.127.2:45000", "93.184.216.34:443");
+
+        accept_tcp(
+            Arc::clone(&admissions),
+            Arc::clone(&counters),
+            Relays::new(),
+            futures_util::stream::iter(vec![(guest, arriving.0, arriving.1)]),
+        )
+        .await;
+
+        assert_eq!(counters.seen(DROPPED_TCP_UNADMITTED), 1);
+        assert_eq!(admissions.held(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_that_ends_releases_the_flow_it_carried() {
+        let host = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = host.local_addr().unwrap();
+        let accepted = tokio::spawn(async move { host.accept().await.is_ok() });
+        let admissions = admissions(Limits::default());
+        let relays = Relays::new();
+        let (guest, test_side) = tokio::io::duplex(64);
+        let carried = (
+            "192.168.127.2:45000".parse::<SocketAddr>().unwrap(),
+            address,
+        );
+        admissions.admit(carried);
+
+        accept_tcp(
+            Arc::clone(&admissions),
+            Arc::new(Counters::default()),
+            relays.clone(),
+            futures_util::stream::iter(vec![(guest, carried.0, carried.1)]),
+        )
+        .await;
+        drop(test_side);
+        relays.tracker.close();
+        tokio::time::timeout(PATIENCE, relays.tracker.wait())
+            .await
+            .expect("the relay ends when the guest's end closes");
+
+        assert!(accepted.await.unwrap(), "the host saw the flow");
+        assert_eq!(
+            admissions.held(),
+            0,
+            "and the flow left the table with its relay"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_syn_the_guest_sends_three_times_opens_one_connection_on_the_host() {
+        let host = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = host.local_addr().unwrap();
+        let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = host.accept().await.unwrap();
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::mem::forget(stream);
+            }
+        });
+        let mut guest = FakeGuest::on(Boundary::Permissive);
+        guest.lease().await;
+
+        let syn = super::super::link::wrap(
+            GUEST_MAC,
+            GATEWAY_MAC,
+            etherparse::EtherType::IPV4,
+            &tcp_packet(&address.to_string(), true),
+        );
+        for _ in 0..3 {
+            guest.device.outbound.send(syn.clone()).await.unwrap();
+        }
+        for _ in 0..500 {
+            guest.settle().await;
+        }
+
+        assert_eq!(
+            accepts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a retransmitted SYN is one flow, not three"
+        );
+    }
+
     #[test]
     fn a_later_packet_of_a_refused_connection_is_dropped_without_another_reset() {
-        let (_, _, answer) = refused_by(classify(
+        let (_, _, answer) = refused_by(decide(
             &config(Boundary::around(SUBNET, 24)),
             &tcp_packet("127.0.0.1:8080", false),
         ))
@@ -1252,14 +1675,14 @@ mod tests {
     #[test]
     fn an_allowed_destination_is_forwarded_to_the_stack() {
         let boundary = Boundary::around(SUBNET, 24);
-        let carried = || classify(&config(boundary), &tcp_packet("93.184.216.34:443", true));
+        let carried = || decide(&config(boundary), &tcp_packet("93.184.216.34:443", true));
 
         assert_eq!(carried(), Ingress::Forward);
         assert_eq!(refused_by(carried()), None, "nothing was refused");
         assert_eq!(leased_by(carried()), None, "nothing was leased");
         assert_eq!(answered_by(carried()), None, "nothing was answered here");
         assert_eq!(
-            classify(&config(boundary), &udp_packet("1.1.1.1:443", b"x")),
+            decide(&config(boundary), &udp_packet("1.1.1.1:443", b"x")),
             Ingress::Forward
         );
     }
@@ -1276,7 +1699,7 @@ mod tests {
     fn a_ping_at_the_gateway_is_answered_by_the_gateway() {
         let packet = echo_request([192, 168, 127, 1], b"are you there");
 
-        let reply = answered_by(classify(&config(Boundary::around(SUBNET, 24)), &packet))
+        let reply = answered_by(decide(&config(Boundary::around(SUBNET, 24)), &packet))
             .expect("a guest can tell a dead link from a refused destination");
 
         let (header, rest) = Ipv4Header::from_slice(&reply).unwrap();
@@ -1301,7 +1724,7 @@ mod tests {
         let packet = echo_request([93, 184, 216, 34], b"");
 
         assert_eq!(
-            classify(&config(Boundary::around(SUBNET, 24)), &packet),
+            decide(&config(Boundary::around(SUBNET, 24)), &packet),
             Ingress::Dropped(DROPPED_PROTOCOL)
         );
     }
@@ -1314,7 +1737,7 @@ mod tests {
         builder.write(&mut packet, &[]).unwrap();
 
         assert_eq!(
-            classify(&config(Boundary::around(SUBNET, 24)), &packet),
+            decide(&config(Boundary::around(SUBNET, 24)), &packet),
             Ingress::Dropped(DROPPED_PROTOCOL)
         );
     }
@@ -1325,7 +1748,7 @@ mod tests {
         packet[9] = IpNumber::IPV6_ROUTE_HEADER.0;
 
         assert_eq!(
-            classify(&config(Boundary::around(SUBNET, 24)), &packet),
+            decide(&config(Boundary::around(SUBNET, 24)), &packet),
             Ingress::Dropped(DROPPED_PROTOCOL)
         );
     }
@@ -1336,7 +1759,7 @@ mod tests {
         packet[6] |= 0x20;
 
         assert_eq!(
-            classify(&config(Boundary::around(SUBNET, 24)), &packet),
+            decide(&config(Boundary::around(SUBNET, 24)), &packet),
             Ingress::Dropped(DROPPED_FRAGMENT)
         );
 
@@ -1344,7 +1767,7 @@ mod tests {
         later[6] = 0;
         later[7] = 2;
         assert_eq!(
-            classify(&config(Boundary::around(SUBNET, 24)), &later),
+            decide(&config(Boundary::around(SUBNET, 24)), &later),
             Ingress::Dropped(DROPPED_FRAGMENT)
         );
     }
@@ -1353,28 +1776,28 @@ mod tests {
     fn bytes_that_are_not_a_packet_this_gateway_can_read_decide_nothing() {
         let boundary = Boundary::around(SUBNET, 24);
         let malformed = Ingress::Dropped(DROPPED_MALFORMED);
-        assert_eq!(classify(&config(boundary), &[0x45, 0x00]), malformed);
+        assert_eq!(decide(&config(boundary), &[0x45, 0x00]), malformed);
 
         let mut truncated_udp = udp_packet("1.1.1.1:53", b"x");
         truncated_udp.truncate(22);
-        assert_eq!(classify(&config(boundary), &truncated_udp), malformed);
+        assert_eq!(decide(&config(boundary), &truncated_udp), malformed);
 
         let mut truncated_tcp = tcp_packet("1.1.1.1:443", true);
         truncated_tcp.truncate(24);
-        assert_eq!(classify(&config(boundary), &truncated_tcp), malformed);
+        assert_eq!(decide(&config(boundary), &truncated_tcp), malformed);
 
         let mut truncated_icmp = echo_request([192, 168, 127, 1], b"");
         truncated_icmp.truncate(21);
-        assert_eq!(classify(&config(boundary), &truncated_icmp), malformed);
+        assert_eq!(decide(&config(boundary), &truncated_icmp), malformed);
 
         let not_dhcp = udp_packet("255.255.255.255:67", b"not a lease request");
-        assert_eq!(classify(&config(boundary), &not_dhcp), malformed);
+        assert_eq!(decide(&config(boundary), &not_dhcp), malformed);
 
         for cut in 0..Ipv4Header::MIN_LEN + UdpHeader::LEN {
             let mut short = udp_packet("1.1.1.1:53", b"a datagram");
             short.truncate(cut);
             assert_eq!(
-                classify(&config(boundary), &short),
+                decide(&config(boundary), &short),
                 malformed,
                 "nothing shorter than its own headers is carried ({cut} bytes)"
             );
@@ -1383,7 +1806,7 @@ mod tests {
         for cut in 0..64 {
             let mut short = tcp_packet("1.1.1.1:443", true);
             short.truncate(cut);
-            classify(&config(boundary), &short);
+            decide(&config(boundary), &short);
 
             let mut arp = vec![0u8; cut];
             arp.iter_mut()
