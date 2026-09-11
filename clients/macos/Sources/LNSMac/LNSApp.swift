@@ -112,6 +112,8 @@ final class ApprovalPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
+    override func cancelOperation(_ sender: Any?) { orderOut(sender) }
+
     func update(_ snapshot: ApprovalSnapshot) {
         switch presentation.update(snapshot) {
         case .hide: orderOut(nil); return

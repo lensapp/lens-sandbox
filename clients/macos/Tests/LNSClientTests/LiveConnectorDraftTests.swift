@@ -3,13 +3,41 @@ import XCTest
 @testable import LNSClient
 
 final class LiveConnectorDraftTests: XCTestCase {
-    private func offer(available: Bool = true) -> ConnectorOffer {
+    private func offer(available: Bool = true, connected: Bool = true, direct: Bool = true) -> ConnectorOffer {
         ConnectorOffer(name: "github", digest: "one", serves: ["api.github.com"], methods: [
             ConnectorMethod(name: "token", label: "Token", auth_label: "Token", offerable: available,
                 opens: ["api.github.com"], writes: [], env: [], credentials: ["TOKEN"], asks: ["token"], help: nil, overrides: []),
-            ConnectorMethod(name: "public", label: "Public", auth_label: nil, offerable: true,
+            ConnectorMethod(name: "public", label: "Public", auth_label: nil, offerable: direct,
                 opens: [], writes: [], env: [], credentials: [], asks: [], help: nil, overrides: [])
-        ], connections: [ConnectorConnection(label: "work", method: "token", authority: ["repo:read"])])
+        ], connections: connected ? [ConnectorConnection(label: "work", method: "token", authority: ["repo:read"])] : [])
+    }
+
+    func testConnectedNotificationStartsReadyToGrantTheVisibleSavedConnection() throws {
+        let draft = LiveConnectorDraft(offer: offer())
+        XCTAssertEqual(draft.selection, "connection:work")
+        XCTAssertEqual(try encoded(draft), ["kind": "grant", "method": "token", "connection": ["kind": "held", "label": "work"]])
+        XCTAssertTrue(draft.values.isEmpty)
+    }
+
+    func testUnconnectedNotificationStartsInTheNewConnectionForm() {
+        let offer = offer(connected: false, direct: false)
+        let draft = LiveConnectorDraft(offer: offer)
+        XCTAssertEqual(draft.newMethod(in: offer)?.name, "token", "An unconnected notification must lead directly to connecting")
+        XCTAssertNil(draft.action(offer: offer), "Opening the form must not grant incomplete credentials")
+    }
+
+    func testAccountlessAccessDoesNotRequireAnUnnecessaryConnection() {
+        let offer = offer(available: false)
+        let draft = LiveConnectorDraft(offer: offer)
+        XCTAssertEqual(draft.selection, "method:public")
+        XCTAssertNotNil(draft.action(offer: offer))
+    }
+
+    func testUnavailableConnectorDoesNotSelectAnUnusableConnection() {
+        let offer = offer(available: false, direct: false)
+        let draft = LiveConnectorDraft(offer: offer)
+        XCTAssertEqual(draft.selection, "")
+        XCTAssertNil(draft.action(offer: offer))
     }
 
     private func encoded(_ draft: LiveConnectorDraft) throws -> NSDictionary {
