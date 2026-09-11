@@ -1090,6 +1090,7 @@ mod tests {
             vec![dns::Scope {
                 suffix: None,
                 servers: vec![NAMESERVER.parse().unwrap()],
+                order: 0,
             }]
         }
     }

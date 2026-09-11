@@ -17,11 +17,12 @@ pub const REFRESH_AFTER: Duration = Duration::from_secs(30);
 /// A read of the host's configuration has this long, `scutil --dns` included, before the list in hand is kept instead.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// One resolver of the host's configuration: which servers to ask, and the domain suffix they answer for.
+/// One resolver of the host's configuration: which servers to ask, the domain suffix they answer for, and where they sit among equals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
     pub suffix: Option<String>,
     pub servers: Vec<SocketAddr>,
+    pub order: u32,
 }
 
 /// How a query reaches an upstream. UDP first; a truncated answer is asked again over TCP to the same server.
@@ -70,7 +71,7 @@ impl Resolvers {
         }
     }
 
-    /// The servers that answer for `name`: the longest matching scope, or the default one.
+    /// The servers that answer for `name`: every resolver whose domain matches it longest, else the default ones.
     pub fn servers_for(&self, name: &str) -> Vec<SocketAddr> {
         let (servers, old) = {
             let cached = self.cached.lock().expect("resolvers poisoned");
@@ -110,26 +111,38 @@ impl Resolvers {
     }
 }
 
+/// resolver(5): every resolver whose domain is the longest match answers, lowest `order` first, and the rest are its fallback.
 pub fn servers_for(scopes: &[Scope], name: &str) -> Vec<SocketAddr> {
     let name = name.trim_end_matches('.').to_ascii_lowercase();
-    let matched = scopes
+    let longest = scopes
         .iter()
-        .filter_map(|scope| scope.suffix.as_ref().map(|suffix| (suffix, scope)))
-        .filter(|(suffix, _)| covers(suffix, &name))
-        .max_by_key(|(suffix, _)| suffix.len());
-    match matched {
-        Some((_, scope)) => scope.servers.clone(),
+        .filter_map(|scope| matching(scope, &name))
+        .max();
+    let mut matched: Vec<&Scope> = match longest {
+        Some(longest) => scopes
+            .iter()
+            .filter(|scope| matching(scope, &name) == Some(longest))
+            .collect(),
         None => scopes
             .iter()
             .filter(|scope| scope.suffix.is_none())
-            .flat_map(|scope| scope.servers.iter().copied())
             .collect(),
-    }
+    };
+    matched.sort_by_key(|scope| scope.order);
+    matched
+        .iter()
+        .flat_map(|scope| scope.servers.iter().copied())
+        .collect()
 }
 
-fn covers(suffix: &str, name: &str) -> bool {
-    let suffix = suffix.trim_end_matches('.').to_ascii_lowercase();
-    name == suffix || name.ends_with(&format!(".{suffix}"))
+/// How much of the name a scope claims, or `None` when it claims none of it; the default scopes claim nothing and match nothing.
+fn matching(scope: &Scope, name: &str) -> Option<usize> {
+    let suffix = scope
+        .suffix
+        .as_ref()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    (name == suffix || name.ends_with(&format!(".{suffix}"))).then_some(suffix.len())
 }
 
 /// The name the query asks about, or `None` for bytes that are not a question this gateway relays.
@@ -215,6 +228,7 @@ pub fn scopes_of_resolv_conf(contents: &str) -> Vec<Scope> {
     vec![Scope {
         suffix: None,
         servers,
+        order: 0,
     }]
 }
 
@@ -246,6 +260,7 @@ struct Resolver {
     suffix: Option<String>,
     addresses: Vec<IpAddr>,
     port: Option<u16>,
+    order: u32,
 }
 
 fn read_field(resolver: &mut Resolver, line: &str) {
@@ -257,6 +272,8 @@ fn read_field(resolver: &mut Resolver, line: &str) {
         resolver.suffix = Some(value.to_string());
     } else if key == "port" {
         resolver.port = value.parse().ok();
+    } else if key == "order" {
+        resolver.order = value.parse().unwrap_or_default();
     } else if key.starts_with("nameserver")
         && let Ok(address) = value.parse::<IpAddr>()
     {
@@ -271,6 +288,7 @@ fn push_scope(scopes: &mut Vec<Scope>, resolver: Option<Resolver>) {
     };
     let port = resolver.port.unwrap_or(PORT);
     scopes.push(Scope {
+        order: resolver.order,
         suffix: resolver.suffix,
         servers: resolver
             .addresses
@@ -295,6 +313,7 @@ mod tests {
         Scope {
             suffix: suffix.map(str::to_string),
             servers: servers.iter().map(|a| server(a)).collect(),
+            order: 0,
         }
     }
 
@@ -827,6 +846,7 @@ resolver #1
                     SocketAddr::new("127.0.0.1".parse().unwrap(), 5353),
                     SocketAddr::new("10.0.0.53".parse().unwrap(), 5353),
                 ],
+                order: 0,
             }],
             "the port of a resolver belongs to every nameserver it names"
         );
@@ -877,6 +897,32 @@ resolver #1
             servers_for(&scopes, "notcorp.internal"),
             vec![server("192.168.1.1"), server("192.168.1.2")],
             "a suffix matches on a label boundary, not on characters"
+        );
+    }
+
+    #[test]
+    fn resolvers_for_one_domain_are_all_asked_in_the_order_the_host_gives_them() {
+        let scopes = scopes_of_scutil(
+            "\
+resolver #1
+  nameserver[0] : 192.168.1.1
+
+resolver #2
+  domain   : corp.example
+  nameserver[0] : 10.0.0.53
+  order    : 200000
+
+resolver #3
+  domain   : corp.example
+  nameserver[0] : 10.0.1.53
+  order    : 100000
+",
+        );
+
+        assert_eq!(
+            servers_for(&scopes, "host.corp.example"),
+            vec![server("10.0.1.53"), server("10.0.0.53")],
+            "the lower order is asked first, and the other one is the fallback"
         );
     }
 
