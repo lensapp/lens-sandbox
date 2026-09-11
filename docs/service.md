@@ -67,7 +67,9 @@ guest its address over DHCP, relays DNS on the gateway, and turns the guest's
 TCP and UDP flows into ordinary host sockets.
 
 The link is **IPv4 only**. IPv6, VLAN-tagged frames and IPv4 fragments are
-dropped and counted; the gateway does no reassembly.
+dropped and counted; the gateway does no reassembly. It carries TCP and UDP,
+and answers ICMP echo at the gateway alone: a guest cannot ping an address on
+the internet, which the `vmnet` bridge did carry.
 
 | | |
 |---|---|
@@ -108,7 +110,8 @@ fails at once instead of waiting out a timeout.
 | Anything else in `192.168.127.0/24` | Refused. There is no control API on the gateway and no address that forwards to the host. |
 | `127.0.0.0/8` | Refused. The guest cannot reach anything bound to the host's loopback. |
 | `0.0.0.0/8`, `169.254.0.0/16`, `224.0.0.0/4`, `255.255.255.255` | Refused. |
-| Every other address, including the host's own LAN addresses | Carried, exactly as it was on the `vmnet` bridge. |
+| ICMP to anything but the gateway | Dropped; only TCP and UDP are carried. `ping 1.1.1.1` from the guest gets nothing, where the `vmnet` bridge forwarded it. |
+| Every other address, including the host's own LAN addresses | TCP and UDP are carried, exactly as they were on the `vmnet` bridge. |
 
 Published ports (`-p`, `spec.ports`) are unaffected: they travel over the
 run's vsock channel, not over this link.
@@ -123,13 +126,21 @@ The resolver list is your host's own — the nameservers of
 `/etc/resolv.conf`, plus the per-domain resolvers `scutil --dns` reports.
 That second source matters: a split-DNS VPN's internal resolvers appear only
 there, never in `resolv.conf`. The longest matching domain suffix decides
-which servers answer a name; a name no suffix covers goes to the default
-ones. The list is read again every 30 seconds, and again after any query
-nobody answered, so a VPN that comes up mid-run is picked up.
+which servers answer a name; every resolver that ties for it is asked, lowest
+`order` first, and each is asked on the port its own configuration names. A
+name no suffix covers goes to the default ones. The list is read again every
+30 seconds, and again after any query nobody answered, so a VPN that comes up
+mid-run is picked up. The read runs off the runtime's workers, so a query
+never waits for it.
 
-Each query goes to the servers in turn over UDP, 5 seconds each. A truncated
-answer is asked again over TCP to the same server. When no server answers,
-the guest gets SERVFAIL — never silence.
+Each query goes to the first server over UDP, and to the next after 700 ms
+while the first is still pending; the first usable answer wins. SERVFAIL,
+REFUSED and NOTIMP move to the next server the same way an error does;
+NOERROR and NXDOMAIN are answers and come back as they are. The whole search
+has 1800 ms, under the 2 seconds the guest's own stub waits. A server that
+answers nothing is asked last for the next 30 seconds. A truncated answer is
+asked again over TCP to the same server. When no server answers, the guest
+gets SERVFAIL — never silence.
 
 The gateway answers on UDP and on TCP. Over UDP it fits the answer to what
 the guest said it can take: the payload size of the query's OPT record, or
