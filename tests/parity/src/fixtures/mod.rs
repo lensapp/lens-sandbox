@@ -1,4 +1,6 @@
+pub mod http;
 pub mod pattern;
+pub mod report_server;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -15,6 +17,13 @@ use pattern::{MIB, pattern_chunk};
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
 const COPY_CHUNK: usize = 64 * 1024;
+
+/// The version both halves of a remote run must agree on; a report from another build is refused rather than compared.
+pub const HARNESS_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Where the TCP fixtures end and the report server begins, counted from `--base-port`.
+pub const REPORT_PORT_OFFSET: usize = 20;
+/// The witness's place in the port block, counted from `--base-port`.
+const WITNESS_PORT_OFFSET: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -179,6 +188,15 @@ impl Shared {
     fn stopping(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
+
+    /// Drops what the fixtures saw, keeping the ids moving forward so a connection that outlives the reset cannot be counted as a new one.
+    fn reset(&self) {
+        self.with_report(|report| {
+            report.connections.clear();
+            report.datagrams.clear();
+            report.witness_accepts = 0;
+        });
+    }
 }
 
 pub struct Fixtures {
@@ -187,15 +205,19 @@ pub struct Fixtures {
     bind: Ipv4Addr,
 }
 
+fn new_shared(sizes: Sizes) -> Arc<Shared> {
+    Arc::new(Shared {
+        report: Mutex::new(FixtureReport::default()),
+        stop: AtomicBool::new(false),
+        next_id: AtomicU64::new(1),
+        start: Instant::now(),
+        sizes,
+    })
+}
+
 impl Fixtures {
     pub fn start(bind: Ipv4Addr, base_port: u16, sizes: Sizes) -> Result<Self> {
-        let shared = Arc::new(Shared {
-            report: Mutex::new(FixtureReport::default()),
-            stop: AtomicBool::new(false),
-            next_id: AtomicU64::new(1),
-            start: Instant::now(),
-            sizes,
-        });
+        let shared = new_shared(sizes);
 
         let tcp_roles = [
             Role::Sink,
@@ -224,7 +246,7 @@ impl Fixtures {
         ports.insert(Role::UdpEcho.as_str().to_string(), udp_port);
         spawn_udp(udp, Arc::clone(&shared));
 
-        let witness_port = offset_port(base_port, tcp_roles.len() + 1)?;
+        let witness_port = offset_port(base_port, WITNESS_PORT_OFFSET)?;
         let witness = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, witness_port))
             .with_context(|| format!("bind witness on 127.0.0.1:{witness_port}"))?;
         let witness_port = witness.local_addr()?.port();
@@ -243,6 +265,11 @@ impl Fixtures {
         })
     }
 
+    /// Serves what these fixtures saw over HTTP, so a runner on another machine reads the same report the in-process runner holds.
+    pub fn serve_report(&self, port: u16) -> Result<u16> {
+        report_server::spawn(Arc::clone(&self.shared), SocketAddrV4::new(self.bind, port))
+    }
+
     pub fn bind(&self) -> Ipv4Addr {
         self.bind
     }
@@ -255,19 +282,8 @@ impl Fixtures {
         self.shared.with_report(|r| r.clone())
     }
 
-    /// Every fixture destination a guest reaches over the LAN, as an `egress.tcp` `match`; the witness is left out, because it binds the host's loopback and a case proves the guest cannot reach it.
     pub fn guest_destinations(&self) -> Vec<String> {
-        let mut ports: Vec<u16> = self
-            .ports
-            .iter()
-            .filter(|(role, _)| role.as_str() != Role::Witness.as_str())
-            .map(|(_, port)| *port)
-            .collect();
-        ports.sort_unstable();
-        ports
-            .into_iter()
-            .map(|port| format!("{}:{port}", self.bind))
-            .collect()
+        guest_destinations(self.bind, &self.ports)
     }
 
     pub fn activity_since(&self, mark: u64) -> Activity {
@@ -290,6 +306,25 @@ impl Drop for Fixtures {
     }
 }
 
+/// Every fixture destination a guest reaches over the LAN, as an `egress.tcp` `match`; the witness is left out, because it binds a loopback and a case proves the guest cannot reach it.
+pub fn guest_destinations(bind: Ipv4Addr, ports: &BTreeMap<String, u16>) -> Vec<String> {
+    let mut ports: Vec<u16> = ports
+        .iter()
+        .filter(|(role, _)| role.as_str() != Role::Witness.as_str())
+        .map(|(_, port)| *port)
+        .collect();
+    ports.sort_unstable();
+    ports
+        .into_iter()
+        .map(|port| format!("{bind}:{port}"))
+        .collect()
+}
+
+/// Where the report server listens for a given `--base-port`.
+pub fn report_port(base_port: u16) -> Result<u16> {
+    offset_port(base_port, REPORT_PORT_OFFSET)
+}
+
 fn offset_port(base: u16, index: usize) -> Result<u16> {
     if base == 0 {
         return Ok(0);
@@ -303,13 +338,13 @@ fn offset_port(base: u16, index: usize) -> Result<u16> {
 
 pub fn refuse_unsuitable_bind(addr: Ipv4Addr) -> Result<()> {
     if addr.is_loopback() {
-        bail!("--bind needs a LAN address: a guest cannot reach the host's loopback");
+        bail!("the fixtures need a LAN address: a guest cannot reach a loopback address");
     }
     if addr.is_unspecified() {
-        bail!("--bind needs one LAN address, not 0.0.0.0");
+        bail!("the fixtures need one LAN address, not 0.0.0.0");
     }
     if addr.octets()[0] == 192 && addr.octets()[1] == 168 && addr.octets()[2] == 127 {
-        bail!("--bind must stay off the guest subnet 192.168.127.0/24");
+        bail!("the fixtures must stay off the guest subnet 192.168.127.0/24");
     }
     Ok(())
 }

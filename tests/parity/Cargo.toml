@@ -31,6 +31,7 @@ libc       = "=0.2.186"
 serde      = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 sha2       = "=0.10.9"
+tokio = { version = "=1.50.0", default-features = false, features = ["rt", "net", "io-util", "time"] }
 toml       = "=0.8.23"
 
 [dev-dependencies]

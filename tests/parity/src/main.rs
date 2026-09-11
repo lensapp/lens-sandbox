@@ -12,11 +12,11 @@ mod service;
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use config::{Config, parse_budget_pair, parse_env_pair};
-use fixtures::{Fixtures, Sizes, refuse_unsuitable_bind};
+use fixtures::{Fixtures, Sizes, http, refuse_unsuitable_bind, report_port};
 use result::RunResult;
 use run::{BackendOverrides, RunPlan};
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -81,6 +81,8 @@ struct FixtureArgs {
     base_port: u16,
     #[arg(long, default_value = "fixtures.json")]
     report: PathBuf,
+    #[arg(long)]
+    serve: bool,
     #[arg(long)]
     seconds: Option<u64>,
 }
@@ -187,6 +189,24 @@ fn serve_fixtures(args: FixtureArgs) -> Result<i32> {
     let report = fixtures.report();
     for (role, port) in &report.ports {
         println!("{role}\t{}:{port}", report.bind);
+    }
+    if args.serve {
+        let port = fixtures.serve_report(report_port(args.base_port)?)?;
+        let endpoint = SocketAddrV4::new(args.bind, port);
+        let served = http::request(endpoint, "GET", "/health")?;
+        if served.0 != 200 {
+            bail!(
+                "the report server on {endpoint} answered {} to its own health",
+                served.0
+            );
+        }
+        println!("report\thttp://{endpoint}/report");
+        println!("reset\thttp://{endpoint}/reset");
+        println!("health\thttp://{endpoint}/health");
+        println!(
+            "a runner on another machine reads these with: parity run --fixtures-at {}:{}",
+            args.bind, args.base_port
+        );
     }
     println!(
         "writing {} every second; stop with ctrl-c",
@@ -353,12 +373,38 @@ mod tests {
             bind: Ipv4Addr::LOCALHOST,
             base_port: 0,
             report: PathBuf::from("fixtures.json"),
+            serve: false,
             seconds: Some(1),
         })
         .unwrap_err()
         .to_string();
 
         assert!(err.contains("loopback"), "{err}");
+    }
+
+    #[test]
+    fn the_fixtures_serve_their_report_when_they_are_asked_to() {
+        let cli = Cli::parse_from([
+            "parity",
+            "fixtures",
+            "--bind",
+            "192.168.1.77",
+            "--base-port",
+            "47200",
+            "--serve",
+        ]);
+        let Command::Fixtures(args) = cli.command else {
+            panic!("expected the fixtures");
+        };
+
+        assert!(args.serve);
+        assert_eq!(report_port(args.base_port).unwrap(), 47220);
+
+        let quiet = Cli::parse_from(["parity", "fixtures", "--bind", "192.168.1.77"]);
+        let Command::Fixtures(args) = quiet.command else {
+            panic!("expected the fixtures");
+        };
+        assert!(!args.serve, "the report server is opt-in");
     }
 
     #[test]
