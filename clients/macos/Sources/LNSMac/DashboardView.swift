@@ -41,6 +41,7 @@ struct DashboardView: View {
         .sheet(item: $model.managementSheet) { sheet in
             ManagementForm(model: model, sheet: sheet).id(sheet.id)
         }
+        .sheet(isPresented: $model.creatingSandbox) { SandboxCreateForm(model: model) }
         .onChange(of: model.page) { _ in model.selectedEvent = nil; model.clearHistory() }
         .onAppear { NSApplication.shared.setActivationPolicy(.regular) }
     }

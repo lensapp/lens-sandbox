@@ -4,6 +4,7 @@ import PackageDescription
 var products: [Product] = [.library(name: "LNSClient", targets: ["LNSClient"])]
 var targets: [Target] = [
     .target(name: "LNSClient"),
+    .executableTarget(name: "LNSLaunchSmoke", dependencies: ["LNSClient"], path: "Smoke/Launch"),
     .testTarget(name: "LNSClientTests", dependencies: ["LNSClient"], resources: [.copy("Fixtures")])
 ]
 #if os(macOS)

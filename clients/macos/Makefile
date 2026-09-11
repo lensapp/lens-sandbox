@@ -4,7 +4,7 @@ VERSION ?= $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' ../../crates/lns-cli/C
 BUILD_NUMBER ?= $(shell git rev-list --count HEAD)
 HELPER_DIR ?= ../../bin
 
-.PHONY: test build verify package shell-tests smoke transport-smoke
+.PHONY: test build verify package shell-tests smoke transport-smoke launch-smoke
 
 test: shell-tests
 	$(SWIFT) test
@@ -32,4 +32,8 @@ transport-smoke:
 	$(SWIFT) build --product LNSClientSmoke
 	python3 Smoke/transport.py .build/debug/LNSClientSmoke
 
-verify: test build transport-smoke
+launch-smoke:
+	$(SWIFT) build --product LNSLaunchSmoke
+	python3 Smoke/launch.py .build/debug/LNSLaunchSmoke
+
+verify: test build transport-smoke launch-smoke

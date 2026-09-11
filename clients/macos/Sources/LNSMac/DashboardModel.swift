@@ -21,6 +21,8 @@ final class DashboardModel: ObservableObject {
     @Published var page = DashboardPage.sandboxes
     @Published var managementSheet: ManagementSheet?
     @Published var grantRun = ""
+    @Published var creatingSandbox = false
+    let creation: SandboxCreation?
     let management: ManagementSession
     @Published var filters = DashboardFilters()
     @Published var selectedEvent: String?
@@ -38,11 +40,13 @@ final class DashboardModel: ObservableObject {
     private let refreshes: DashboardRefresh
     private var offerTask: Task<Void, Never>?
 
-    init(service: any ServiceClient) {
+    init(service: any ServiceClient, launchSandbox: ((SandboxDraft) throws -> AsyncThrowingStream<SandboxLaunchEvent, Error>)? = nil) {
         self.service = service
+        creation = launchSandbox.map { SandboxCreation(launch: $0) }
         management = ManagementSession(service: service)
         refreshes = DashboardRefresh { try await service.dashboard() }
         management.onChange = { [weak self] in self?.objectWillChange.send() }
+        creation?.onChange = { [weak self] in self?.objectWillChange.send() }
     }
 
     var data: DashboardData { feed.data }
@@ -61,6 +65,7 @@ final class DashboardModel: ObservableObject {
     }
 
     var currentSandboxes: [DashboardSandbox] { data.sandboxes.filter(\.controllable) }
+    var canCreateSandbox: Bool { connected && creation != nil && creation?.busy == false && !management.busy }
 
     func manage(_ command: ManagementCommand, reviewing offer: ConnectorOffer? = nil) async -> Bool {
         guard connected else { return false }

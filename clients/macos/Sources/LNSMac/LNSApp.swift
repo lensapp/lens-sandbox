@@ -19,8 +19,11 @@ struct LNSApp: App {
                 .frame(minWidth: 440, minHeight: 320)
         }
         .defaultSize(width: 520, height: 620)
-        MenuBarExtra("LNS", systemImage: "shield.lefthalf.filled") {
+        MenuBarExtra {
             MenuContent(model: delegate.model)
+        } label: {
+            Image("lnsTemplate", bundle: .main).renderingMode(.template)
+                .accessibilityLabel("LNS")
         }
     }
 }

@@ -31,16 +31,21 @@ final class AppModel: ObservableObject {
         self.init(service: connection, socketPath: path,
                   launchService: available ? { try await ServiceProcess.start(launch) } : nil,
                   confirmStop: Self.confirmServiceStop,
-                  quit: { NSApplication.shared.terminate(nil) })
+                  quit: { NSApplication.shared.terminate(nil) },
+                  launchSandbox: available ? { draft in
+                      SandboxProcess.launch(try SandboxProcessLaunch(draft: draft, bundle: Bundle.main.bundleURL,
+                          socket: path, environment: ProcessInfo.processInfo.environment))
+                  } : nil)
     }
 
     init(service connection: any ServiceClient, socketPath: String,
          launchService: (() async throws -> Void)?, confirmStop: @escaping () -> Bool,
-         quit: @escaping () -> Void) {
+         quit: @escaping () -> Void,
+         launchSandbox: ((SandboxDraft) throws -> AsyncThrowingStream<SandboxLaunchEvent, Error>)? = nil) {
         service = connection
         self.socketPath = socketPath
         control = ServiceControl(client: connection, launch: launchService, confirm: confirmStop, quit: quit)
-        dashboard = DashboardModel(service: connection)
+        dashboard = DashboardModel(service: connection, launchSandbox: launchSandbox)
         control.onChange = { [weak self] in self?.objectWillChange.send() }
         control.onError = { [weak self] in self?.notice = $0 }
     }

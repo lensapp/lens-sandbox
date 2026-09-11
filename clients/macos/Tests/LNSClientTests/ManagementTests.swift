@@ -3,6 +3,31 @@ import XCTest
 @testable import LNSClient
 
 final class ManagementTests: XCTestCase {
+    func testChoosingASavedConnectionDerivesItsMethodAndKeepsAccountFreeAccessSeparate() throws {
+        let offer = ConnectorOffer(name: "github", digest: "one", serves: [], methods: [
+            ConnectorMethod(name: "token", label: "Token", auth_label: "Token", offerable: true, opens: [], writes: [], env: [], credentials: [], asks: [], help: nil, overrides: nil),
+            ConnectorMethod(name: "public", label: "Public access", auth_label: nil, offerable: true, opens: [], writes: [], env: [], credentials: [], asks: [], help: nil, overrides: nil),
+            ConnectorMethod(name: "unsupported", label: "Unsupported", auth_label: "OAuth", offerable: false, opens: [], writes: [], env: [], credentials: [], asks: [], help: nil, overrides: nil)
+        ], connections: [
+            ConnectorConnection(label: "work", method: "token", authority: ["repo:read"]),
+            ConnectorConnection(label: "public", method: "token", authority: []),
+            ConnectorConnection(label: "old", method: "unsupported", authority: [])
+        ])
+        XCTAssertEqual(offer.grantOptions.map(\.id), ["connection:work", "connection:public", "method:public"])
+        var selection = GrantSelection()
+        selection.run = "run-1"
+        selection.choose("connection:work", in: offer)
+        XCTAssertEqual(selection.method, "token")
+        XCTAssertEqual(selection.connection, "work")
+        XCTAssertEqual(selection.run, "run-1")
+        selection.choose("method:public", in: offer)
+        XCTAssertEqual(selection.method, "public")
+        XCTAssertEqual(selection.connection, "")
+        selection.choose("connection:gone", in: offer)
+        XCTAssertEqual(selection.method, "")
+        XCTAssertEqual(selection.connection, "")
+    }
+
     func testManagementCommandsAndResponsesMatchTheSharedRustFixture() throws {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "management", withExtension: "json", subdirectory: "Fixtures"))
         let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [NSDictionary]])
