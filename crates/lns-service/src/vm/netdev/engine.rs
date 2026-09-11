@@ -58,8 +58,8 @@ const UDP_IDLE: Duration = Duration::from_secs(60);
 
 const UDP_DATAGRAM_BYTES: usize = 65_535;
 
-/// The MTU less an IPv4 and a UDP header: the largest answer this link carries to the guest in one datagram.
-const DNS_UDP_CEILING: usize = MTU - 28;
+/// The MTU less an IPv4 and a UDP header: the largest payload this link carries to the guest in one datagram.
+const UDP_PAYLOAD_CEILING: usize = MTU - 28;
 
 /// What a guest that advertises no EDNS payload size can take, per RFC 1035.
 const DNS_UDP_MINIMUM: usize = 512;
@@ -396,6 +396,7 @@ pub const DROPPED_PROTOCOL: &str = "a packet of a protocol this gateway does not
 pub const DROPPED_MALFORMED: &str = "a packet too short or malformed to read";
 pub const DROPPED_UNUSABLE: &str = "a packet the stack would not hand over";
 pub const DROPPED_DNS_ANSWER: &str = "a DNS answer the gateway could not fit to the guest";
+pub const DROPPED_UDP_REPLY: &str = "a UDP reply larger than one frame of this link";
 
 /// The library ends its stream on one item it cannot parse, which would end UDP and DNS for the rest of the run; a run reads on until it is cancelled.
 async fn next_usable<S: Stream + Unpin>(
@@ -446,7 +447,8 @@ pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running
     let allowance = Arc::new(Allowance::of(config.limits));
     let admissions = Arc::new(Admissions::new(Arc::clone(&allowance)));
     let (stack_sink, stack_stream) = stack.split();
-    let (udp_read, udp_write) = udp.split();
+    // The library's UDP writer drops a reply that carries no payload, so this gateway writes its own replies onto the same path it answers on.
+    let (udp_read, _) = udp.split();
     let (replies_tx, replies_rx) = channel(CHANNEL_DEPTH);
 
     let relays = Relays::new();
@@ -463,6 +465,12 @@ pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running
         frames.from_guest,
         frames.to_guest.clone(),
         stack_sink,
+    ));
+    tasks.spawn(write_udp(
+        Arc::clone(&link),
+        Arc::clone(&counters),
+        frames.to_guest.clone(),
+        replies_rx,
     ));
     tasks.spawn(to_guest(link, stack_stream, frames.to_guest));
     tasks.spawn(expire_half_open(
@@ -482,7 +490,6 @@ pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running
         tcp,
     ));
     tasks.spawn(accept_udp(config, resolving, udp_read, replies_tx));
-    tasks.spawn(write_udp(udp_write, replies_rx));
     Ok(Running { tasks, relays })
 }
 
@@ -885,10 +892,35 @@ async fn carry_tcp<G: AsyncRead + AsyncWrite + Unpin>(mut guest: G, destination:
 
 type UdpReply = (Vec<u8>, SocketAddr, SocketAddr);
 
-async fn write_udp(mut write: netstack_smoltcp::udp::WriteHalf, mut replies: Receiver<UdpReply>) {
-    while let Some(reply) = replies.recv().await {
-        let _ = write.send(reply).await;
+async fn write_udp(
+    link: Arc<Mutex<Link>>,
+    counters: Arc<Counters>,
+    frames: Sender<Vec<u8>>,
+    mut replies: Receiver<UdpReply>,
+) {
+    while let Some((payload, from, to)) = replies.recv().await {
+        let Some(packet) = datagram_for_guest(&payload, from, to) else {
+            counters.note(DROPPED_UDP_REPLY);
+            continue;
+        };
+        let frame = link.lock().expect("link poisoned").send_ipv4(&packet);
+        let _ = frames.send(frame).await;
     }
+}
+
+/// One datagram for the guest, whatever its length: an upstream's empty acknowledgement is an answer, not silence.
+fn datagram_for_guest(payload: &[u8], from: SocketAddr, to: SocketAddr) -> Option<Vec<u8>> {
+    let (SocketAddr::V4(from), SocketAddr::V4(to)) = (from, to) else {
+        return None;
+    };
+    if payload.len() > UDP_PAYLOAD_CEILING {
+        return None;
+    }
+    let builder = PacketBuilder::ipv4(from.ip().octets(), to.ip().octets(), PACKET_TTL)
+        .udp(from.port(), to.port());
+    let mut packet = Vec::with_capacity(builder.size(payload.len()));
+    builder.write(&mut packet, payload).ok()?;
+    Some(packet)
 }
 
 async fn accept_udp(
@@ -1018,7 +1050,7 @@ fn fit_to_guest(query: &[u8], answer: Vec<u8>) -> Option<Vec<u8>> {
 fn udp_limit_of(query: &[u8]) -> usize {
     Message::from_vec(query)
         .map_or(DNS_UDP_MINIMUM, |asked| usize::from(asked.max_payload()))
-        .min(DNS_UDP_CEILING)
+        .min(UDP_PAYLOAD_CEILING)
 }
 
 /// One host socket per (guest source, destination) flow, kept for as long as the flow is used and no longer.
@@ -2331,8 +2363,8 @@ mod tests {
 
         let sent = fitted.len();
         assert!(
-            sent <= DNS_UDP_CEILING,
-            "no answer over {DNS_UDP_CEILING} bytes fits one frame of this link, and this one is {sent}"
+            sent <= UDP_PAYLOAD_CEILING,
+            "no answer over {UDP_PAYLOAD_CEILING} bytes fits one frame of this link, and this one is {sent}"
         );
         let fitted = Message::from_vec(&fitted).unwrap();
         assert!(fitted.metadata.truncation);
@@ -2962,7 +2994,7 @@ mod tests {
         let (plain_bytes, advertised_bytes) = (plain.len(), advertised.len());
         assert!(plain_bytes <= DNS_UDP_MINIMUM, "{plain_bytes} bytes");
         assert!(
-            advertised_bytes <= DNS_UDP_CEILING,
+            advertised_bytes <= UDP_PAYLOAD_CEILING,
             "{advertised_bytes} bytes"
         );
         for answer in [&plain, &advertised] {
@@ -3058,6 +3090,113 @@ mod tests {
             datagrams.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a guest over its UDP limit reaches the host no further"
+        );
+    }
+
+    fn from_host() -> SocketAddr {
+        "93.184.216.34:7".parse().unwrap()
+    }
+
+    fn to_guest_address() -> SocketAddr {
+        "192.168.127.2:41200".parse().unwrap()
+    }
+
+    #[test]
+    fn a_reply_with_no_payload_is_written_as_a_whole_udp_datagram() {
+        let packet = datagram_for_guest(&[], from_host(), to_guest_address())
+            .expect("an empty reply is a reply");
+
+        assert_eq!(packet.len(), 28, "20 bytes of IPv4 and 8 of UDP");
+        let (header, rest) = UdpHeader::from_slice(&packet[20..]).expect("a UDP header");
+        assert_eq!(header.length, 8, "the header of a datagram with no payload");
+        assert_eq!(header.source_port, 7);
+        assert_eq!(header.destination_port, 41_200);
+        assert!(rest.is_empty(), "nothing follows the header");
+    }
+
+    #[test]
+    fn a_reply_no_frame_of_this_link_can_carry_is_not_written() {
+        assert!(
+            datagram_for_guest(
+                &vec![0u8; UDP_PAYLOAD_CEILING],
+                from_host(),
+                to_guest_address()
+            )
+            .is_some(),
+            "the largest payload one frame carries is written"
+        );
+        assert!(
+            datagram_for_guest(
+                &vec![0u8; UDP_PAYLOAD_CEILING + 1],
+                from_host(),
+                to_guest_address()
+            )
+            .is_none(),
+            "one byte more is not written as an oversized frame"
+        );
+    }
+
+    #[test]
+    fn a_reply_from_an_ipv6_address_is_not_written_onto_this_ipv4_link() {
+        assert!(
+            datagram_for_guest(
+                b"back",
+                "[2606:2800:220:1::]:7".parse().unwrap(),
+                to_guest_address()
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_the_gateway_cannot_write_is_counted_and_the_next_one_still_goes() {
+        let link = Arc::new(Mutex::new(Link::new(
+            GATEWAY_MAC,
+            Ipv4Addr::new(192, 168, 127, 1),
+        )));
+        let counters = Arc::new(Counters::default());
+        let (to_guest, mut frames) = channel(4);
+        let (replies, replies_rx) = channel(4);
+        let writing = tokio::spawn(write_udp(link, Arc::clone(&counters), to_guest, replies_rx));
+
+        replies
+            .send((
+                vec![0u8; UDP_PAYLOAD_CEILING + 1],
+                from_host(),
+                to_guest_address(),
+            ))
+            .await
+            .expect("the writer is up");
+        replies
+            .send((Vec::new(), from_host(), to_guest_address()))
+            .await
+            .expect("the writer is up");
+        drop(replies);
+        writing.await.expect("the writer ends with its channel");
+
+        let frame = frames.recv().await.expect("the empty reply is carried");
+        assert_eq!(frame.len(), 14 + 28, "one ethernet frame of one datagram");
+        assert!(frames.recv().await.is_none(), "and nothing else");
+        assert_eq!(counters.seen(DROPPED_UDP_REPLY), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_upstream_datagram_with_no_payload_reaches_the_guest() {
+        let acknowledging = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let host = acknowledging.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut heard = [0u8; 16];
+            let (_, from) = acknowledging.recv_from(&mut heard).await.unwrap();
+            acknowledging.send_to(&[], from).await.unwrap();
+        });
+
+        let mut guest = FakeGuest::on(Boundary::Permissive);
+        guest.lease().await;
+        let flow = guest.bind_udp(41_200);
+
+        assert!(
+            guest.exchange(flow, host, b"probe").await.is_empty(),
+            "an acknowledgement that carries no payload is still an answer the guest must see"
         );
     }
 
