@@ -1622,8 +1622,9 @@ authenticated independently.
 
 A connection's **authority** is what its `auth` exchange reported about what the
 connection may do — OAuth scopes, in that mechanism's terms. It is opaque to this
-format: the mechanism produces it, and `lns` stores and compares it without
-interpreting it. A `kind: token` exchange reports none.
+format: the mechanism produces it, and `lns` stores and compares it, rendered as
+[§3.2.6](#326-kind-code) requires, without interpreting it. A `kind: token`
+exchange reports none.
 
 **A mechanism MUST report authority canonically.** The same permissions MUST
 report identically, and anything that varies between exchanges — an expiry, a
@@ -1871,11 +1872,18 @@ two ways instead, and each way answers a harm the ask rule answers by refusing:
   surely as one unbounded name would. Past it lns records that it elided the rest,
   and that entry is lns's own.
 
+The **authority** a finished exchange reports is connector text too: the consent
+card prints it beside the disclosure
+([§3.2.4](#324-installing-connecting-and-applying)). It refuses rather than cuts,
+wherever it crosses a ceiling. A grant survives re-authentication by comparing the
+authority reported against the authority consented to, so two different authorities
+cut to one string would keep a grant nobody agreed to.
+
 Everything [§1.5](#15-one-disclosure) fixes verbatim — the disclosures, the bounds,
-the digest — is lns's own text, and an ask's connector text MUST be surrounded by
-it and MUST NOT be able to occupy, redraw, or imitate it. Text that could forge a
-disclosure would forge consent, which is the one thing this section exists to
-protect.
+the digest — is lns's own text, and a component's connector text MUST be
+surrounded by it and MUST NOT be able to occupy, redraw, or imitate it. Text that
+could forge a disclosure would forge consent, which is the one thing this section
+exists to protect.
 
 Only `connect` and `resume` may ask. `refresh` runs on a schedule with nobody there
 to answer at all. `revoke` has a person at the press, but it undoes a decision
@@ -1906,15 +1914,16 @@ every call, which is why a component needs no clock to be told the time.
 **What lns enforces**, on every call and never trusted from the component: the
 declared `hosts` and TLS for outbound calls; no filesystem, no environment, and no
 clock as capabilities of their own; the deadlines in `limits`; and fuel, memory,
-step-state, connector-text, random-draw, field-count, field-name,
-record-length, record-count, and component-size ceilings. An ask that crosses one
-fails the connect, for the reason the connector-text ceiling does: a round trimmed
-to fit is one the user answers without knowing what was taken out. The two record
-ceilings are the exception, and the rule above says why one cuts and the other
-elides. Step state between calls, and any answer to a field marked secret, are
-secret material — a device code, a PKCE verifier, a password — so lns holds each
-in memory only, for a bounded lifetime, never logs it, never persists it, and
-drops an answer once the `resume` that consumed it returns.
+step-state, connector-text, random-draw, response-size, round-count, field-count,
+field-name, authority-count, record-length, record-count, and component-size
+ceilings. Whatever crosses one fails the call it arrived in, for the reason the
+connector-text ceiling does: a round trimmed to fit is one the user answers without
+knowing what was taken out. The two record ceilings are the exception, and the rule
+above says why one cuts and the other elides. Step state between calls, and any
+answer to a field marked secret, are secret material — a device code, a PKCE
+verifier, a password — so lns holds each in memory only, for a bounded lifetime,
+never logs it, never persists it, and drops an answer once the `resume` that
+consumed it returns.
 
 **What lns does, so a component cannot.** The component reports scopes; lns builds
 the canonical set ([§3.2.4](#324-installing-connecting-and-applying)). Where a
@@ -2696,7 +2705,7 @@ Five things live per machine, none of them in any document:
 | What | Keyed by | Scope |
 |---|---|---|
 | The installed set — each connector's document **and the bytes of every file packed beside it**: every `component` and every `filesets[].path` directory, stored verbatim at the digest computed over all of them | name | The machine |
-| Each **connection** — its label, the method `name` that produced it, the authority its `auth` reported, the values it returned, and the expiry the mechanism reported, where it reported one | name, then connection | The machine |
+| Each **connection** — its label, the method `name` that produced it, the authority its `auth` reported as lns rendered it, the values it returned, and the expiry the mechanism reported, where it reported one | name, then connection | The machine |
 | Which method a run granted, the connection behind it where the method authenticates, and the authority it consented to | run, then name, digest | The run |
 | Which connectors a run declined | run, then name | The run |
 | A grant **reserved** for a name no run holds yet | run name, then connector, digest | That name, until a run takes it |
