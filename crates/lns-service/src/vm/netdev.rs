@@ -631,11 +631,13 @@ mod tests {
         }
     }
 
+    type SpawnLog = Arc<Mutex<Vec<(PathBuf, Vec<String>)>>>;
+
     struct FakeSpawner {
         /// The socket a spawn creates, standing in for gvproxy binding its listener.
         creates: Option<PathBuf>,
         fails: bool,
-        spawned: Arc<Mutex<Vec<(PathBuf, Vec<String>)>>>,
+        spawned: SpawnLog,
         killed: Arc<AtomicBool>,
         waited: Arc<AtomicBool>,
     }
