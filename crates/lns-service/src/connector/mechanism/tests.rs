@@ -51,28 +51,10 @@ impl Recorder for Spy {
 #[derive(Default)]
 pub struct Reachable {
     pub seen: Mutex<Vec<String>>,
-    /// What each call carried, for a component whose request body is part of what it was asked to do.
-    pub sent: Mutex<Vec<Vec<u8>>>,
     /// The deadline the call carried, because an epoch tick cannot interrupt a host call already in flight.
     pub within: Mutex<std::time::Duration>,
     /// What the network did, rather than what the bound decided: a mechanism has to tell the two apart.
     pub unreachable: Mutex<bool>,
-    /// One answer per call, in order, for a component whose rounds each need a different one. Empty means every call gets the same `ok`.
-    pub scripted: Mutex<std::collections::VecDeque<(u16, Vec<u8>)>>,
-}
-
-impl Reachable {
-    pub fn answering(answers: &[(u16, &str)]) -> Self {
-        Self {
-            scripted: Mutex::new(
-                answers
-                    .iter()
-                    .map(|(status, body)| (*status, body.as_bytes().to_vec()))
-                    .collect(),
-            ),
-            ..Self::default()
-        }
-    }
 }
 
 impl Http for Reachable {
@@ -86,19 +68,10 @@ impl Http for Reachable {
             .lock()
             .expect("http lock")
             .push(request.url.clone());
-        self.sent
-            .lock()
-            .expect("http lock")
-            .push(request.body.clone());
         if *self.unreachable.lock().expect("http lock") {
             return Err(CallError::Failed("the network is down".to_string()));
         }
-        let (status, body) = self
-            .scripted
-            .lock()
-            .expect("http lock")
-            .pop_front()
-            .unwrap_or((200, b"ok".to_vec()));
+        let (status, body) = (200, b"ok".to_vec());
         Ok(HttpResponse {
             status,
             headers: Vec::new(),
@@ -149,14 +122,6 @@ impl Parts {
             http: std::sync::Arc::new(Reachable::default()),
             exec: std::sync::Arc::new(Runnable::default()),
             recorder: std::sync::Arc::new(Spy::default()),
-        }
-    }
-
-    /// Parts whose network answers each call with the next scripted response, for a component whose rounds each need a different one.
-    pub fn answering(answers: &[(u16, &str)]) -> Self {
-        Self {
-            http: std::sync::Arc::new(Reachable::answering(answers)),
-            ..Self::new()
         }
     }
 

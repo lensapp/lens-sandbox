@@ -1,9 +1,8 @@
 #!/bin/sh
 # Rebuilds the committed components. Needs `rustup target add wasm32-wasip2`.
 # `--check` rebuilds and reports any committed component the source no longer
-# produces, so a stale fixture cannot pass silently. Unlike
-# connectors/github/mechanism/build.sh it does not yet run fmt or clippy over
-# this out-of-workspace crate, so nothing lints it; adding them means
+# produces, so a stale fixture cannot pass silently. It does not yet run fmt or
+# clippy over this out-of-workspace crate, so nothing lints it; adding them means
 # reformatting the source and recommitting all twenty-three components, because a
 # trapping fixture embeds its own file and line.
 set -eu

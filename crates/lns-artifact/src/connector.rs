@@ -717,50 +717,6 @@ mod tests {
         assert!(rendered.contains("unarmed"), "{rendered}");
     }
 
-    /// The one connector this repository ships is the document a reader copies, so a format move that stopped accepting it must fail here rather than in their hands.
-    #[test]
-    fn the_github_connector_this_repository_ships_is_a_document_this_version_accepts() {
-        let shipped: serde_json::Value =
-            serde_yaml::from_str(include_str!("../../../connectors/github/lns.yaml"))
-                .expect("the shipped document is YAML");
-        let parsed = parse(&serde_json::to_vec(&shipped).expect("a document re-encodes"))
-            .expect("the shipped document is a connector this version accepts");
-        // A method dropped from the document is a method nothing then tests, so the count is pinned before anything reads by index.
-        assert_eq!(parsed.spec.methods.len(), 2);
-        let app = shipped_code(&parsed, 0, "sign-in");
-        let oauth = shipped_code(&parsed, 1, "oauth-sign-in");
-        // The join between the two halves of the example: dropping an output the component still produces parses, and then stores a connection with a hole nothing reports until a renewal fails.
-        assert_eq!(
-            app.outputs,
-            ["access_token", "refresh_token", "client_id"],
-            "what the GitHub App component is pinned to produce"
-        );
-        assert_eq!(
-            oauth.outputs,
-            ["access_token"],
-            "an OAuth App's token never expires, so there is nothing else to keep"
-        );
-    }
-
-    /// One shipped method's bounds, which no edit to the example may quietly widen, and the component path the wasm suite runs by literal path.
-    fn shipped_code(parsed: &ConnectorDefinition, at: usize, name: &str) -> CodeAuth {
-        let method = &parsed.spec.methods[at];
-        assert_eq!(method.name, name);
-        let code = method
-            .auth
-            .as_ref()
-            .expect("an auth")
-            .code()
-            .expect("a code auth")
-            .expect("a valid one");
-        assert_eq!(code.hosts, ["github.com"]);
-        assert!(!code.exec);
-        assert_eq!(code.component.as_deref(), Some(&*format!("./{name}.wasm")));
-        assert_eq!(code.limits().call_seconds, 15);
-        assert_eq!(code.limits().session_seconds, 900);
-        code
-    }
-
     fn code_method(auth: &str, credentials: &str) -> Vec<u8> {
         with_methods(&format!(
             r#"[{{"name":"sign-in","auth":{auth},"credentials":[{credentials}]}}]"#
