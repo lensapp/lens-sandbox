@@ -226,6 +226,7 @@ mod tests {
             resolved_image: None,
             mixins: Vec::new(),
             composed_mixins: Vec::new(),
+            configuration_sources: None,
             name: None,
             cpus: 2,
             mem: 512,

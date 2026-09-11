@@ -71,6 +71,13 @@ pub enum Request {
     InspectRun {
         run: String,
     },
+    ReadRunConfiguration {
+        run: String,
+    },
+    PreviewSandbox {
+        source: String,
+        mixins: Vec<String>,
+    },
     RunLogs {
         run: String,
         follow: bool,
@@ -287,6 +294,9 @@ pub enum Response {
     },
     RunSaved {
         document: String,
+    },
+    SandboxConfiguration {
+        configuration: Box<crate::SandboxConfiguration>,
     },
     RunsPruned {
         removed: Vec<String>,
@@ -899,6 +909,8 @@ pub struct RunImageArgs {
     /// The same references, still named for a local run whose document the preflight already merged, so the composition the run ran is recorded whole.
     #[serde(default)]
     pub composed_mixins: Vec<String>,
+    #[serde(default)]
+    pub configuration_sources: Option<Box<crate::ConfigurationSources>>,
     #[serde(default)]
     pub name: Option<String>,
     pub cpus: u8,
@@ -1519,6 +1531,7 @@ mod tests {
             resolved_image: None,
             mixins: Vec::new(),
             composed_mixins: Vec::new(),
+            configuration_sources: None,
             name: None,
             cpus: 1,
             mem: 512,
@@ -1561,6 +1574,7 @@ mod tests {
             resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
             mixins: Vec::new(),
             composed_mixins: Vec::new(),
+            configuration_sources: None,
             name: None,
             cpus: 1,
             mem: 512,
@@ -1707,6 +1721,7 @@ mod tests {
             resolved_image: None,
             mixins: Vec::new(),
             composed_mixins: Vec::new(),
+            configuration_sources: None,
             name: None,
             cpus: 2,
             mem: 1024,

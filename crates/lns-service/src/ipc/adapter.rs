@@ -813,3 +813,20 @@ async fn take_reservations(
         );
     }
 }
+
+pub(super) fn read_run_configuration(run: &str) -> anyhow::Result<Response> {
+    let id = crate::run_registry::resolve(run).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let root = crate::cache::root()?;
+    let bytes = std::fs::read(crate::run_record::record_path(&root, &id))
+        .context("reading the recorded sandbox configuration")?;
+    let record =
+        serde_json::from_slice(&bytes).context("parsing the recorded sandbox configuration")?;
+    let decisions = lns_policy::Policy::load_or_default(&crate::cache::decisions_path(&root, &id))?;
+    let grants = crate::connector::real::read_granted_supply(
+        &crate::connector::store::GrantHolder::Run(id.clone()),
+    )?;
+    let configuration = crate::run::configuration::inspect(&record, &decisions, &grants)?;
+    Ok(Response::SandboxConfiguration {
+        configuration: Box::new(configuration),
+    })
+}

@@ -75,6 +75,7 @@ fn sample_args() -> lns_ipc::RunImageArgs {
         resolved_image: None,
         mixins: Vec::new(),
         composed_mixins: Vec::new(),
+        configuration_sources: None,
         name: None,
         cpus: 1,
         mem: 0,

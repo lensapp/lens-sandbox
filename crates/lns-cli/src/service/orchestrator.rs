@@ -338,6 +338,17 @@ pub async fn run_image(
 ) -> Result<i32> {
     let client = real_client()?;
     args.mixins = crate::run::target::root_named_directories(&args.mixins, &cwd)?;
+    let definition_source = match target.project_dir() {
+        Some(project_dir) => args
+            .file
+            .as_ref()
+            .map(|file| cwd.join(file))
+            .or_else(|| args.image.as_ref().map(|path| cwd.join(path)))
+            .unwrap_or_else(|| project_dir.to_path_buf())
+            .display()
+            .to_string(),
+        None => target.image(),
+    };
     let mut authored_egress = None;
     // A mixin the preflight pulled brings its filesets packed in its own artifact, and the merged document alone cannot say which.
     let mut packed_filesets = Vec::new();
@@ -524,6 +535,15 @@ pub async fn run_image(
         resolved_image: published.as_ref().map(|published| published.image.clone()),
         mixins: run_mixins.to_merge,
         composed_mixins: run_mixins.composed,
+        configuration_sources: Some(Box::new(lns_ipc::ConfigurationSources {
+            definition: published
+                .as_ref()
+                .map(|p| p.image.clone())
+                .unwrap_or(definition_source),
+            mixins: args.mixin_sources,
+            added_mixins: args.mixins,
+            contributions: args.contributions,
+        })),
         name: args.name,
         sandbox_user,
         sandbox_uid,

@@ -26,6 +26,7 @@ pub mod run_removal;
 pub mod run_start_refusal;
 pub mod run_start_stopped;
 pub mod run_user;
+pub mod sandbox_configuration;
 pub mod sandbox_filesets;
 pub mod volume_management;
 pub mod volumes;

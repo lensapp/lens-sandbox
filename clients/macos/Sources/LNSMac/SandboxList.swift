@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import LNSClient
 
@@ -81,7 +82,8 @@ struct SandboxList: View {
     private func sandboxRow(_ sandbox: DashboardSandbox) -> some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(sandbox.name).lineLimit(1).help(sandbox.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(LNSTheme.heading).textSelection(.enabled)
+                Button(sandbox.name) { model.inspect(sandbox) }
+                    .buttonStyle(.plain).lineLimit(1).help("Inspect \(sandbox.name)").font(.system(size: 13, weight: .semibold)).foregroundStyle(LNSTheme.heading)
                 Text(sandbox.image).font(.caption.monospaced()).foregroundStyle(LNSTheme.muted).lineLimit(1)
                     .help(sandbox.image)
                 Text(sandbox.id).lineLimit(1).help(sandbox.id).font(.caption2.monospaced()).foregroundStyle(LNSTheme.muted).textSelection(.enabled)
@@ -99,6 +101,9 @@ struct SandboxList: View {
                         .frame(width: 60)
                 }
                 Menu {
+                    Button("View Configuration…") { model.inspect(sandbox) }
+                    Button("Save Definition…") { model.saveDefinition(sandbox) }.disabled(model.saving.busy)
+                    Divider()
                     Button("View Activity") { show(.audit, sandbox: sandbox) }
                     Button("View Approvals") { show(.approvals, sandbox: sandbox) }
                     Button("Grant Connector Access…") {

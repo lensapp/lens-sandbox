@@ -33,8 +33,18 @@ sandbox asks first and deletes its writable layer and decisions. Removed
 sandboxes remain available in audit history but are excluded from the controls.
 
 **New Sandbox…** (⌘N) starts a fresh sandbox from a local `lns.yaml`, a folder
-containing one, or a published reference. Give it an optional name and choose
-**Start Sandbox**. The app shows launch details and returns to the list once the
+containing one, or a published reference. **Recently Used Definitions** fills in a
+source without restoring an earlier run's extra mixins. **Add Mixin…** accepts a
+local file or folder, a published reference, or a recently used mixin. Move added
+mixins earlier or later to control precedence. Recent sources are stored in this
+interface's preferences after a successful launch; clearing a recent item removes
+only its shortcut.
+
+Choose **Review Configuration** to resolve the definition and mixins. Review their
+sources, contributions, replacements, network rules, mounts, files, and scripts.
+Published references are pinned for launch; changing a source clears the preview
+and setup consent. Give the sandbox an optional name and choose **Start Sandbox**.
+The app shows launch details and returns to the list once the
 workload is ready. Startup failures keep their details visible for review.
 The setup checkbox accepts the definition's declared installers, scripts,
 mounts, and host access, using the CLI's `--yes` behavior. It starts unchecked;
@@ -42,6 +52,22 @@ when consent is required, review the reported details before enabling it and
 retrying. Creating a sandbox requires the bundle containing CLI/service helpers.
 Use **Sign In to a Registry…** in this form if its definition or base image
 requires authentication; then retry the launch after signing in.
+
+Click a sandbox's name or choose **View Configuration…** to inspect its recorded
+definition and mixins, connector grants, and current network rules. **Your
+Decisions** shows persistent answers and updates with service notifications. The
+effective rule list identifies each source and explains precedence for identical
+rule scopes. Where audit history contains a matching persistent approval, its
+time is shown. One-time answers remain in Approvals history. Older runs that did
+not retain attribution say so, and still show their recorded configuration and
+current decisions. Declarations other than network rules in the decisions file
+are shown separately because their startup effects are not applied live.
+
+**Save Definition…** is available in the sandbox's action menu and configuration
+view for running and stopped sandboxes. It writes the resolved definition and
+persistent decisions to a new file, folding in mixins and excluding connector
+grants. Existing files are never overwritten. A successful save adds that file
+to recently used definitions.
 
 **Connectors** shows installed connectors as cards with the author's
 `spec.description`, saved connections, and their authority. Missing or blank
@@ -216,6 +242,13 @@ coordinated app/service updates are still required before shipping it.
   oversized frame; an interrupted read is an error, not an empty dashboard.
   `DashboardEnd` completes the request without waiting for a socket EOF.
 - `InspectApprovalOffer` reads the offer a history row still holds.
+- `PreviewSandbox` resolves a local or published definition with ordered extra
+  mixins. `ReadRunConfiguration` reads the recorded configuration and current
+  decisions through the service; the interface never reads run directories.
+  Both return `SandboxConfiguration`, including source attribution, rule order,
+  and connector variable names and file paths without credential values.
+- `SaveRun` renders the document through the service. The interface writes it
+  only to the user-selected new file and remembers the path after success.
   `GrantApproval` includes the disclosed digest and is refused if it changed.
   An acknowledgment reports handling, not proof a grant persisted; refreshed
   history and live notices carry the outcome.

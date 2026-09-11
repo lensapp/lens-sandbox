@@ -29,6 +29,24 @@ mod approval_stream_tests {
     use super::*;
     use crate::shutdown::Shutdown;
 
+    #[tokio::test]
+    async fn configuration_requests_report_unknown_runs_and_invalid_references() {
+        for request in [
+            Request::ReadRunConfiguration {
+                run: "never-recorded-configuration-run".into(),
+            },
+            Request::PreviewSandbox {
+                source: "!".into(),
+                mixins: vec![],
+            },
+        ] {
+            assert!(matches!(
+                handle_request(&request, Instant::now()).await,
+                Response::Error { .. }
+            ));
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn one_shot_dispatch_keeps_subscriptions_and_stale_answers_distinct() {
         let started = tokio::time::Instant::now().into_std();
@@ -849,6 +867,12 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         Request::ListRegistryLogins => list_logins_response(),
         Request::StopRun { run, timeout_secs } => stop_run_request(run, *timeout_secs).await,
         Request::InspectRun { run } => inspect_run_request(run),
+        Request::ReadRunConfiguration { run } => {
+            image_response(adapter::read_run_configuration(run))
+        }
+        Request::PreviewSandbox { source, mixins } => {
+            image_response(crate::artifact::real::preview_sandbox(source, mixins).await)
+        }
         Request::RemoveRun { run, force } => image_response(remove_run_request(run, *force).await),
         Request::PruneRuns => image_response(prune_runs_request().await),
         Request::SaveRun { run, kind, name } => image_response(save_run_request(run, *kind, name)),
@@ -1490,6 +1514,7 @@ mod tests {
                 resolved_image: None,
                 mixins: Vec::new(),
                 composed_mixins: Vec::new(),
+                configuration_sources: None,
                 name: None,
                 cpus: 1,
                 mem: 0,

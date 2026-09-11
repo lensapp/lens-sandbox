@@ -23,6 +23,12 @@ final class DashboardModel: ObservableObject {
     @Published var managementSheet: ManagementSheet?
     @Published var grantRun = ""
     @Published var creatingSandbox = false
+    @Published var inspectingSandbox: DashboardSandbox?
+    @Published private(set) var recents = RecentSources()
+    var persistRecents: ((RecentSources) throws -> Void)?
+    let configuration: ConfigurationSession
+    let preview: ConfigurationSession
+    let saving: SandboxSaving
     let creation: SandboxCreation?
     let management: ManagementSession
     let registries: RegistrySession
@@ -46,6 +52,9 @@ final class DashboardModel: ObservableObject {
     init(service: any ServiceClient, launchSandbox: ((SandboxDraft) throws -> AsyncThrowingStream<HelperProcessEvent, Error>)? = nil,
          registryBrowser: ((String) throws -> AsyncThrowingStream<HelperProcessEvent, Error>)? = nil) {
         self.service = service
+        configuration = ConfigurationSession(service: service)
+        preview = ConfigurationSession(service: service)
+        saving = SandboxSaving(service: service) { file, data in try data.write(to: file, options: .withoutOverwriting) }
         creation = launchSandbox.map { SandboxCreation(launch: $0) }
         management = ManagementSession(service: service)
         registries = RegistrySession(service: service)
@@ -54,6 +63,9 @@ final class DashboardModel: ObservableObject {
         management.onChange = { [weak self] in self?.objectWillChange.send() }
         creation?.onChange = { [weak self] in self?.objectWillChange.send() }
         registries.onChange = { [weak self] in self?.objectWillChange.send() }
+        configuration.onChange = { [weak self] in self?.objectWillChange.send() }
+        preview.onChange = { [weak self] in self?.objectWillChange.send() }
+        saving.onChange = { [weak self] in self?.objectWillChange.send() }
     }
 
     var data: DashboardData { feed.data }
@@ -74,6 +86,22 @@ final class DashboardModel: ObservableObject {
 
     var currentSandboxes: [DashboardSandbox] { data.sandboxes.filter(\.controllable) }
     var canCreateSandbox: Bool { connected && creation != nil && creation?.busy == false && !management.busy }
+
+    func updateRecents(_ change: (inout RecentSources) -> Void) {
+        change(&recents)
+        do { try persistRecents?(recents) }
+        catch { notice = "Could not save recent sources: \(error.localizedDescription)" }
+    }
+
+    func inspect(_ sandbox: DashboardSandbox) {
+        configuration.clear()
+        inspectingSandbox = sandbox
+    }
+
+    func refreshConfiguration() async {
+        guard connected, let sandbox = inspectingSandbox else { return }
+        await configuration.read(.configuration(sandbox.id))
+    }
 
     func manage(_ command: ManagementCommand, reviewing offer: ConnectorOffer? = nil) async -> Bool {
         guard connected else { return false }
@@ -127,6 +155,10 @@ final class DashboardModel: ObservableObject {
         if let id = selectedHistory, !snapshot.approvals.contains(where: { $0.id == id }) { clearHistory() }
         await management.refresh()
         await registries.refresh()
+        if let sandbox = inspectingSandbox {
+            if currentSandboxes.contains(where: { $0.id == sandbox.id }) { await refreshConfiguration() }
+            else { inspectingSandbox = nil; configuration.clear() }
+        }
     }
 
     private func disconnect() {
@@ -135,6 +167,7 @@ final class DashboardModel: ObservableObject {
         management.disconnect()
         registries.setConnected(false)
         managementSheet = nil
+        configuration.clear(); preview.clear()
         selectedEvent = nil
         clearHistory()
     }

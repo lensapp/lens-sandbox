@@ -43,6 +43,15 @@ final class AppModel: ObservableObject {
                       HelperProcess.launch(HelperProcessLaunch(arguments: ["login", registry], bundle: Bundle.main.bundleURL,
                           socket: path, environment: ProcessInfo.processInfo.environment))
                   } : nil)
+        if let bytes = UserDefaults.standard.data(forKey: "recentSandboxSources") {
+            do {
+                let recent = try JSONDecoder().decode(RecentSources.self, from: bytes)
+                dashboard.updateRecents { $0 = recent }
+            } catch { dashboard.notice = "Could not read recent sources: \(error.localizedDescription)" }
+        }
+        dashboard.persistRecents = { recent in
+            UserDefaults.standard.set(try JSONEncoder().encode(recent), forKey: "recentSandboxSources")
+        }
     }
 
     init(service connection: any ServiceClient, socketPath: String,

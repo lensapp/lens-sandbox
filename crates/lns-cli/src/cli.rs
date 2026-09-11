@@ -203,6 +203,8 @@ pub struct RunArgs {
     /// The mixins a pulled sandbox resolved into, ready to display; the merged document declares none of its own, so this is the only place a composed sandbox says so.
     #[arg(skip)]
     pub resolved_mixins: Vec<String>,
+    #[arg(skip)]
+    pub mixin_sources: Vec<String>,
 
     /// Which source decided each entry the summary shows, and what that decision replaced.
     #[arg(skip)]

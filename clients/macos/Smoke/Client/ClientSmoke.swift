@@ -80,6 +80,8 @@ struct ClientSmoke {
             throw ServiceError(message: "live approval subscription failed")
         }
         try require(approvals.approvals.isEmpty, "unexpected live request")
+        stage = "configuration preview, live decisions, and save"
+        try await verifyConfiguration(client, root: URL(fileURLWithPath: CommandLine.arguments[3]).deletingLastPathComponent())
         stage = "shutdown acknowledgment"
         guard case .shuttingDown = try await client.send(.shutdown) else {
             throw ServiceError(message: "shutdown not acknowledged")
@@ -89,6 +91,27 @@ struct ClientSmoke {
         stage = "approval subscription shutdown"
         try require(try await live.next() == nil, "shutdown did not close approval subscription")
         stage = "complete"
-        print("PASS: Swift client and real service agree on audit, history, actions, connector descriptions, notifications, and shutdown")
+        print("PASS: Swift client and real service agree on audit, history, configuration, mixin preview, saved definitions, connectors, notifications, and shutdown")
+    }
+
+    @MainActor
+    static func verifyConfiguration(_ client: ServiceConnection, root: URL) async throws {
+        var draft = SandboxDraft()
+        draft.source = root.appendingPathComponent("lns.yaml").path
+        draft.mixins = [root.appendingPathComponent("tools.yaml").path]
+        guard case let .configuration(preview) = try await client.send(.management(.preview(draft))) else {
+            throw ServiceError(message: "configuration preview missing")
+        }
+        try require(preview.spec["tools"] as? [String] == ["node@22"], "preview did not merge the added mixin")
+        try require(preview.sources?.added_mixins == draft.mixins, "preview lost mixin provenance")
+        guard case let .configuration(current) = try await client.send(.management(.configuration("quiet_river"))) else {
+            throw ServiceError(message: "current configuration missing")
+        }
+        try require(current.userDecisions.contains { $0.destination == "example.com" && $0.verdict == "allow" }, "live decision missing after history was removed")
+        let saving = SandboxSaving(service: client) { try $1.write(to: $0, options: .withoutOverwriting) }
+        let saved = await saving.save(run: "quiet_river", to: root.appendingPathComponent("saved-reviewer.yaml"))
+        try require(saved, saving.error ?? "save failed")
+        let overwritten = await saving.save(run: "quiet_river", to: root.appendingPathComponent("saved-reviewer.yaml"))
+        try require(!overwritten, "save overwrote an existing file")
     }
 }

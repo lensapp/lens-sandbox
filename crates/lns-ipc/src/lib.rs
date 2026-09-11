@@ -1,5 +1,6 @@
 mod audit;
 mod codec;
+mod configuration;
 mod dashboard;
 mod ledger;
 mod live_approvals;
@@ -15,6 +16,9 @@ pub use codec::{
     WireFrame, decode_frame, decode_raw_frame, decode_wire_frame_from_bytes,
     decode_wire_frame_from_payload, decode_wire_frame_sync, encode_frame, encode_raw_frame,
     encode_wire_frame, read_frame_bytes_async,
+};
+pub use configuration::{
+    ConfigurationGrant, ConfigurationRule, ConfigurationSources, SandboxConfiguration,
 };
 pub use dashboard::{DashboardApproval, DashboardEvent, DashboardSandbox};
 pub use ledger::{AnswerSource, ApprovalKind, ConnectorVerb, Decision, LedgerEvent, LedgerRecord};

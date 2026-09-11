@@ -47,6 +47,9 @@ struct DashboardView: View {
             ManagementForm(model: model, sheet: sheet).id(sheet.id)
         }
         .sheet(isPresented: $model.creatingSandbox) { SandboxCreateForm(model: model) }
+        .sheet(item: $model.inspectingSandbox, onDismiss: { model.configuration.clear() }) { sandbox in
+            SandboxConfigurationView(model: model, sandbox: sandbox)
+        }
         .onChange(of: model.page) { page in
             model.selectedEvent = nil; model.clearHistory()
             if page != .approvals { live.reviewingApprovalID = nil }

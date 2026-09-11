@@ -117,7 +117,7 @@ public struct ServiceRequest: Encodable {
     }
     public var replyTimeout: Double {
         switch type {
-        case "StartRun", "InstallConnector": return 300
+        case "StartRun", "InstallConnector", "PreviewSandbox": return 300
         case "RegistryLogin": return 120
         case "StopRun": return 30
         default: return 10
@@ -212,6 +212,7 @@ public enum ServiceReply {
     case acknowledged, offer(ConnectorOffer?)
     case connectors([ConnectorOffer]), completed(String)
     case registryLogins([RegistryLogin])
+    case configuration(SandboxConfiguration), savedDocument(String)
 
     public static func decode(_ data: Data) throws -> Self {
         struct Envelope: Decodable { let type: String; let message: String? }
@@ -219,6 +220,12 @@ public enum ServiceReply {
         let envelope = try decoder.decode(Envelope.self, from: data)
         if let reply = try management(data, type: envelope.type) { return reply }
         switch envelope.type {
+        case "SandboxConfiguration":
+            struct Configured: Decodable { let configuration: SandboxConfiguration }
+            return .configuration(try decoder.decode(Configured.self, from: data).configuration)
+        case "RunSaved":
+            struct Saved: Decodable { let document: String }
+            return .savedDocument(try decoder.decode(Saved.self, from: data).document)
         case "RegistryLoginStored", "RegistryLoggedOut": return .completed(envelope.type)
         case "RegistryLogins":
             struct Accounts: Decodable { let logins: [RegistryLogin] }
