@@ -665,11 +665,11 @@ fn tcp_ingress(
     destination: Ipv4Addr,
     rest: &[u8],
 ) -> Ingress {
-    let Ok((tcp, _)) = TcpHeader::from_slice(rest) else {
+    let Ok((tcp, payload)) = TcpHeader::from_slice(rest) else {
         return Ingress::Dropped(DROPPED_MALFORMED);
     };
     let to = SocketAddr::new(IpAddr::V4(destination), tcp.destination_port);
-    let reset = reset_packet(source, destination, &tcp);
+    let reset = reset_packet(source, destination, &tcp, payload.len());
     let to_resolver = to == gateway_resolver(config);
     if !to_resolver && let Some(refusal) = config.boundary.refusal(to) {
         return Ingress::Refused {
@@ -731,17 +731,23 @@ fn refused_or_forward(config: &Config, destination: SocketAddr, answer: Vec<u8>)
 }
 
 /// A refused connection is answered the way a closed port is, so the guest fails at once instead of waiting out a timeout.
-fn reset_packet(source: Ipv4Addr, destination: Ipv4Addr, segment: &TcpHeader) -> Vec<u8> {
+fn reset_packet(
+    source: Ipv4Addr,
+    destination: Ipv4Addr,
+    segment: &TcpHeader,
+    payload: usize,
+) -> Vec<u8> {
     let ip = PacketBuilder::ipv4(destination.octets(), source.octets(), PACKET_TTL);
     let ports = (segment.destination_port, segment.source_port);
-    // RFC 793: a segment that carries an acknowledgement is reset from its own ACK; one that does not is reset from zero.
+    // RFC 793: a segment that carries an acknowledgement is reset from its own ACK; one that does not is reset from past everything it occupies.
     let builder = if segment.ack {
         ip.tcp(ports.0, ports.1, segment.acknowledgment_number, 0)
             .rst()
     } else {
+        let occupied = u32::try_from(payload).unwrap_or(u32::MAX).wrapping_add(1);
         ip.tcp(ports.0, ports.1, 0, 0)
             .rst()
-            .ack(segment.sequence_number.wrapping_add(1))
+            .ack(segment.sequence_number.wrapping_add(occupied))
     };
     let mut packet = Vec::with_capacity(builder.size(0));
     let _ = builder.write(&mut packet, &[]);
@@ -2117,6 +2123,28 @@ mod tests {
             accepts.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a retransmitted SYN is one flow, not three"
+        );
+    }
+
+    #[test]
+    fn a_syn_that_carries_data_is_reset_from_past_the_data_it_carried() {
+        let builder = PacketBuilder::ipv4([192, 168, 127, 2], [127, 0, 0, 1], PACKET_TTL)
+            .tcp(45_000, 8080, 0x1000, 65_535)
+            .syn();
+        let mut fast_open = Vec::with_capacity(builder.size(5));
+        builder.write(&mut fast_open, b"hello").unwrap();
+
+        let (_, _, answer) = refused_by(decide(&config(Boundary::around(SUBNET, 24)), &fast_open))
+            .expect("a refused connection fails at once, data or no data");
+
+        let (_, rest) = Ipv4Header::from_slice(&answer).unwrap();
+        let (tcp, _) = TcpHeader::from_slice(rest).unwrap();
+        assert!(tcp.rst);
+        assert!(tcp.ack);
+        assert_eq!(
+            tcp.acknowledgment_number, 0x1006,
+            "RFC 793: the SYN counts for one and the five bytes it carried for five, \
+             or the guest drops the reset and waits out its own timeout"
         );
     }
 
