@@ -13,6 +13,13 @@
 #   5. A host listener that logs every accept sees none of them. A failed
 #      connect alone does not prove nothing was reached.
 #
+# The gateway also serves DNS over TCP on 192.168.127.1:53, and there is no
+# probe for it here. Every unmarked TCP connection the workload makes is
+# redirected to the in-guest transparent proxy by the sandbox's own nftables
+# rules, so nothing started from this image reaches the gateway on TCP. The
+# Rust tests in crates/lns-service/src/vm/netdev/engine.rs drive that path
+# through the fake guest instead.
+#
 # A refused destination shows up in the guest as `HTTP/1.1 502 Bad Gateway`
 # with an empty body: the in-guest transparent proxy answers for an upstream
 # connect that the netstack reset. curl exits 0 on that 502, so every probe

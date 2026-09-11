@@ -8,10 +8,12 @@ use anyhow::{Context, Result};
 use etherparse::{
     IpNumber, Ipv4Header, PacketBuilder, TcpHeader, UdpHeader, icmpv4::DestUnreachableHeader,
 };
+use futures_util::future::BoxFuture;
 use futures_util::{SinkExt, Stream, StreamExt};
+use hickory_proto::op::Message;
 use netstack_smoltcp::StackBuilder;
 use smoltcp::wire::{Ipv4Packet, UdpPacket};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -55,6 +57,15 @@ const CHANNEL_DEPTH: usize = 512;
 const UDP_IDLE: Duration = Duration::from_secs(60);
 
 const UDP_DATAGRAM_BYTES: usize = 65_535;
+
+/// The MTU less an IPv4 and a UDP header: the largest answer this link carries to the guest in one datagram.
+const DNS_UDP_CEILING: usize = MTU - 28;
+
+/// What a guest that advertises no EDNS payload size can take, per RFC 1035.
+const DNS_UDP_MINIMUM: usize = 512;
+
+/// RFC 1035 §4.2.2: a DNS connection carries one or more queries, and an idle one is closed.
+const DNS_TCP_IDLE: Duration = Duration::from_secs(10);
 
 /// How many items the library refuses to hand over in a row before the reader waits between polls.
 const UNUSABLE_BEFORE_WAITING: usize = 4;
@@ -117,6 +128,15 @@ pub struct Gateway {
     pub address: IpAddr,
     pub resolvers: Arc<Resolvers>,
     pub upstream: Arc<dyn Upstream>,
+}
+
+/// Everything one query needs answered, whatever transport the guest asked over.
+#[derive(Clone)]
+struct Resolving {
+    gateway: Arc<Gateway>,
+    allowance: Arc<Allowance>,
+    counters: Arc<Counters>,
+    relays: Relays,
 }
 
 /// Frames in, frames out. The macOS device is a datagram socketpair; a vhost-user front end would hand over the same two channels.
@@ -374,6 +394,7 @@ pub const DROPPED_FRAGMENT: &str = "an IPv4 fragment, which this gateway does no
 pub const DROPPED_PROTOCOL: &str = "a packet of a protocol this gateway does not carry";
 pub const DROPPED_MALFORMED: &str = "a packet too short or malformed to read";
 pub const DROPPED_UNUSABLE: &str = "a packet the stack would not hand over";
+pub const DROPPED_DNS_ANSWER: &str = "a DNS answer the gateway could not fit to the guest";
 
 /// The library ends its stream on one item it cannot parse, which would end UDP and DNS for the rest of the run; a run reads on until it is cancelled.
 async fn next_usable<S: Stream + Unpin>(
@@ -447,21 +468,19 @@ pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running
         Arc::clone(&admissions),
         Arc::clone(&counters),
     ));
-    tasks.spawn(accept_tcp(
-        admissions,
-        Arc::clone(&counters),
-        relays.clone(),
-        tcp,
-    ));
-    tasks.spawn(accept_udp(
-        config,
-        gateway,
+    let resolving = Resolving {
+        gateway: Arc::new(gateway),
         allowance,
         counters,
-        relays.clone(),
-        udp_read,
-        replies_tx,
+        relays: relays.clone(),
+    };
+    tasks.spawn(accept_tcp(
+        admissions,
+        resolving.clone(),
+        gateway_resolver(&config),
+        tcp,
     ));
+    tasks.spawn(accept_udp(config, resolving, udp_read, replies_tx));
     tasks.spawn(write_udp(udp_write, replies_rx));
     Ok(Running { tasks, relays })
 }
@@ -612,7 +631,9 @@ fn tcp_ingress(
     };
     let to = SocketAddr::new(IpAddr::V4(destination), tcp.destination_port);
     let reset = reset_packet(source, destination, &tcp);
-    if let Some(refusal) = config.boundary.refusal(to) {
+    if to != gateway_resolver(config)
+        && let Some(refusal) = config.boundary.refusal(to)
+    {
         return Ingress::Refused {
             destination: to,
             refusal,
@@ -774,29 +795,83 @@ fn note_refusal(refused: &Refused, counters: &Counters, destination: SocketAddr,
 /// One stream per admitted flow. The flow took its place at ingress, so here it is only claimed — and given back when the relay ends.
 async fn accept_tcp<G, S>(
     admissions: Arc<Admissions>,
-    counters: Arc<Counters>,
-    relays: Relays,
+    resolving: Resolving,
+    resolver: SocketAddr,
     mut listener: S,
 ) where
     S: Stream<Item = (G, SocketAddr, SocketAddr)> + Unpin,
     G: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let relays = resolving.relays.clone();
     while let Some((guest, source, destination)) =
-        next_usable(&mut listener, &counters, &relays.token).await
+        next_usable(&mut listener, &resolving.counters, &relays.token).await
     {
         let Some(claim) = admissions.claim((source, destination)) else {
-            counters.note(DROPPED_TCP_UNADMITTED);
+            resolving.counters.note(DROPPED_TCP_UNADMITTED);
             continue;
         };
         let cancel = claim.cancel.clone();
+        let carried: BoxFuture<'static, ()> = if destination == resolver {
+            Box::pin(serve_dns_over_tcp(guest, resolving.clone()))
+        } else {
+            Box::pin(carry_tcp(guest, destination))
+        };
         relays.carry(async move {
             let _claim = claim;
             tokio::select! {
                 () = cancel.cancelled() => {}
-                () = carry_tcp(guest, destination) => {}
+                () = carried => {}
             }
         });
     }
+}
+
+/// The gateway answers a query over TCP as it does over UDP, so a guest that sees TC set has somewhere to ask again.
+async fn serve_dns_over_tcp<G: AsyncRead + AsyncWrite + Unpin>(mut guest: G, resolving: Resolving) {
+    while let Ok(Some(query)) = tokio::time::timeout(DNS_TCP_IDLE, read_query(&mut guest)).await {
+        let Some(answer) = answered(&resolving, &query).await else {
+            return;
+        };
+        if write_answer(&mut guest, &answer, &resolving.counters)
+            .await
+            .is_none()
+        {
+            return;
+        }
+    }
+}
+
+async fn read_query<G: AsyncRead + Unpin>(guest: &mut G) -> Option<Vec<u8>> {
+    let mut length = [0u8; 2];
+    guest.read_exact(&mut length).await.ok()?;
+    let mut query = vec![0u8; usize::from(u16::from_be_bytes(length))];
+    guest.read_exact(&mut query).await.ok()?;
+    Some(query)
+}
+
+async fn answered(resolving: &Resolving, query: &[u8]) -> Option<Vec<u8>> {
+    let Some(name) = dns::question_name(query) else {
+        resolving.counters.note(DROPPED_MALFORMED);
+        return None;
+    };
+    let Some(_permit) = resolving.allowance.dns_query() else {
+        resolving.counters.note(DROPPED_DNS_IN_FLIGHT);
+        return None;
+    };
+    Some(resolved(&resolving.gateway, query, &name).await)
+}
+
+async fn write_answer<G: AsyncWrite + Unpin>(
+    guest: &mut G,
+    answer: &[u8],
+    counters: &Counters,
+) -> Option<()> {
+    let Ok(length) = u16::try_from(answer.len()) else {
+        counters.note(DROPPED_DNS_ANSWER);
+        return None;
+    };
+    guest.write_all(&length.to_be_bytes()).await.ok()?;
+    guest.write_all(answer).await.ok()
 }
 
 async fn carry_tcp<G: AsyncRead + AsyncWrite + Unpin>(mut guest: G, destination: SocketAddr) {
@@ -815,25 +890,24 @@ async fn write_udp(mut write: netstack_smoltcp::udp::WriteHalf, mut replies: Rec
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn accept_udp(
     config: Config,
-    gateway: Gateway,
-    allowance: Arc<Allowance>,
-    counters: Arc<Counters>,
-    relays: Relays,
+    resolving: Resolving,
     mut datagrams: netstack_smoltcp::udp::ReadHalf,
     replies: Sender<UdpReply>,
 ) {
     let resolver = gateway_resolver(&config);
+    let (allowance, counters, relays) = (
+        Arc::clone(&resolving.allowance),
+        Arc::clone(&resolving.counters),
+        resolving.relays.clone(),
+    );
     let mut flows: HashMap<(SocketAddr, SocketAddr), Sender<Vec<u8>>> = HashMap::new();
     while let Some((payload, source, destination)) =
         next_usable(&mut datagrams, &counters, &relays.token).await
     {
         if destination == resolver {
-            answer_dns(
-                &gateway, &allowance, &counters, &relays, payload, source, &replies,
-            );
+            answer_dns(&resolving, payload, source, &replies);
             continue;
         }
         let key = (source, destination);
@@ -870,50 +944,74 @@ fn open_flow(
     Some(tx)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn answer_dns(
-    gateway: &Gateway,
-    allowance: &Allowance,
-    counters: &Counters,
-    relays: &Relays,
+    resolving: &Resolving,
     query: Vec<u8>,
     source: SocketAddr,
     replies: &Sender<UdpReply>,
 ) {
     let Some(name) = dns::question_name(&query) else {
-        counters.note(DROPPED_MALFORMED);
+        resolving.counters.note(DROPPED_MALFORMED);
         return;
     };
-    let Some(permit) = allowance.dns_query() else {
-        counters.note(DROPPED_DNS_IN_FLIGHT);
+    let Some(permit) = resolving.allowance.dns_query() else {
+        resolving.counters.note(DROPPED_DNS_IN_FLIGHT);
         return;
     };
-    let resolvers = Arc::clone(&gateway.resolvers);
-    let upstream = Arc::clone(&gateway.upstream);
+    let resolver = SocketAddr::new(resolving.gateway.address, dns::PORT);
+    let relaying = resolving.clone();
     let replies = replies.clone();
-    let resolver = SocketAddr::new(gateway.address, dns::PORT);
-    relays.carry(async move {
+    resolving.relays.carry(async move {
         let _permit = permit;
-        relay_query(resolvers, upstream, query, name, source, resolver, replies).await;
+        relay_query(relaying, query, name, source, resolver, replies).await;
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn relay_query(
-    resolvers: Arc<Resolvers>,
-    upstream: Arc<dyn Upstream>,
+    resolving: Resolving,
     query: Vec<u8>,
     name: String,
     source: SocketAddr,
     resolver: SocketAddr,
     replies: Sender<UdpReply>,
 ) {
-    let servers = resolvers.servers_for(&name);
-    let answer = dns::relay(&query, &servers, upstream.as_ref()).await;
-    if answer == dns::servfail(&query) {
-        resolvers.stale();
-    }
+    let answer = resolved(&resolving.gateway, &query, &name).await;
+    let Some(answer) = fit_to_guest(&query, answer) else {
+        resolving.counters.note(DROPPED_DNS_ANSWER);
+        return;
+    };
     let _ = replies.send((answer, resolver, source)).await;
+}
+
+/// One question put to the host's own resolvers. A failure nobody answered makes the next query read the host's configuration again.
+async fn resolved(gateway: &Gateway, query: &[u8], name: &str) -> Vec<u8> {
+    let servers = gateway.resolvers.servers_for(name);
+    let answer = dns::relay(query, &servers, gateway.upstream.as_ref()).await;
+    if answer == dns::servfail(query) {
+        gateway.resolvers.stale();
+    }
+    answer
+}
+
+/// RFC 2181 §9: an answer the guest cannot take over UDP goes back as its question with TC set, so the guest asks again over TCP.
+fn fit_to_guest(query: &[u8], answer: Vec<u8>) -> Option<Vec<u8>> {
+    if answer.len() <= udp_limit_of(query) {
+        return Some(answer);
+    }
+    let mut fitted = Message::from_vec(&answer).ok()?.truncate();
+    if let Ok(asked) = Message::from_vec(query)
+        && let Some(edns) = asked.edns
+    {
+        fitted.set_edns(edns);
+    }
+    fitted.to_vec().ok()
+}
+
+/// What the guest said it can take, never more than one datagram of this link carries.
+fn udp_limit_of(query: &[u8]) -> usize {
+    Message::from_vec(query)
+        .map_or(DNS_UDP_MINIMUM, |asked| usize::from(asked.max_payload()))
+        .min(DNS_UDP_CEILING)
 }
 
 /// One host socket per (guest source, destination) flow, kept for as long as the flow is used and no longer.
@@ -1020,12 +1118,28 @@ mod tests {
     /// The name whose UDP answer this stand-in nameserver truncates, so the guest's query is asked again over TCP.
     const TRUNCATED: &str = "big.test.";
 
-    /// `example.test` and `big.test` resolve; every other name is one this stand-in nameserver never answers.
+    /// The name this stand-in nameserver answers with more than any guest takes over UDP.
+    const LARGE: &str = "large.test.";
+
+    /// How many addresses the large answer carries; 120 of them put it past 1800 bytes.
+    const LARGE_RECORDS: u32 = 120;
+
+    fn address_record(at: u32) -> hickory_proto::rr::Record {
+        hickory_proto::rr::Record::from_rdata(
+            hickory_proto::rr::Name::from_ascii("example.test.").unwrap(),
+            60,
+            hickory_proto::rr::RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::from(
+                0x5d_b8_d8_00 + at,
+            ))),
+        )
+    }
+
+    /// `example.test`, `big.test` and `large.test` resolve; every other name is one this stand-in nameserver never answers.
     fn answer_of(query: &[u8], truncate: bool) -> std::io::Result<Vec<u8>> {
         let request = hickory_proto::op::Message::from_vec(query)
             .map_err(|_| std::io::Error::other("not a question"))?;
         let name = request.queries[0].name().to_string();
-        if name != "example.test." && name != TRUNCATED {
+        if name != "example.test." && name != TRUNCATED && name != LARGE {
             return Err(std::io::Error::other("no such name"));
         }
         let mut reply = hickory_proto::op::Message::new(
@@ -1035,14 +1149,35 @@ mod tests {
         );
         reply.metadata.truncation = truncate && name == TRUNCATED;
         reply.queries = request.queries;
-        reply.answers = vec![hickory_proto::rr::Record::from_rdata(
-            hickory_proto::rr::Name::from_ascii("example.test.").unwrap(),
-            60,
-            hickory_proto::rr::RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(
-                93, 184, 216, 34,
-            ))),
-        )];
+        reply.answers = match name.as_str() {
+            LARGE => (0..LARGE_RECORDS).map(address_record).collect(),
+            _ => vec![address_record(34)],
+        };
         reply.to_vec().map_err(std::io::Error::other)
+    }
+
+    /// One question on the wire, with the EDNS payload size the guest advertises when it advertises one.
+    fn question_of(
+        name: &str,
+        kind: hickory_proto::rr::RecordType,
+        id: u16,
+        edns: Option<u16>,
+    ) -> Vec<u8> {
+        let mut question = hickory_proto::op::Message::new(
+            id,
+            hickory_proto::op::MessageType::Query,
+            hickory_proto::op::OpCode::Query,
+        );
+        question.add_query(hickory_proto::op::Query::query(
+            hickory_proto::rr::Name::from_ascii(format!("{name}.")).unwrap(),
+            kind,
+        ));
+        if let Some(payload) = edns {
+            let mut advertised = hickory_proto::op::Edns::new();
+            advertised.set_max_payload(payload);
+            question.set_edns(advertised);
+        }
+        question.to_vec().unwrap()
     }
 
     fn gateway_of(subnet: Ipv4Addr) -> Gateway {
@@ -1277,19 +1412,20 @@ mod tests {
             name: &str,
             kind: hickory_proto::rr::RecordType,
         ) -> Vec<u8> {
-            let mut question = hickory_proto::op::Message::new(
-                0x1234,
-                hickory_proto::op::MessageType::Query,
-                hickory_proto::op::OpCode::Query,
-            );
-            question.add_query(hickory_proto::op::Query::query(
-                hickory_proto::rr::Name::from_ascii(format!("{name}.")).unwrap(),
-                kind,
-            ));
+            self.advertising(gateway, name, kind, None).await
+        }
+
+        async fn advertising(
+            &mut self,
+            gateway: Ipv4Addr,
+            name: &str,
+            kind: hickory_proto::rr::RecordType,
+            edns: Option<u16>,
+        ) -> Vec<u8> {
             let server = SocketAddr::new(IpAddr::V4(gateway), dns::PORT);
             let handle = self.bind_udp(self.next_port);
             self.next_port += 1;
-            self.exchange(handle, server, &question.to_vec().unwrap())
+            self.exchange(handle, server, &question_of(name, kind, 0x1234, edns))
                 .await
         }
 
@@ -1313,6 +1449,49 @@ mod tests {
             handle
         }
 
+        /// One length-prefixed exchange on a TCP connection the guest opens, read until the answer the prefix promises is whole.
+        async fn over_tcp(
+            &mut self,
+            destination: SocketAddr,
+            local_port: u16,
+            sent: &[u8],
+        ) -> Vec<u8> {
+            let handle = self.open(destination, local_port);
+            assert!(
+                self.wait_until(handle, PATIENCE, |socket| socket.may_send())
+                    .await,
+                "the gateway never opened the connection"
+            );
+            self.sockets
+                .get_mut::<tcp::Socket>(handle)
+                .send_slice(sent)
+                .expect("the guest sends its query");
+            let deadline = tokio::time::Instant::now() + PATIENCE;
+            let mut back: Vec<u8> = Vec::new();
+            loop {
+                self.settle().await;
+                let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+                if socket.can_recv() {
+                    socket
+                        .recv(|data| {
+                            back.extend_from_slice(data);
+                            (data.len(), ())
+                        })
+                        .unwrap();
+                }
+                if back.len() >= 2
+                    && back.len() >= 2 + usize::from(u16::from_be_bytes([back[0], back[1]]))
+                {
+                    return back;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the gateway never answered over TCP, got {} bytes",
+                    back.len()
+                );
+            }
+        }
+
         async fn wait_until(
             &mut self,
             handle: SocketHandle,
@@ -1331,6 +1510,16 @@ mod tests {
 
     fn config(boundary: Boundary) -> Config {
         Config::for_subnet(SUBNET, boundary)
+    }
+
+    /// The gateway a test asks its questions of, with the counters and the allowance the test judges by.
+    fn resolving(limits: Limits, counters: &Arc<Counters>, relays: &Relays) -> Resolving {
+        Resolving {
+            gateway: Arc::new(gateway_of(SUBNET)),
+            allowance: Arc::new(Allowance::of(limits)),
+            counters: Arc::clone(counters),
+            relays: relays.clone(),
+        }
     }
 
     fn admissions(limits: Limits) -> Arc<Admissions> {
@@ -1629,8 +1818,8 @@ mod tests {
 
         let accepting = tokio::spawn(accept_tcp(
             Arc::clone(&admissions),
-            Arc::clone(&counters),
-            relays.clone(),
+            resolving(Limits::default(), &counters, &relays),
+            gateway_resolver(&config(Boundary::Permissive)),
             futures_util::stream::iter(vec![(guest, arriving.0, arriving.1)]),
         ));
         eventually("the stream was never judged", || {
@@ -1658,8 +1847,8 @@ mod tests {
         admissions.admit(carried);
         let accepting = tokio::spawn(accept_tcp(
             Arc::clone(&admissions),
-            Arc::new(Counters::default()),
-            relays.clone(),
+            resolving(Limits::default(), &Arc::new(Counters::default()), &relays),
+            gateway_resolver(&config(Boundary::Permissive)),
             futures_util::stream::iter(vec![(guest, carried.0, carried.1)]),
         ));
 
@@ -2034,6 +2223,201 @@ mod tests {
     }
 
     #[test]
+    fn the_gateway_carries_a_connection_to_its_resolver_and_refuses_every_other_port() {
+        let boundary = Boundary::around(SUBNET, 24);
+
+        assert_eq!(
+            decide(&config(boundary), &tcp_packet("192.168.127.1:53", true)),
+            Ingress::Forward,
+            "DNS over TCP is the one service this gateway offers"
+        );
+        let (destination, refusal, _) = refused_by(decide(
+            &config(boundary),
+            &tcp_packet("192.168.127.1:80", true),
+        ))
+        .expect("there is no control API on this gateway");
+        assert_eq!(destination, "192.168.127.1:80".parse().unwrap());
+        assert_eq!(refusal, Refusal::GuestSubnet);
+    }
+
+    #[test]
+    fn an_answer_the_guest_can_take_goes_back_as_it_came() {
+        let query = question_of("example.test", hickory_proto::rr::RecordType::A, 7, None);
+        let answer = answer_of(&query, false).unwrap();
+
+        assert_eq!(fit_to_guest(&query, answer.clone()), Some(answer));
+    }
+
+    #[test]
+    fn an_answer_too_big_for_a_guest_that_advertised_nothing_keeps_its_question_and_sets_tc() {
+        let query = question_of("large.test", hickory_proto::rr::RecordType::A, 7, None);
+        let whole = answer_of(&query, false).unwrap();
+        assert!(
+            whole.len() > 1800,
+            "the stand-in answers with {} bytes",
+            whole.len()
+        );
+
+        let fitted = fit_to_guest(&query, whole).expect("the guest gets an answer it can take");
+
+        assert!(fitted.len() <= DNS_UDP_MINIMUM, "{} bytes", fitted.len());
+        let fitted = Message::from_vec(&fitted).unwrap();
+        assert!(
+            fitted.metadata.truncation,
+            "so the guest asks again over TCP"
+        );
+        assert!(fitted.answers.is_empty());
+        assert!(fitted.authorities.is_empty());
+        assert!(fitted.additionals.is_empty());
+        assert_eq!(fitted.queries[0].name().to_string(), "large.test.");
+        assert_eq!(fitted.metadata.id, 7);
+    }
+
+    #[test]
+    fn an_answer_too_big_for_the_link_is_truncated_however_much_the_guest_asked_for() {
+        let query = question_of(
+            "large.test",
+            hickory_proto::rr::RecordType::A,
+            7,
+            Some(4096),
+        );
+        let whole = answer_of(&query, false).unwrap();
+
+        let fitted = fit_to_guest(&query, whole).expect("the guest gets an answer it can take");
+
+        assert!(
+            fitted.len() <= DNS_UDP_CEILING,
+            "no answer over {DNS_UDP_CEILING} bytes fits one frame of this link, and this one is {}",
+            fitted.len()
+        );
+        let fitted = Message::from_vec(&fitted).unwrap();
+        assert!(fitted.metadata.truncation);
+        assert!(
+            fitted.edns.is_some(),
+            "the OPT record the guest sent comes back, so its payload size still holds"
+        );
+    }
+
+    #[test]
+    fn an_answer_this_gateway_cannot_read_and_cannot_send_is_dropped() {
+        let query = question_of("example.test", hickory_proto::rr::RecordType::A, 7, None);
+
+        assert_eq!(fit_to_guest(&query, vec![0xff; 600]), None);
+    }
+
+    #[test]
+    fn a_guest_that_asks_with_bytes_that_are_not_a_question_is_answered_by_its_own_limit() {
+        assert_eq!(udp_limit_of(b"not a question"), DNS_UDP_MINIMUM);
+    }
+
+    async fn asked_over_tcp(asking: &mut tokio::io::DuplexStream, query: &[u8]) -> Vec<u8> {
+        let length = u16::try_from(query.len()).unwrap();
+        asking.write_all(&length.to_be_bytes()).await.unwrap();
+        asking.write_all(query).await.unwrap();
+        let mut back = [0u8; 2];
+        asking.read_exact(&mut back).await.unwrap();
+        let mut answer = vec![0u8; usize::from(u16::from_be_bytes(back))];
+        asking.read_exact(&mut answer).await.unwrap();
+        answer
+    }
+
+    #[tokio::test]
+    async fn the_gateway_answers_every_query_of_one_connection_and_closes_with_the_guest() {
+        let counters = Arc::new(Counters::default());
+        let (guest, mut asking) = tokio::io::duplex(8192);
+        let serving = tokio::spawn(serve_dns_over_tcp(
+            guest,
+            resolving(Limits::default(), &counters, &Relays::new()),
+        ));
+
+        for id in [1u16, 2] {
+            let query = question_of("example.test", hickory_proto::rr::RecordType::A, id, None);
+            let answer = asked_over_tcp(&mut asking, &query).await;
+            assert_eq!(Message::from_vec(&answer).unwrap().metadata.id, id);
+        }
+        drop(asking);
+
+        tokio::time::timeout(PATIENCE, serving)
+            .await
+            .expect("the connection ends when the guest closes it")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_asks_what_is_not_a_question_is_closed() {
+        let counters = Arc::new(Counters::default());
+        let (guest, mut asking) = tokio::io::duplex(64);
+        let serving = tokio::spawn(serve_dns_over_tcp(
+            guest,
+            resolving(Limits::default(), &counters, &Relays::new()),
+        ));
+
+        asking.write_all(&[0, 5]).await.unwrap();
+        asking.write_all(b"hello").await.unwrap();
+
+        tokio::time::timeout(PATIENCE, serving)
+            .await
+            .expect("the gateway does not wait on a connection it will not answer")
+            .unwrap();
+        assert_eq!(counters.seen(DROPPED_MALFORMED), 1);
+    }
+
+    #[tokio::test]
+    async fn a_connection_over_the_guests_query_limit_is_closed() {
+        let counters = Arc::new(Counters::default());
+        let (guest, mut asking) = tokio::io::duplex(4096);
+        let serving = tokio::spawn(serve_dns_over_tcp(
+            guest,
+            resolving(
+                Limits {
+                    dns_in_flight: 0,
+                    ..Limits::default()
+                },
+                &counters,
+                &Relays::new(),
+            ),
+        ));
+
+        let query = question_of("example.test", hickory_proto::rr::RecordType::A, 1, None);
+        asking
+            .write_all(&u16::try_from(query.len()).unwrap().to_be_bytes())
+            .await
+            .unwrap();
+        asking.write_all(&query).await.unwrap();
+
+        tokio::time::timeout(PATIENCE, serving)
+            .await
+            .expect("a guest over its limit is not left waiting")
+            .unwrap();
+        assert_eq!(counters.seen(DROPPED_DNS_IN_FLIGHT), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_the_guest_leaves_idle_is_closed() {
+        let counters = Arc::new(Counters::default());
+        let (guest, _asking) = tokio::io::duplex(64);
+
+        let serving = tokio::spawn(serve_dns_over_tcp(
+            guest,
+            resolving(Limits::default(), &counters, &Relays::new()),
+        ));
+        tokio::time::sleep(DNS_TCP_IDLE * 2).await;
+
+        assert!(serving.is_finished(), "an idle connection is not held open");
+    }
+
+    #[tokio::test]
+    async fn an_answer_no_length_prefix_can_carry_is_dropped_rather_than_sent() {
+        let counters = Counters::default();
+        let (mut guest, _asking) = tokio::io::duplex(64);
+
+        let written = write_answer(&mut guest, &vec![0u8; 70_000], &counters).await;
+
+        assert_eq!(written, None);
+        assert_eq!(counters.seen(DROPPED_DNS_ANSWER), 1);
+    }
+
+    #[test]
     fn the_link_leases_the_second_address_of_the_subnet_from_its_first() {
         let config = Config::for_subnet(Ipv4Addr::new(10, 9, 8, 0), Boundary::Permissive);
 
@@ -2099,14 +2483,10 @@ mod tests {
     #[tokio::test]
     async fn bytes_that_are_not_a_question_get_no_answer_from_the_gateway() {
         let (replies, mut heard) = channel(1);
-        let counters = Counters::default();
-        let allowance = Allowance::of(Limits::default());
+        let counters = Arc::new(Counters::default());
 
         answer_dns(
-            &gateway_of(SUBNET),
-            &allowance,
-            &counters,
-            &Relays::new(),
+            &resolving(Limits::default(), &counters, &Relays::new()),
             b"not a question".to_vec(),
             "192.168.127.2:5353".parse().unwrap(),
             &replies,
@@ -2119,11 +2499,15 @@ mod tests {
     #[tokio::test]
     async fn a_guest_that_asks_more_questions_than_it_may_has_the_rest_dropped() {
         let (replies, mut heard) = channel(1);
-        let counters = Counters::default();
-        let allowance = Allowance::of(Limits {
-            dns_in_flight: 0,
-            ..Limits::default()
-        });
+        let counters = Arc::new(Counters::default());
+        let asking = resolving(
+            Limits {
+                dns_in_flight: 0,
+                ..Limits::default()
+            },
+            &counters,
+            &Relays::new(),
+        );
         let query = {
             let mut message = hickory_proto::op::Message::new(
                 1,
@@ -2138,10 +2522,7 @@ mod tests {
         };
 
         answer_dns(
-            &gateway_of(SUBNET),
-            &allowance,
-            &counters,
-            &Relays::new(),
+            &asking,
             query,
             "192.168.127.2:5353".parse().unwrap(),
             &replies,
@@ -2426,6 +2807,65 @@ mod tests {
             "the guest closing its own end ends the connection"
         );
         assert_eq!(&served.await.unwrap(), b"ping!", "the host heard the guest");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_answer_the_guest_cannot_take_over_udp_comes_back_truncated() {
+        let mut guest = FakeGuest::on(Boundary::around(SUBNET, 24));
+        guest.lease().await;
+        let gateway = Ipv4Addr::new(192, 168, 127, 1);
+
+        let plain = guest
+            .advertising(
+                gateway,
+                "large.test",
+                hickory_proto::rr::RecordType::A,
+                None,
+            )
+            .await;
+        let advertised = guest
+            .advertising(
+                gateway,
+                "large.test",
+                hickory_proto::rr::RecordType::A,
+                Some(4096),
+            )
+            .await;
+
+        assert!(plain.len() <= DNS_UDP_MINIMUM, "{} bytes", plain.len());
+        assert!(
+            advertised.len() <= DNS_UDP_CEILING,
+            "{} bytes",
+            advertised.len()
+        );
+        for answer in [&plain, &advertised] {
+            let answer = Message::from_vec(answer).unwrap();
+            assert!(
+                answer.metadata.truncation,
+                "so the guest asks again over TCP"
+            );
+            assert!(answer.answers.is_empty());
+            assert_eq!(answer.queries[0].name().to_string(), "large.test.");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_same_question_over_tcp_to_the_gateway_is_answered_whole() {
+        let mut guest = FakeGuest::on(Boundary::around(SUBNET, 24));
+        guest.lease().await;
+        let resolver = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 127, 1)), dns::PORT);
+        let query = question_of("large.test", hickory_proto::rr::RecordType::A, 0x1234, None);
+        let mut asked = u16::try_from(query.len()).unwrap().to_be_bytes().to_vec();
+        asked.extend_from_slice(&query);
+
+        let back = guest.over_tcp(resolver, 42_000, &asked).await;
+
+        let length = usize::from(u16::from_be_bytes([back[0], back[1]]));
+        assert!(length > 1800, "the whole answer is {length} bytes");
+        let whole = Message::from_vec(&back[2..2 + length]).expect("a DNS answer");
+        assert!(!whole.metadata.truncation);
+        assert_eq!(whole.answers.len(), usize::try_from(LARGE_RECORDS).unwrap());
+        assert_eq!(whole.metadata.id, 0x1234);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

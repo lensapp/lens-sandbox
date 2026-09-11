@@ -103,7 +103,7 @@ fails at once instead of waiting out a timeout.
 
 | Destination | Result |
 |---|---|
-| `192.168.127.1:53` (UDP) | The gateway relays the query. |
+| `192.168.127.1:53` (UDP and TCP) | The gateway relays the query. Over TCP the message carries the two-byte length prefix of RFC 1035. |
 | `192.168.127.1`, ICMP echo | The gateway answers, so a guest can tell a dead link from a refused destination. |
 | Anything else in `192.168.127.0/24` | Refused. There is no control API on the gateway and no address that forwards to the host. |
 | `127.0.0.0/8` | Refused. The guest cannot reach anything bound to the host's loopback. |
@@ -131,6 +131,15 @@ Each query goes to the servers in turn over UDP, 5 seconds each. A truncated
 answer is asked again over TCP to the same server. When no server answers,
 the guest gets SERVFAIL — never silence.
 
+The gateway answers on UDP and on TCP. Over UDP it fits the answer to what
+the guest said it can take: the payload size of the query's OPT record, or
+512 bytes when the query carries none, and never more than 1472 bytes — one
+frame of this link. An answer that does not fit comes back with its question,
+its OPT record and the TC bit set, per RFC 2181 §9, so the guest asks again
+over TCP. Over TCP the gateway serves the same relay, with the two-byte
+length prefix of RFC 1035 §4.2.2: one connection carries one or more queries,
+and an idle connection is closed after 10 seconds.
+
 ### Bounds
 
 One guest holds no more of the host than this:
@@ -143,6 +152,8 @@ One guest holds no more of the host than this:
 | TCP connect timeout | 10 s |
 | TCP buffer per direction per flow | 256 KiB |
 | UDP flow idle timeout | 60 s |
+| DNS connection idle timeout | 10 s |
+| Largest DNS answer over UDP | 1472 bytes |
 | Frames queued between the device and the stack | 512 |
 
 Anything over a limit is dropped and counted, and the count is written to the

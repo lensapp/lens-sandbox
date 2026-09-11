@@ -109,15 +109,21 @@ mod tests {
     }
 
     #[test]
-    fn the_gateway_itself_is_refused_on_every_port_it_does_not_serve() {
+    fn the_gateway_itself_is_refused_on_every_port_but_its_resolver() {
         let gateway: IpAddr = "192.168.127.1".parse().unwrap();
-        for port in [22, 53, 80, 8080] {
+        for port in [22, 80, 443, 8080] {
             assert_eq!(
                 default_boundary().refusal(SocketAddr::new(gateway, port)),
                 Some(Refusal::GuestSubnet),
                 "there is no control API on the gateway, whatever the port"
             );
         }
+        assert_eq!(
+            default_boundary().refusal(SocketAddr::new(gateway, 53)),
+            Some(Refusal::GuestSubnet),
+            "the resolver on 53, over UDP and over TCP, is the one destination the engine admits \
+             before it asks this boundary; the boundary itself hosts nothing"
+        );
     }
 
     #[test]
