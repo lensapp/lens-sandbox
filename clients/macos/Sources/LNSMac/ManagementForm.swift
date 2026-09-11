@@ -34,14 +34,14 @@ struct ManagementForm: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(sheet.kind.rawValue).font(.title2.weight(.semibold))
-                if let offer { Text(offer.name).font(.headline).foregroundStyle(.secondary) }
+                Text(sheet.kind.rawValue).font(.system(size: 22, weight: .semibold)).foregroundStyle(LNSTheme.heading)
+                if let offer { Text(offer.name).font(.headline).foregroundStyle(LNSTheme.muted) }
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     fields.disabled(busy)
                     if let error = model.management.error {
-                        Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).textSelection(.enabled)
+                        Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(LNSTheme.warning).textSelection(.enabled)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -57,6 +57,7 @@ struct ManagementForm: View {
         }
         .padding(24)
         .frame(width: 540, height: sheet.kind == .grant || sheet.kind == .connect ? 590 : 330)
+        .lnsAppearance()
         .interactiveDismissDisabled(busy)
         .onAppear { selection.run = sheet.run }
         .onChange(of: selection.method) { _ in
@@ -79,13 +80,13 @@ struct ManagementForm: View {
                 if let help = method.help { Text(help).textSelection(.enabled) }
                 TextField("Connection name, e.g. work", text: $label).textFieldStyle(.roundedBorder)
                 if offer?.connections.contains(where: { $0.label == label.trimmingCharacters(in: .whitespacesAndNewlines) }) == true {
-                    Text("That name is already used. Choose a new name to keep the existing account.").foregroundStyle(.orange)
+                    Text("That name is already used. Choose a new name to keep the existing account.").foregroundStyle(LNSTheme.warning)
                 }
                 ForEach(method.asks, id: \.self) { field in
                     SecureField(field, text: Binding(get: { values[field] ?? "" }, set: { values[field] = $0 }))
                         .textFieldStyle(.roundedBorder)
                 }
-                Text("Real credentials stay outside the workload.").font(.caption).foregroundStyle(.secondary)
+                Text("Real credentials stay outside the workload.").font(.caption).foregroundStyle(LNSTheme.muted)
             }
         case .grant:
             sandboxPicker
@@ -99,7 +100,7 @@ struct ManagementForm: View {
                 }.disabled(busy)
             }
             if offer?.grantOptions.isEmpty == true {
-                Text("Connect an account first, then choose it here to grant access.").font(.callout).foregroundStyle(.secondary)
+                Text("Connect an account first, then choose it here to grant access.").font(.callout).foregroundStyle(LNSTheme.muted)
             }
             if let method, method.offerable {
                 if method.auth_label != nil {
@@ -115,10 +116,10 @@ struct ManagementForm: View {
                 if let overrides = method.overrides {
                     DisclosureLine(title: "Overrides deny rules", entries: overrides)
                 } else {
-                    Text("Deny-rule overrides could not be checked for this sandbox.").font(.callout).foregroundStyle(.orange)
+                    Text("Deny-rule overrides could not be checked for this sandbox.").font(.callout).foregroundStyle(LNSTheme.warning)
                 }
                 Text("A sandbox holds one grant per connector. Granting another connection or access option replaces its previous grant.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(LNSTheme.muted)
             }
         case .forget:
             sandboxPicker
@@ -128,7 +129,7 @@ struct ManagementForm: View {
             Text("This removes the saved connection from this Mac. Existing sandbox grants remain; the next request that needs a credential will ask you to connect again.")
         case .uninstall:
             Text("Remove this connector and all of its saved connections from this Mac?")
-            Text("Existing sandbox grants remain. Reinstalling the same connector bytes resumes those decisions.").foregroundStyle(.secondary)
+            Text("Existing sandbox grants remain. Reinstalling the same connector bytes resumes those decisions.").foregroundStyle(LNSTheme.muted)
         case .remove:
             Text("Remove \(sheet.sandbox?.name ?? "this sandbox")?").font(.headline)
             Text("This deletes its writable layer, saved state, and decisions. Stop a running sandbox before removing it.")
@@ -213,7 +214,7 @@ private struct DisclosureLine: View {
     let entries: [String]
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(title).font(.caption).foregroundStyle(LNSTheme.muted)
             Text(entries.isEmpty ? "None" : entries.joined(separator: "\n")).font(.callout).textSelection(.enabled)
         }
     }

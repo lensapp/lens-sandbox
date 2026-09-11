@@ -5,6 +5,13 @@ approval history, and live network approvals using SwiftUI and AppKit. It commun
 `lns-service` through the same local IPC boundary available to other clients.
 It does not read run directories, write policy, or embed the Rust service.
 
+The interface uses a dark appearance with charcoal surfaces, blue accents,
+compact system typography, and muted status badges. Sandboxes use a list;
+connectors use bordered cards. The same styling carries through registry sign-in,
+creation dialogs, audit details, and live approvals. Native controls and keyboard
+shortcuts remain available. Shared colors and presentation components live in
+`Sources/LNSMac/LNSTheme.swift`.
+
 The native dashboard includes sandbox selection, event-kind filters, global
 audit search, event details and copy controls, integrity warnings, and approval
 history grouped into waiting requests and an archive. History rows offer the

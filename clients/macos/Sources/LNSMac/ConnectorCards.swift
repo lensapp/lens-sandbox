@@ -14,39 +14,46 @@ struct ConnectorCards: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                TextField("Find a connector", text: $search).textFieldStyle(.roundedBorder).frame(maxWidth: 360)
+            HStack(alignment: .top, spacing: 24) {
+                LNSPageHeading(title: "Connectors", subtitle: "Connect accounts and grant access to your sandboxes.")
                 Spacer()
                 Button { model.managementSheet = ManagementSheet(kind: .install) } label: {
                     Label("Install Connector…", systemImage: "plus")
-                }.disabled(!model.management.connected || model.management.busy)
-            }.padding(16)
+                }.buttonStyle(.borderedProminent).disabled(!model.management.connected || model.management.busy)
+            }.padding(24)
+            HStack {
+                TextField("Find a connector", text: $search).textFieldStyle(.roundedBorder).frame(maxWidth: 360)
+                Spacer()
+                Text("\(connectors.count) installed").font(.caption).foregroundStyle(LNSTheme.muted)
+            }.padding(.horizontal, 24).padding(.bottom, 8)
             if let sandbox = model.currentSandboxes.first(where: { $0.id == model.grantRun }) {
                 HStack {
                     Label("Choose a connector to grant to \(sandbox.name)", systemImage: "shippingbox")
                     Spacer()
                     Button("Clear") { model.grantRun = "" }.buttonStyle(.borderless)
-                }.font(.callout).padding(.horizontal, 16).padding(.bottom, 12)
+                }.font(.callout).padding(12)
+                    .background(LNSTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+                    .padding(.horizontal, 24).padding(.top, 16)
             }
             ScrollView {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 320), spacing: 16)], alignment: .leading, spacing: 16) {
                     ForEach(connectors, id: \.name) { connector in
                         ConnectorCard(model: model, connector: connector)
                     }
-                }.padding(16)
+                }.padding(24)
             }
             .overlay {
                 if connectors.isEmpty {
                     VStack(spacing: 10) {
-                        Image(systemName: "link").font(.largeTitle)
+                        Image(systemName: "link").font(.system(size: 32, weight: .light)).foregroundStyle(LNSTheme.accent)
                         Text(model.management.loading ? "Loading connectors…" : "No connectors to show").font(.headline)
                         Text(search.isEmpty ? "Install a connector, connect an account if needed, then grant access to a sandbox." : "Try another name or destination.")
                             .multilineTextAlignment(.center).frame(maxWidth: 350)
-                    }.foregroundStyle(.secondary).allowsHitTesting(false)
+                    }.foregroundStyle(LNSTheme.muted).allowsHitTesting(false)
                 }
             }
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .background(LNSTheme.canvas)
         .task { if model.connected { await model.management.refresh() } }
     }
 }
@@ -59,12 +66,12 @@ private struct ConnectorCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "link").font(.title2).foregroundStyle(Color.accentColor)
-                    .frame(width: 44, height: 44).background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                Image(systemName: "link").font(.system(size: 18)).foregroundStyle(LNSTheme.accent)
+                    .frame(width: 36, height: 36).background(LNSTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(connector.name).font(.title3.weight(.semibold)).textSelection(.enabled)
+                    Text(connector.name).font(.system(size: 15, weight: .semibold)).foregroundStyle(LNSTheme.heading).textSelection(.enabled)
                     Text(connector.connections.isEmpty ? "No saved connections" : "\(connector.connections.count) saved connection(s)")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(LNSTheme.muted)
                 }
                 Spacer()
                 Menu {
@@ -75,13 +82,15 @@ private struct ConnectorCard: View {
                 .menuStyle(.borderlessButton).frame(width: 24)
             }
             Text(connector.serves.joined(separator: ", "))
-                .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(LNSTheme.muted).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10).background(LNSTheme.canvas, in: RoundedRectangle(cornerRadius: 4))
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(connector.methods) { method in
                     HStack(alignment: .top) {
                         Text(method.label).font(.callout)
                         Spacer()
-                        Text(readiness(method)).font(.caption).foregroundStyle(.secondary)
+                        LNSStatus(title: readiness(method), color: readinessColor(method))
                     }
                 }
             }
@@ -92,7 +101,7 @@ private struct ConnectorCard: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Label(connection.label, systemImage: "person.crop.circle").font(.callout)
                             Text(connection.authority.isEmpty ? "No authority reported" : connection.authority.joined(separator: ", "))
-                                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                .font(.caption).foregroundStyle(LNSTheme.muted).textSelection(.enabled)
                         }
                         Spacer()
                         Button {
@@ -103,6 +112,7 @@ private struct ConnectorCard: View {
                 }
             }
             Spacer(minLength: 0)
+            Divider()
             HStack {
                 if connector.methods.contains(where: { $0.offerable && $0.auth_label != nil }) {
                     Button("Connect…") { open(.connect) }
@@ -113,13 +123,12 @@ private struct ConnectorCard: View {
                     .disabled(model.currentSandboxes.isEmpty || !connector.methods.contains(where: \.offerable))
             }
             if model.currentSandboxes.isEmpty {
-                Text("Run a sandbox to grant it access.").font(.caption).foregroundStyle(.secondary)
+                Text("Run a sandbox to grant it access.").font(.caption).foregroundStyle(LNSTheme.muted)
             }
         }
         .padding(20)
         .frame(maxWidth: .infinity, minHeight: 245, alignment: .topLeading)
-        .background(.background, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        .lnsPanel()
         .disabled(!model.connected || !model.management.connected || model.management.busy)
     }
 
@@ -127,6 +136,12 @@ private struct ConnectorCard: View {
         if !method.offerable { return "Unavailable in this version" }
         if method.auth_label == nil || connector.connections.contains(where: { $0.method == method.name }) { return "Ready to grant" }
         return "Connect first"
+    }
+
+    private func readinessColor(_ method: ConnectorMethod) -> Color {
+        if !method.offerable { return LNSTheme.muted }
+        return method.auth_label == nil || connector.connections.contains(where: { $0.method == method.name })
+            ? LNSTheme.success : LNSTheme.warning
     }
 
     private func open(_ kind: ManagementSheet.Kind) {
