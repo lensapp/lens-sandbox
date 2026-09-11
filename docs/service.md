@@ -130,8 +130,10 @@ which servers answer a name; every resolver that ties for it is asked, lowest
 `order` first, and each is asked on the port its own configuration names. A
 name no suffix covers goes to the default ones. The list is read again every
 30 seconds, and again after any query nobody answered, so a VPN that comes up
-mid-run is picked up. The read runs off the runtime's workers, so a query
-never waits for it.
+mid-run is picked up. Every read runs off the runtime's workers, the first
+one included, so neither a query nor the start of a run waits for it. A
+query put before the first read has landed gets SERVFAIL, and the next one
+reads again.
 
 Each query goes to the first server over UDP, and to the next after 700 ms
 while the first is still pending; the first usable answer wins. SERVFAIL,

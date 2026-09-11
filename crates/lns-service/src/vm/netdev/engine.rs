@@ -1270,6 +1270,19 @@ mod tests {
         question.to_vec().unwrap()
     }
 
+    /// The host's resolvers with their first read in hand, so a query put at once goes to the stand-in nameserver.
+    async fn read_resolvers() -> Arc<dns::Resolvers> {
+        let resolvers = Arc::new(dns::Resolvers::new(
+            Arc::new(TestSources),
+            dns::REFRESH_AFTER,
+        ));
+        eventually("the host's resolvers were never read", || {
+            !resolvers.servers_for("example.test.").is_empty()
+        })
+        .await;
+        resolvers
+    }
+
     fn gateway_of(subnet: Ipv4Addr) -> Gateway {
         Gateway {
             address: IpAddr::V4(Ipv4Addr::new(
@@ -2722,10 +2735,7 @@ mod tests {
         let mut relaying = resolving(Limits::default(), &counters, &Relays::new());
         relaying.gateway = Arc::new(Gateway {
             address: IpAddr::V4(Ipv4Addr::new(192, 168, 127, 1)),
-            resolvers: Arc::new(dns::Resolvers::new(
-                Arc::new(TestSources),
-                dns::REFRESH_AFTER,
-            )),
+            resolvers: read_resolvers().await,
             upstream: Arc::new(Babbling),
         });
 
