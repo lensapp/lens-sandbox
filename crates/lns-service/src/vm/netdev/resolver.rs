@@ -1,6 +1,5 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -98,6 +97,7 @@ mod tests {
     use super::*;
     use std::net::IpAddr;
     use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
 
     fn server(address: &str, port: u16) -> SocketAddr {
         SocketAddr::new(address.parse::<IpAddr>().unwrap(), port)
