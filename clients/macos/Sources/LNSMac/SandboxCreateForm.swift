@@ -7,6 +7,7 @@ struct SandboxCreateForm: View {
     @ObservedObject var model: DashboardModel
     @State private var draft = SandboxDraft()
     @State private var attempted = false
+    @State private var registryLogin = false
 
     private var busy: Bool { model.creation?.busy == true }
 
@@ -43,6 +44,7 @@ struct SandboxCreateForm: View {
         }
         .padding(24).frame(width: 580, height: 620)
         .interactiveDismissDisabled(busy)
+        .sheet(isPresented: $registryLogin) { RegistryLoginForm(model: model) }
     }
 
     private var fields: some View {
@@ -63,6 +65,8 @@ struct SandboxCreateForm: View {
             }
             Text("The definition supplies the workload, resources, and network policy.")
                 .font(.caption).foregroundStyle(.secondary)
+            Button("Sign In to a Registry…") { registryLogin = true }
+                .disabled(!model.registries.connected || model.registries.busy)
             Toggle("Allow this definition’s setup and declared host access", isOn: $draft.allowSetup)
             Text("Accepts declared tool installers, setup scripts, file mounts, and host access. Leave this off to see any required consent in the launch details before trying again.")
                 .font(.caption).foregroundStyle(.secondary)

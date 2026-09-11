@@ -8,7 +8,7 @@ final class SandboxCreationTests: XCTestCase {
         var draft = SandboxDraft()
         draft.source = "/Users/person/My Project/lns.yaml"
         draft.name = "--debug"
-        let launch = try SandboxProcessLaunch(draft: draft, bundle: URL(fileURLWithPath: "/Applications/LNS.app"), socket: "/private/lns/service.sock", environment: ["LNS_HOME": "/data", "LNS_SOCKET_PATH": "/wrong"])
+        let launch = try HelperProcessLaunch(draft: draft, bundle: URL(fileURLWithPath: "/Applications/LNS.app"), socket: "/private/lns/service.sock", environment: ["LNS_HOME": "/data", "LNS_SOCKET_PATH": "/wrong"])
         XCTAssertEqual(launch.executable.path, "/Applications/LNS.app/Contents/Helpers/lns")
         XCTAssertEqual(launch.arguments, ["run", "--detach", "--name=--debug", "/Users/person/My Project/lns.yaml"])
         XCTAssertEqual(launch.environment["LNS_SOCKET_PATH"], "/private/lns/service.sock")
@@ -71,7 +71,7 @@ final class SandboxCreationTests: XCTestCase {
     }
 
     func testLostExitOrMalformedOutputCannotClaimASandboxWasCreated() async {
-        for events: [SandboxLaunchEvent] in [[.output(Data("0123456789abcdef0123456789abcdef\n".utf8))], [.exited(0)], [.output(Data("not a run id".utf8)), .exited(0)]] {
+        for events: [HelperProcessEvent] in [[.output(Data("0123456789abcdef0123456789abcdef\n".utf8))], [.exited(0)], [.output(Data("not a run id".utf8)), .exited(0)]] {
             let creation = SandboxCreation { _ in AsyncThrowingStream { continuation in
                 events.forEach { continuation.yield($0) }; continuation.finish()
             } }
@@ -97,7 +97,7 @@ final class SandboxCreationTests: XCTestCase {
     }
 
     func testDuplicateLaunchIsRefusedWhileTheFirstIsPending() async {
-        let stream = AsyncThrowingStream<SandboxLaunchEvent, Error>.makeStream()
+        let stream = AsyncThrowingStream<HelperProcessEvent, Error>.makeStream()
         var launches = 0
         let creation = SandboxCreation { _ in launches += 1; return stream.stream }
         let first = Task { await creation.start(localDraft()) }

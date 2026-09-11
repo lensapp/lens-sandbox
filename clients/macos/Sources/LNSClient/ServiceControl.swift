@@ -10,11 +10,17 @@ public final class ServiceControl {
     private let launch: (() async throws -> Void)?
     private let confirm: () -> Bool
     private let quit: () -> Void
+    private var attemptedStartup = false
 
     public init(client: any ServiceClient, launch: (() async throws -> Void)?, confirm: @escaping () -> Bool, quit: @escaping () -> Void) {
         self.client = client; self.launch = launch; self.confirm = confirm; self.quit = quit
     }
     public var canStart: Bool { launch != nil && phase == .idle }
+    public func startOnLaunch() async {
+        guard !attemptedStartup else { return }
+        attemptedStartup = true
+        await start()
+    }
     public func start() async {
         guard canStart, let launch else { return }
         setPhase(.starting)

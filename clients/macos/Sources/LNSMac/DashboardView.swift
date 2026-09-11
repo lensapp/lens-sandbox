@@ -17,6 +17,7 @@ struct DashboardView: View {
                 switch model.page {
                 case .sandboxes: SandboxList(model: model)
                 case .connectors: ConnectorCards(model: model)
+                case .registries: RegistryList(model: model)
                 case .audit: AuditTimeline(model: model)
                 case .approvals: ApprovalHistory(model: model)
                 }
@@ -78,7 +79,7 @@ struct DashboardView: View {
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
-            Label(model.connected ? "Connected to service" : "Service disconnected",
+            Label(live.startingService ? "Starting service…" : model.connected ? "Connected to service" : "Service disconnected",
                   systemImage: model.connected ? "checkmark.circle" : "wifi.exclamationmark")
                 .font(.caption).foregroundStyle(.secondary).padding(12)
         }

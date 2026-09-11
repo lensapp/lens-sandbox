@@ -33,7 +33,11 @@ final class AppModel: ObservableObject {
                   confirmStop: Self.confirmServiceStop,
                   quit: { NSApplication.shared.terminate(nil) },
                   launchSandbox: available ? { draft in
-                      SandboxProcess.launch(try SandboxProcessLaunch(draft: draft, bundle: Bundle.main.bundleURL,
+                      HelperProcess.launch(try HelperProcessLaunch(draft: draft, bundle: Bundle.main.bundleURL,
+                          socket: path, environment: ProcessInfo.processInfo.environment))
+                  } : nil,
+                  registryBrowser: available ? { registry in
+                      HelperProcess.launch(HelperProcessLaunch(arguments: ["login", registry], bundle: Bundle.main.bundleURL,
                           socket: path, environment: ProcessInfo.processInfo.environment))
                   } : nil)
     }
@@ -41,11 +45,12 @@ final class AppModel: ObservableObject {
     init(service connection: any ServiceClient, socketPath: String,
          launchService: (() async throws -> Void)?, confirmStop: @escaping () -> Bool,
          quit: @escaping () -> Void,
-         launchSandbox: ((SandboxDraft) throws -> AsyncThrowingStream<SandboxLaunchEvent, Error>)? = nil) {
+         launchSandbox: ((SandboxDraft) throws -> AsyncThrowingStream<HelperProcessEvent, Error>)? = nil,
+         registryBrowser: ((String) throws -> AsyncThrowingStream<HelperProcessEvent, Error>)? = nil) {
         service = connection
         self.socketPath = socketPath
         control = ServiceControl(client: connection, launch: launchService, confirm: confirmStop, quit: quit)
-        dashboard = DashboardModel(service: connection, launchSandbox: launchSandbox)
+        dashboard = DashboardModel(service: connection, launchSandbox: launchSandbox, registryBrowser: registryBrowser)
         control.onChange = { [weak self] in self?.objectWillChange.send() }
         control.onError = { [weak self] in self?.notice = $0 }
     }
@@ -53,6 +58,7 @@ final class AppModel: ObservableObject {
     func start() {
         guard watching == nil else { return }
         watching = Task {
+            await control.startOnLaunch()
             var retry: UInt64 = 1
             while !Task.isCancelled {
                 do {

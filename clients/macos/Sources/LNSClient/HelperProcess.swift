@@ -1,7 +1,12 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
-public enum SandboxProcess {
-    public static func launch(_ launch: SandboxProcessLaunch) -> AsyncThrowingStream<SandboxLaunchEvent, Error> {
+public enum HelperProcess {
+    public static func launch(_ launch: HelperProcessLaunch) -> AsyncThrowingStream<HelperProcessEvent, Error> {
         AsyncThrowingStream { continuation in
             let process = Process()
             let output = Pipe()
@@ -15,13 +20,20 @@ public enum SandboxProcess {
             process.standardOutput = output
             process.standardError = diagnostic
 
-            func drain(_ handle: FileHandle, event: @escaping (Data) -> SandboxLaunchEvent) {
+            func drain(_ handle: FileHandle, event: @escaping (Data) -> HelperProcessEvent) {
                 readers.enter()
                 DispatchQueue.global().async {
                     defer { handle.closeFile(); readers.leave() }
                     do {
-                        while let bytes = try handle.read(upToCount: 4096), !bytes.isEmpty {
-                            continuation.yield(event(bytes))
+                        var buffer = [UInt8](repeating: 0, count: 4096)
+                        while true {
+                            let count = read(handle.fileDescriptor, &buffer, buffer.count)
+                            if count < 0 {
+                                if errno == EINTR { continue }
+                                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                            }
+                            if count == 0 { break }
+                            continuation.yield(event(Data(buffer.prefix(count))))
                         }
                     } catch { continuation.finish(throwing: error) }
                 }
@@ -37,8 +49,8 @@ public enum SandboxProcess {
             continuation.onTermination = { _ in if process.isRunning { process.terminate() } }
             do {
                 try process.run()
-                drain(output.fileHandleForReading, event: SandboxLaunchEvent.output)
-                drain(diagnostic.fileHandleForReading, event: SandboxLaunchEvent.diagnostic)
+                drain(output.fileHandleForReading, event: HelperProcessEvent.output)
+                drain(diagnostic.fileHandleForReading, event: HelperProcessEvent.diagnostic)
             } catch {
                 output.fileHandleForReading.closeFile()
                 diagnostic.fileHandleForReading.closeFile()

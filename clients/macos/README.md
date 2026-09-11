@@ -29,6 +29,8 @@ The setup checkbox accepts the definition's declared installers, scripts,
 mounts, and host access, using the CLI's `--yes` behavior. It starts unchecked;
 when consent is required, review the reported details before enabling it and
 retrying. Creating a sandbox requires the bundle containing CLI/service helpers.
+Use **Sign In to a Registry…** in this form if its definition or base image
+requires authentication; then retry the launch after signing in.
 
 **Connectors** shows installed connectors as cards, including each method's
 readiness and saved connections with their authority. Install a registry
@@ -55,6 +57,12 @@ client.
 Use **Navigate → Audit** (⌘1), **Approvals** (⌘2), or **Live Requests** (⌘3).
 **Sandboxes** (⌘4) and **Connectors** (⌘5) are also available from Navigate and the
 menu-bar interface.
+**Registries** (⌘6) lists saved registry accounts. **Sign In…** offers browser
+sign-in through the bundled CLI, displaying the confirmation code while you
+approve it, or username and password/token entry for registries such as GHCR.
+The service verifies credentials before saving them in the same store the CLI
+uses. **Sign Out…** removes the saved account after confirmation. Browser
+sign-in can be canceled; failed sign-ins are shown without retrying automatically.
 The Dock and menu bar use the original LNS logo. The menu-bar image remains a
 template so macOS adapts its color to the current appearance.
 The Dock image is assigned at startup even when launching the app executable
@@ -82,9 +90,10 @@ make -C clients/macos smoke
 ```
 
 This produces `clients/macos/dist/LNS.app` and `LNS-macos.zip`. Copy the app to
-your user-owned Applications directory, or run it from `dist`. Choose **Start
-Service** when disconnected. It explicitly runs the bundled `lns service start`
-against the interface's socket, with the Rust UI disabled. It does not register
+your user-owned Applications directory, or run it from `dist`. On opening, the
+app runs the bundled `lns service start` against the interface's socket, with the
+Rust UI disabled. That command reuses an already-running service. If startup
+fails, the app shows the error and offers **Start Service** to retry. It does not register
 a login agent, replace a separately installed CLI, or stop an existing service.
 An already-running service must be from the matching build of this branch.
 
@@ -202,11 +211,13 @@ coordinated app/service updates are still required before shipping it.
 ## Verification
 
 `make -C clients/macos test` tests framing, dashboard replacement and filtering,
-history requests, management commands and outcomes, sandbox creation, explicit grant selection,
+history requests, management commands and outcomes, sandbox creation, registry
+sign-in and cancellation, automatic service startup, explicit grant selection,
 stale connector disclosures, duplicate actions, reconnect state, and shared
 Rust/Swift wire fixtures.
 `make -C clients/macos launch-smoke` checks the bundled CLI invocation and drains
-both output streams through real subprocesses, including a failed launch.
+both output streams through real subprocesses, including a failed launch and
+a browser confirmation code that must arrive before the helper finishes.
 On macOS, `make -C clients/macos icon-smoke` decodes and renders the packaged
 icons from a relocated app bundle and checks missing-resource reporting.
 Those Foundation-only tests also run on Linux with Swift installed. CI runs
