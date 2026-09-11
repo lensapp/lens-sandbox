@@ -66,7 +66,6 @@ crates/lns-session/         Host ↔ guest session wire protocol
 crates/lns-session-broker/  Guest-side session host
 crates/bump-kernel/         Operator tooling for the kernel pin
 scripts/lns-install/        Installer published to get.lns.run
-connectors/                 Connectors this repository ships, source and all
 docs/                       User documentation
 ```
 

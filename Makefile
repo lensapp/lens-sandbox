@@ -193,15 +193,13 @@ shell-tests:
 		fi; \
 		exit $$status
 
-# Every mechanism component — the ones the wasm tests run and the one the github
-# connector ships — is committed beside its source, so nothing else would notice
-# that source changing under it. The script rebuilds each and compares; it owns
-# the toolchain preflight and the rule that one script's failure never hides
-# another's, and `scripts/components.test.sh` covers both.
+# Every mechanism component the wasm tests run is committed beside its source,
+# so nothing else would notice that source changing under it. The script
+# rebuilds each and compares; it owns the toolchain preflight and the rule that
+# one script's failure never hides another's, and `scripts/components.test.sh`
+# covers both.
 components:
-	@scripts/components.sh \
-		crates/lns-service/tests/fixtures/mechanism/build.sh \
-		connectors/github/mechanism/build.sh
+	@scripts/components.sh crates/lns-service/tests/fixtures/mechanism/build.sh
 
 # ── Coverage ──────────────────────────────────────────────────────────
 # Two phases:
