@@ -630,6 +630,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_read_slower_than_a_query_but_inside_its_deadline_still_lands() {
+        let sources = Arc::new(SlowSources::new(
+            Duration::from_millis(20),
+            vec![scope(None, &["9.9.9.9"])],
+        ));
+        let resolvers = Resolvers::new(Arc::clone(&sources) as Arc<dyn Sources>, Duration::ZERO);
+
+        eventually(|| resolvers.servers_for("example.com") == vec![server("9.9.9.9")]).await;
+
+        assert!(
+            sources.reads().1 >= 2,
+            "a read nobody waited for still replaces the list when it ends in time"
+        );
+    }
+
+    #[tokio::test]
     async fn a_host_configuration_that_will_not_be_read_leaves_the_list_in_hand() {
         let sources = Arc::new(SlowSources::new(
             REFRESH_TIMEOUT * 2,

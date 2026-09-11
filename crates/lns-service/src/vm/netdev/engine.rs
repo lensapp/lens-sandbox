@@ -194,10 +194,8 @@ async fn outliving_relays(relays: Relays) {
         .is_err()
     {
         let alive = relays.tracker.len();
-        log::warn!(
-            "{alive} network relays of a stopped run are still running after {} seconds",
-            RELAY_SHUTDOWN_GRACE.as_secs()
-        );
+        let seconds = RELAY_SHUTDOWN_GRACE.as_secs();
+        log::warn!("{alive} network relays of a stopped run are still running after {seconds}s");
     }
 }
 
