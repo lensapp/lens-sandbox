@@ -86,8 +86,12 @@ fn dismiss_card(snapshot: &mut Snapshot, action: &CardAction) {
             .position(|p| p.id == *id)
             .map(StackItem::Network),
         CardAction::DismissInform { index } => Some(StackItem::Inform(*index)),
-        // A decline keeps the card: the ordinary question the hold stood in for is still unanswered.
-        CardAction::Decline { .. } | CardAction::OpenBrowser { .. } | CardAction::CloseAll => None,
+        // A decline keeps the card, and so does every round of a sign-in: the question the hold stood in for is still unanswered.
+        CardAction::Decline { .. }
+        | CardAction::BeginConnect { .. }
+        | CardAction::AnswerConnect { .. }
+        | CardAction::OpenBrowser { .. }
+        | CardAction::CloseAll => None,
     };
     if let Some(item) = item {
         snapshot.order.retain(|entry| *entry != item);
@@ -111,6 +115,8 @@ fn seed_one() -> Snapshot {
             treatment: Treatment::Inspected,
             run: Some("brave-otter".into()),
             offer: None,
+            connect: None,
+            connect_seq: 0,
         }],
         informs: vec![],
         order: vec![StackItem::Network(0)],
@@ -127,6 +133,8 @@ fn seed_all() -> Snapshot {
                 treatment: Treatment::Inspected,
                 run: Some("brave-otter".into()),
                 offer: None,
+                connect: None,
+                connect_seq: 0,
             },
             PendingPrompt {
                 id: "net-raw".into(),
@@ -135,6 +143,8 @@ fn seed_all() -> Snapshot {
                 treatment: Treatment::Raw,
                 run: Some("brave-otter".into()),
                 offer: None,
+                connect: None,
+                connect_seq: 0,
             },
         ],
         informs: vec!["decision applied to this request only".into()],

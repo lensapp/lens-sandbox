@@ -31,7 +31,8 @@ pub use protocol::{
     SandboxMount, SandboxMountKind, SandboxPort, SandboxScript, SandboxView, SaveKind,
     SecretValues, SessionTarget, SignalKind, SourceContribution, StatusInfo,
     UNBOUNDED_CODE_DISCLOSURE, VolumeInfo, VolumeMount, VolumePruneFailure, cmdline_unsafe_char,
-    validate_bind_source, validate_run_name, validate_volume_name, validate_volume_target,
+    connector_asks, connector_says, validate_bind_source, validate_run_name, validate_volume_name,
+    validate_volume_target,
 };
 pub use socket::{SocketPathError, default_socket_path};
 pub use update::{NO_UPDATE_CHECK_ENV, UpdateStatus};

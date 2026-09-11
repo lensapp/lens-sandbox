@@ -127,7 +127,7 @@ impl Driver<'_> {
         })
     }
 
-    /// One connect, driven from values a caller collected before it began. The card works this way: it shows one form and presses once, so a mechanism that asks for exactly what it holds finishes, and one that asks for more says so rather than half-connecting.
+    /// One connect, driven from values a caller collected before it began: a mechanism that asks for exactly what it holds finishes, and one that asks for more says so rather than half-connecting.
     pub fn with_values(
         &self,
         name: &str,
@@ -167,8 +167,13 @@ impl Driver<'_> {
     /// Drops a session nothing will ever answer, because it holds what was already typed.
     fn abandon(&self, turn: &Connecting) {
         if let Connecting::Asks { session, .. } = turn {
-            self.sessions.take(session, self.now_millis);
+            self.abandon_handle(session);
         }
+    }
+
+    /// The same, for a person who walked away from a round rather than a caller who ran out of them (§3.2.6).
+    pub fn abandon_handle(&self, handle: &str) {
+        self.sessions.take(handle, self.now_millis);
     }
 }
 

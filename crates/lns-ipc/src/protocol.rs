@@ -462,6 +462,16 @@ pub const BOUNDED_CODE_DISCLOSURE: &str = "lns cannot show what this code does. 
 /// What it says instead where the method declares host execution. This does not add a warning to the sentence above — it withdraws the guarantee that sentence makes.
 pub const UNBOUNDED_CODE_DISCLOSURE: &str = "lns cannot show what this code does, and it runs programs on your machine with your own access. lns cannot bound what those reach.";
 
+/// Says whose words a message is, before any of it is read. A component supplies it at connect time, from code nobody can read, so every surface that shows one attributes it the same way (sandbox-spec §3.2.6).
+pub fn connector_says(connector: &str, message: &str) -> String {
+    format!("{connector} says: {message}")
+}
+
+/// The same, for the field labels beside it: they are the connector's too, and attributing only the message would leave them reading as lns's own prompts.
+pub fn connector_asks(connector: &str) -> String {
+    format!("{connector} asks, in its own words:")
+}
+
 /// What the card prints where the host list would go and the method declares none.
 pub const NO_HOSTS_DISCLOSURE: &str = "it may contact no hosts.";
 

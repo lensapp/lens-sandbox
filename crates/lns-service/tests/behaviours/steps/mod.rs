@@ -1,6 +1,7 @@
 pub mod approval_entries;
 pub mod approval_flow;
 pub mod artifact_dispatch;
+pub mod connector_card_connect;
 pub mod connector_code;
 pub mod connector_code_bounds;
 pub mod connector_code_conformance;

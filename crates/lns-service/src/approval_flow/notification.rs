@@ -81,6 +81,8 @@ pub(crate) mod tests {
             treatment: Treatment::Inspected,
             run: None,
             offer: None,
+            connect: None,
+            connect_seq: 0,
         }
     }
 

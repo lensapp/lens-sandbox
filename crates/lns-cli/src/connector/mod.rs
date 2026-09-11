@@ -365,10 +365,10 @@ impl Asking<'_> {
         let mut lines = Vec::new();
         // A mechanism lns implements sends no message, so this is the connector's whenever there is one.
         if !self.message.is_empty() {
-            lines.push(format!("{} says: {}", self.connector, self.message));
+            lines.push(lns_ipc::connector_says(self.connector, self.message));
         }
         if !self.fields.is_empty() {
-            lines.push(format!("{} asks, in its own words:", self.connector));
+            lines.push(lns_ipc::connector_asks(self.connector));
         }
         (!lines.is_empty()).then(|| lines.join("\n"))
     }
