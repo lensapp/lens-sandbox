@@ -25,6 +25,9 @@ use crate::log;
 /// Vz refuses an MTU below this and the guest's link is configured for it.
 pub const MTU: usize = 1500;
 
+/// The MTU, 14 for the ethernet header, 4 for a VLAN tag we never send but must not truncate either.
+pub const MAX_FRAME: usize = MTU + 14 + 4;
+
 /// One TCP window per direction per flow. 256 KiB carries a gigabit path at 2 ms without stalling on the window.
 const TCP_WINDOW_BYTES: u32 = 256 * 1024;
 

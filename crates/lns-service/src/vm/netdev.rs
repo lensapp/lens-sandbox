@@ -20,7 +20,7 @@ pub mod resolver;
 #[cfg(target_os = "macos")]
 pub mod real;
 
-use engine::{Counters, Frames, Gateway, Running};
+use engine::{Counters, Frames, Gateway, MAX_FRAME, Running};
 use policy::Boundary;
 
 /// The link the service serves each guest on. Its first address is the gateway, its second is the guest.
@@ -28,9 +28,6 @@ pub const GUEST_NETWORK: Ipv4Addr = Ipv4Addr::new(192, 168, 127, 0);
 
 /// The one prefix this link is served on: a /24 with the gateway at `.1` and the guest at `.2`.
 pub const GUEST_PREFIX: u8 = 24;
-
-/// 1500 for the link, 14 for the ethernet header, 4 for a VLAN tag we never send but must not truncate either.
-const MAX_FRAME: usize = 1518;
 
 /// Frames queued between the guest's device and the stack. A guest that outruns the stack loses frames, as it would on a busy wire.
 const FRAME_QUEUE: usize = 512;
@@ -411,11 +408,16 @@ mod tests {
         let vm_end =
             unsafe { <StdUnixDatagram as std::os::fd::FromRawFd>::from_raw_fd(vm.as_raw_fd()) };
 
-        vm_end.send(b"a frame").unwrap();
+        let full = vec![0xa5u8; MAX_FRAME];
+        vm_end.send(&full).unwrap();
         let mut heard = [0u8; MAX_FRAME];
         let read = pair.host.recv(&mut heard).await.unwrap();
 
-        assert_eq!(&heard[..read], b"a frame");
+        assert_eq!(
+            &heard[..read],
+            &full[..],
+            "a frame of the whole link's size arrives whole, tag and all"
+        );
         std::mem::forget(vm);
     }
 
