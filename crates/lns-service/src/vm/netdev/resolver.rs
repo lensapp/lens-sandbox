@@ -93,8 +93,8 @@ fn scutil_output(scutil: Option<&Path>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::dns::PORT;
     use super::*;
-    use crate::netdev::dns::PORT;
     use std::net::IpAddr;
     use std::os::unix::fs::PermissionsExt;
 
