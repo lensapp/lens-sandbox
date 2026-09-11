@@ -1136,11 +1136,17 @@ Two blocks, with two different jobs:
 | `serves` | When is this connector worth offering. Grants nothing. |
 | `methods` | The alternative ways to connect, each carrying what applies once it succeeds. |
 
+`spec.description` is an optional plain-text string explaining what the connector
+lets a sandbox do. Clients show it with the connector's name; absent or blank
+descriptions take no space. It is display metadata, grants nothing, and does not
+replace the method's disclosure of destinations, credentials, and files.
+
 ```yaml
 apiVersion: lns.run/v1
 kind: connector
 name: some-provider
 spec:
+  description: Work with projects and issues in Some Provider.
   serves:                                    # detection only
     - api.some-provider.example
 
