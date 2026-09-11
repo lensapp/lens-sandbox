@@ -49,6 +49,8 @@ struct MenuContent: View {
 
     var body: some View {
         Text(model.connected ? "\(model.snapshot.approvals.count) pending approvals" : "Service disconnected")
+        Button("Sandboxes…") { dashboard(.sandboxes) }
+        Button("Connectors…") { dashboard(.connectors) }
         Button("Audit…") { dashboard(.audit) }
         Button("Approvals…") {
             dashboard(.approvals)

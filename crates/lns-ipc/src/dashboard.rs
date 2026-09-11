@@ -30,6 +30,23 @@ pub struct DashboardApproval {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn the_swift_management_fixture_is_the_rust_wire_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../clients/macos/Tests/LNSClientTests/Fixtures/management.json"
+        ))
+        .unwrap();
+        let requests: Vec<crate::Request> =
+            serde_json::from_value(fixture["requests"].clone()).unwrap();
+        let responses: Vec<crate::Response> =
+            serde_json::from_value(fixture["responses"].clone()).unwrap();
+        assert_eq!(serde_json::to_value(requests).unwrap(), fixture["requests"]);
+        assert_eq!(
+            serde_json::to_value(responses).unwrap(),
+            fixture["responses"]
+        );
+    }
+
+    #[test]
     fn the_swift_dashboard_fixture_is_the_rust_wire_contract() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../clients/macos/Tests/LNSClientTests/Fixtures/dashboard.json"

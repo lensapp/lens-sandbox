@@ -14,7 +14,7 @@ public struct ServiceConnection: ServiceClient {
         return AsyncThrowingStream(bufferingPolicy: latestOnly ? .bufferingNewest(1) : .unbounded) { continuation in
             var reader = ReplyRead()
             var lifecycle = ReplyLifecycle()
-            var deadline = ReplyDeadline(streaming: !once && latestOnly, now: ProcessInfo.processInfo.systemUptime)
+            var deadline = ReplyDeadline(streaming: !once && latestOnly, now: ProcessInfo.processInfo.systemUptime, timeout: request.replyTimeout)
             let timer = DispatchSource.makeTimerSource(queue: queue)
 
             func finish(_ error: Error? = nil) {

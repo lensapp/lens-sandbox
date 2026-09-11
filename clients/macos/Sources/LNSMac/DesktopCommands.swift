@@ -8,6 +8,8 @@ struct DesktopCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Navigate") {
+            Button("Sandboxes") { show(.sandboxes) }.keyboardShortcut("4")
+            Button("Connectors") { show(.connectors) }.keyboardShortcut("5")
             Button("Audit") { show(.audit) }.keyboardShortcut("1")
             Button("Approvals") { show(.approvals) }.keyboardShortcut("2")
             Button("Live Requests") {
