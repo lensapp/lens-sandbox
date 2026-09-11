@@ -182,7 +182,7 @@ async fn run_provisioner(
         false,
     )?;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let netdev =
         vm::netdev::real::start(upper_disk.parent().unwrap_or_else(|| Path::new(".")), |k| {
             std::env::var_os(k)
@@ -217,14 +217,14 @@ async fn run_provisioner(
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         net: netdev.attachment(),
         debug: false,
         exec,
     };
 
     let mut vm_task = tokio::spawn(async move {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let _netdev = netdev;
         vm::boot(spec, None).await
     });

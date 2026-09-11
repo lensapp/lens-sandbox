@@ -269,6 +269,34 @@ if [ "$OS" = "linux" ]; then
     echo "  Install a newer virtiofsd or set LNS_VIRTIOFSD_BIN=/path/to/virtiofsd."
     echo ""
   fi
+
+  # Each Linux guest's network is served by a per-run passt. There is no verified static build to
+  # fetch, so it comes from the distro package.
+  find_passt() {
+    if [ -n "${LNS_PASST_BIN:-}" ] && [ -x "${LNS_PASST_BIN}" ]; then
+      printf '%s\n' "${LNS_PASST_BIN}"
+      return
+    fi
+    if command -v passt >/dev/null 2>&1; then
+      command -v passt
+      return
+    fi
+    for dir in /usr/bin /usr/local/bin /usr/sbin /usr/local/sbin; do
+      if [ -x "$dir/passt" ]; then
+        printf '%s\n' "$dir/passt"
+        return
+      fi
+    done
+    return 1
+  }
+
+  if ! find_passt >/dev/null; then
+    warn "passt is not installed. \`${BINARY_NAME} run\` serves the guest's network with a per-run passt."
+    echo "  Install it with \`sudo apt install passt\` or \`sudo dnf install passt\`, or point lns at one with"
+    echo "    LNS_PASST_BIN=/path/to/passt"
+    echo "  Until then, LNS_NETDEV=none boots the guest with no network device at all."
+    echo ""
+  fi
 fi
 
 # On macOS lns serves each guest's network from a per-run gvproxy. The service downloads the

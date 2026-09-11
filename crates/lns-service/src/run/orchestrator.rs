@@ -506,7 +506,7 @@ async fn orchestrate(
         Some(&session),
     );
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let run_dir = upper_disk_path
         .parent()
         .map(std::path::Path::to_path_buf)
@@ -515,9 +515,9 @@ async fn orchestrate(
     let console_fd = vm::diag_console::spawn(run_dir.join("console.log"), args.debug)?;
 
     // Before the VM, so a backend that cannot serve the link refuses the run rather than booting a guest with no network.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let netdev = vm::netdev::real::start(&run_dir, |k| std::env::var_os(k)).await?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let backend = netdev.backend;
         log::info!("Network", "{} ({})", backend.label(), backend.detail());
@@ -558,7 +558,7 @@ async fn orchestrate(
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         net: netdev.attachment(),
         debug: args.debug,
         exec,
@@ -629,7 +629,7 @@ async fn orchestrate(
     let boot_start = std::time::Instant::now();
     let mut vm_task = tokio::spawn(async move {
         let _volume_leases = volume_leases;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let _netdev = netdev;
         vm::boot(spec, None).await
     });

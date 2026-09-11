@@ -153,7 +153,23 @@ pub(crate) fn cloud_hypervisor_args(spec: &VmSpec, layout: &SocketLayout) -> Vec
     args.push("--vsock".to_string());
     args.push(format!("cid={GUEST_CID},socket={}", layout.vsock.display()));
 
+    if let Some(net) = net_link(spec) {
+        args.push("--net".to_string());
+        args.push(net.cloud_hypervisor_arg());
+    }
+
     args
+}
+
+/// Only a Linux guest gets a vhost-user link; the macOS attachment is made by Vz, not by an argument.
+#[cfg(target_os = "linux")]
+fn net_link(spec: &VmSpec) -> Option<&crate::vm::netdev::VhostUserNet> {
+    spec.net.as_ref()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn net_link(_spec: &VmSpec) -> Option<&crate::vm::netdev::VhostUserNet> {
+    None
 }
 
 #[cfg(test)]
@@ -218,6 +234,8 @@ mod tests {
             console_fd: -1,
             #[cfg(target_os = "macos")]
             net: crate::vm::netdev::NetAttachment::Nat,
+            #[cfg(target_os = "linux")]
+            net: None,
         }
     }
 
@@ -293,6 +311,38 @@ mod tests {
     fn memory_is_shared_so_vhost_user_fs_can_map_the_guest_region() {
         let args = cloud_hypervisor_args(&spec(), &layout());
         assert_eq!(arg_value(&args, "--memory"), "size=2048M,shared=on");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_guest_gets_a_net_device_served_by_the_runs_own_passt() {
+        let mut s = spec();
+        s.net = Some(crate::vm::netdev::VhostUserNet {
+            socket: PathBuf::from("/cache/runs/7/net.sock"),
+            mac: "3a:1b:2c:3d:4e:5f".to_string(),
+        });
+
+        let args = cloud_hypervisor_args(&s, &layout());
+
+        assert_eq!(
+            arg_value(&args, "--net"),
+            "vhost_user=true,socket=/cache/runs/7/net.sock,mac=3a:1b:2c:3d:4e:5f"
+        );
+        assert_eq!(
+            arg_value(&args, "--memory"),
+            "size=2048M,shared=on",
+            "a vhost-user device maps the guest's memory, as vhost-user-fs already does"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_run_with_no_backend_boots_the_guest_without_a_net_device() {
+        let args = cloud_hypervisor_args(&spec(), &layout());
+        assert!(
+            !args.iter().any(|a| a == "--net"),
+            "LNS_NETDEV=none is the old no-network behaviour: {args:?}"
+        );
     }
 
     #[test]

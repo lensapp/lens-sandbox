@@ -1,4 +1,5 @@
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// Each platform compiles the other's backend helpers too; only its own are reachable from a run.
+#![cfg_attr(any(target_os = "macos", target_os = "linux"), allow(dead_code))]
 
 use std::ffi::OsString;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -9,10 +10,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use super::cloud_hypervisor::process::{Child, Spawner};
-use super::cloud_hypervisor::vmm_bin::which;
+use super::cloud_hypervisor::vmm_bin::{is_executable_file, which};
 use crate::download::{PinnedArtifact, RealFetcher, RealFs, ensure_pinned};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod real;
 
 pub const GVPROXY_VERSION: &str = "0.8.9";
@@ -25,11 +26,23 @@ const RELEASE_BASE: &str = "https://github.com/containers/gvisor-tap-vsock/relea
 
 const MAX_GVPROXY_BYTES: u64 = 64 * 1024 * 1024;
 
-/// gvproxy serves this subnet, with its gateway and DNS resolver on the first address; the guest learns both over DHCP.
+/// gvproxy and passt both serve this subnet, with the gateway and DNS resolver on the first address; the guest learns both over DHCP.
 pub const GUEST_SUBNET: &str = "192.168.127.0/24";
+
+/// The address the backend answers as gateway and as resolver.
+pub const GUEST_GATEWAY: &str = "192.168.127.1";
+
+/// passt hands the guest the host's own address unless told otherwise, which leaves a guest unable to tell host traffic from its own.
+pub const GUEST_ADDRESS: &str = "192.168.127.2";
+
+pub const GUEST_PREFIX_LEN: &str = "24";
 
 /// VZFileHandleNetworkDeviceAttachment refuses an MTU below 1500 and gvproxy defaults to the same value.
 pub const GUEST_MTU: u32 = 1500;
+
+/// Where the distro packages put passt; the service must find one without a `PATH` that carries `/usr/sbin`.
+const PACKAGED_PASST_DIRS: &[&str] =
+    &["/usr/bin", "/usr/local/bin", "/usr/sbin", "/usr/local/sbin"];
 
 /// `sun_path` holds 104 bytes on macOS, so a deep lns home makes a run's socket unbindable rather than slow.
 const MAX_UNIX_PATH_BYTES: usize = 104;
@@ -46,59 +59,131 @@ const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// What the guest's link hangs off. `LNS_NETDEV=vmnet` restores the Apple NAT bridge for one release.
+/// The platform whose backends a run may choose from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Host {
+    MacOs,
+    Linux,
+}
+
+impl Host {
+    pub const THIS: Host = if cfg!(target_os = "macos") {
+        Host::MacOs
+    } else {
+        Host::Linux
+    };
+
+    fn backends(self) -> &'static [Backend] {
+        match self {
+            Host::MacOs => &[Backend::Gvproxy, Backend::Vmnet],
+            Host::Linux => &[Backend::Passt, Backend::Off],
+        }
+    }
+
+    fn default_backend(self) -> Backend {
+        self.backends()[0]
+    }
+
+    fn choices_phrase(self) -> String {
+        self.backends()
+            .iter()
+            .map(|b| b.choice_phrase())
+            .collect::<Vec<_>>()
+            .join(" or ")
+    }
+}
+
+/// What the guest's link hangs off. `LNS_NETDEV` names one for a run: `vmnet` restores the Apple NAT bridge, `none` the Linux guest with no device at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Gvproxy,
+    Passt,
     Vmnet,
+    Off,
 }
 
 impl Backend {
     pub fn label(self) -> &'static str {
         match self {
             Backend::Gvproxy => "gvproxy",
+            Backend::Passt => "passt",
             Backend::Vmnet => "vmnet",
+            Backend::Off => "none",
         }
     }
 
     pub fn detail(self) -> &'static str {
         match self {
-            Backend::Gvproxy => GUEST_SUBNET,
+            Backend::Gvproxy | Backend::Passt => GUEST_SUBNET,
             Backend::Vmnet => "Apple NAT bridge",
+            Backend::Off => "no guest network",
         }
     }
 
-    pub fn from_env(env_get: impl Fn(&str) -> Option<OsString>) -> Result<Self> {
-        let Some(value) = env_get("LNS_NETDEV") else {
-            return Ok(Backend::Gvproxy);
+    fn choice_phrase(self) -> String {
+        let what = match self {
+            Backend::Gvproxy | Backend::Passt => {
+                "the default, a per-run userspace network process".to_string()
+            }
+            Backend::Vmnet => "the Apple NAT bridge, kept for one release".to_string(),
+            Backend::Off => "no network device at all, kept for one release".to_string(),
         };
-        match value.to_str() {
-            Some("gvproxy") => Ok(Backend::Gvproxy),
-            Some("vmnet") => Ok(Backend::Vmnet),
-            _ => bail!(
-                "LNS_NETDEV={} is not a network backend. Use gvproxy (the default, a per-run \
-                 userspace network process) or vmnet (the Apple NAT bridge, kept for one release).",
-                PathBuf::from(value).display()
-            ),
+        format!("{} ({what})", self.label())
+    }
+
+    pub fn from_env(host: Host, env_get: impl Fn(&str) -> Option<OsString>) -> Result<Self> {
+        let Some(value) = env_get("LNS_NETDEV") else {
+            return Ok(host.default_backend());
+        };
+        if let Some(found) = host
+            .backends()
+            .iter()
+            .find(|b| Some(b.label()) == value.to_str())
+        {
+            return Ok(*found);
         }
+        bail!(
+            "LNS_NETDEV={} is not a network backend on this host. Use {}.",
+            PathBuf::from(value).display(),
+            host.choices_phrase()
+        )
     }
 }
 
-/// How the guest's virtio-net device reaches the host: the Apple NAT bridge, or a datagram socket the backend process holds the other end of.
+/// How the guest's virtio-net device reaches the host on macOS: the Apple NAT bridge, or a datagram socket the backend process holds the other end of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetAttachment {
     Nat,
     DatagramFd(RawFd),
 }
 
+/// How the guest's virtio-net device reaches the host on Linux: cloud-hypervisor connects to the vhost-user socket the run's passt bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VhostUserNet {
+    pub socket: PathBuf,
+    pub mac: String,
+}
+
+impl VhostUserNet {
+    /// cloud-hypervisor's default `vhost_mode=client` connects to the socket passt binds, so lns never has to bind it itself.
+    pub fn cloud_hypervisor_arg(&self) -> String {
+        format!(
+            "vhost_user=true,socket={},mac={}",
+            self.socket.display(),
+            self.mac
+        )
+    }
+}
+
 /// Where a run's network backend lives, beside the run's vsock socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetLayout {
-    /// The unixgram socket gvproxy binds and listens on.
+    /// The socket the backend binds: unixgram for gvproxy, vhost-user for passt.
     pub backend: PathBuf,
     /// The unixgram socket the VM's datagram endpoint binds, so gvproxy has an address to answer.
     pub vm: PathBuf,
     pub log: PathBuf,
+    pub pid: PathBuf,
 }
 
 impl NetLayout {
@@ -107,6 +192,7 @@ impl NetLayout {
             backend: run_dir.join("net.sock"),
             vm: run_dir.join("net-vm.sock"),
             log: run_dir.join("net.log"),
+            pid: run_dir.join("net.pid"),
         }
     }
 
@@ -150,6 +236,94 @@ pub fn gvproxy_args(layout: &NetLayout) -> Vec<String> {
         "--log-file".to_string(),
         layout.log.display().to_string(),
     ]
+}
+
+/// passt serves the guest a private address rather than the host's own, so nothing in the guest can mistake host traffic for its own, and answers DNS on the gateway address it advertises.
+pub fn passt_args(layout: &NetLayout) -> Vec<String> {
+    vec![
+        "--vhost-user".to_string(),
+        "--socket".to_string(),
+        layout.backend.display().to_string(),
+        "--foreground".to_string(),
+        "--pid".to_string(),
+        layout.pid.display().to_string(),
+        "--log-file".to_string(),
+        layout.log.display().to_string(),
+        "--ipv4-only".to_string(),
+        "--mtu".to_string(),
+        GUEST_MTU.to_string(),
+        "--address".to_string(),
+        GUEST_ADDRESS.to_string(),
+        "--netmask".to_string(),
+        GUEST_PREFIX_LEN.to_string(),
+        "--gateway".to_string(),
+        GUEST_GATEWAY.to_string(),
+        "--dns".to_string(),
+        GUEST_GATEWAY.to_string(),
+        "--dns-forward".to_string(),
+        GUEST_GATEWAY.to_string(),
+        // The gateway address would otherwise reach the host's own loopback services, past every egress rule.
+        "--no-map-gw".to_string(),
+        "--tcp-ports".to_string(),
+        "none".to_string(),
+        "--udp-ports".to_string(),
+        "none".to_string(),
+    ]
+}
+
+/// Clearing the multicast bit and setting the local one makes an address no vendor owns, so a run can never collide with real hardware.
+pub fn locally_administered_mac(bytes: [u8; 6]) -> String {
+    let first = (bytes[0] & 0xfe) | 0x02;
+    format!(
+        "{first:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+    )
+}
+
+pub fn random_guest_mac() -> String {
+    locally_administered_mac(rand::random())
+}
+
+pub fn packaged_passt_dirs() -> Vec<PathBuf> {
+    PACKAGED_PASST_DIRS.iter().map(PathBuf::from).collect()
+}
+
+/// The passt that serves a Linux guest: named by `LNS_PASST_BIN`, on `PATH`, or where a distro package puts it. There is no verified build to fetch, so a host without one is refused.
+pub fn located_passt(env_get: &impl Fn(&str) -> Option<OsString>) -> Result<PathBuf> {
+    located_passt_in(&packaged_passt_dirs(), env_get)
+}
+
+pub fn located_passt_in(
+    dirs: &[PathBuf],
+    env_get: &impl Fn(&str) -> Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(value) = env_get("LNS_PASST_BIN") {
+        let path = PathBuf::from(value);
+        if !path.is_file() {
+            bail!(
+                "LNS_PASST_BIN={} is not a regular file. Point it at a passt binary, \
+                 or unset it to let lns use the one this host has installed.",
+                path.display()
+            );
+        }
+        return Ok(path);
+    }
+    if let Some(found) = which("passt", env_get) {
+        return Ok(found);
+    }
+    if let Some(found) = dirs
+        .iter()
+        .map(|dir| dir.join("passt"))
+        .find(|path| is_executable_file(path))
+    {
+        return Ok(found);
+    }
+    bail!(
+        "passt is not installed. lns serves each Linux guest's network with a per-run passt, \
+         and there is no verified static build to fetch. Install it with `apt install passt` \
+         or `dnf install passt`, or point LNS_PASST_BIN at a passt binary. \
+         LNS_NETDEV=none boots the guest with no network device at all."
+    )
 }
 
 pub fn gvproxy_url(base: &str) -> String {
@@ -248,6 +422,14 @@ pub(crate) struct RunningNetDev<C: Child> {
     pub(crate) fd: OwnedFd,
 }
 
+/// One backend process to start: what to run, and the words a failure to start it is reported in.
+struct BackendProcess<'a> {
+    program: &'a Path,
+    args: Vec<String>,
+    label: &'a str,
+    socket_kind: &'a str,
+}
+
 pub(crate) async fn start_with<S: Spawner>(
     spawner: &S,
     program: &Path,
@@ -255,15 +437,18 @@ pub(crate) async fn start_with<S: Spawner>(
     timeout: Duration,
     connect: impl Fn(&NetLayout) -> Result<OwnedFd>,
 ) -> Result<RunningNetDev<S::Child>> {
-    layout.refuse_paths_no_socket_can_hold()?;
-    layout.remove_stale()?;
-    let mut child = spawner
-        .spawn(program, &gvproxy_args(layout))
-        .with_context(|| format!("spawning gvproxy at {}", program.display()))?;
-    if let Err(e) = wait_for_socket(&layout.backend, timeout).await {
-        reap(&mut child).await;
-        return Err(e.context("gvproxy did not expose its vfkit socket"));
-    }
+    let mut child = spawn_and_wait(
+        spawner,
+        &BackendProcess {
+            program,
+            args: gvproxy_args(layout),
+            label: "gvproxy",
+            socket_kind: "vfkit",
+        },
+        layout,
+        timeout,
+    )
+    .await?;
     match connect(layout) {
         Ok(fd) => Ok(RunningNetDev { child, fd }),
         Err(e) => {
@@ -271,6 +456,54 @@ pub(crate) async fn start_with<S: Spawner>(
             Err(e)
         }
     }
+}
+
+/// passt binds the vhost-user socket itself, so it has to be listening before cloud-hypervisor connects to it as a client.
+pub(crate) async fn start_passt_with<S: Spawner>(
+    spawner: &S,
+    program: &Path,
+    layout: &NetLayout,
+    timeout: Duration,
+) -> Result<S::Child> {
+    spawn_and_wait(
+        spawner,
+        &BackendProcess {
+            program,
+            args: passt_args(layout),
+            label: "passt",
+            socket_kind: "vhost-user",
+        },
+        layout,
+        timeout,
+    )
+    .await
+}
+
+async fn spawn_and_wait<S: Spawner>(
+    spawner: &S,
+    process: &BackendProcess<'_>,
+    layout: &NetLayout,
+    timeout: Duration,
+) -> Result<S::Child> {
+    layout.refuse_paths_no_socket_can_hold()?;
+    layout.remove_stale()?;
+    let mut child = spawner
+        .spawn(process.program, &process.args)
+        .with_context(|| {
+            format!(
+                "spawning {} at {}",
+                process.label,
+                process.program.display()
+            )
+        })?;
+    if let Err(e) = wait_for_socket(&layout.backend, timeout).await {
+        reap(&mut child).await;
+        return Err(e.context(format!(
+            "{} did not expose its {} socket",
+            process.label, process.socket_kind
+        )));
+    }
+    Ok(child)
 }
 
 async fn reap<C: Child>(child: &mut C) {
@@ -307,47 +540,105 @@ mod tests {
     }
 
     #[test]
-    fn the_default_backend_serves_the_guest_from_a_per_run_gvproxy() {
-        let backend = Backend::from_env(|_| None).expect("an unset LNS_NETDEV decides nothing");
+    fn the_default_backend_on_macos_serves_the_guest_from_a_per_run_gvproxy() {
+        let backend =
+            Backend::from_env(Host::MacOs, |_| None).expect("an unset LNS_NETDEV decides nothing");
         assert_eq!(backend, Backend::Gvproxy);
         assert_eq!(backend.label(), "gvproxy");
         assert_eq!(backend.detail(), GUEST_SUBNET);
     }
 
     #[test]
+    fn the_default_backend_on_linux_serves_the_guest_from_a_per_run_passt() {
+        let backend =
+            Backend::from_env(Host::Linux, |_| None).expect("an unset LNS_NETDEV decides nothing");
+        assert_eq!(backend, Backend::Passt);
+        assert_eq!(backend.label(), "passt");
+        assert_eq!(backend.detail(), GUEST_SUBNET);
+    }
+
+    #[test]
     fn lns_netdev_vmnet_restores_the_apple_nat_bridge() {
-        let backend = Backend::from_env(|k| (k == "LNS_NETDEV").then(|| OsString::from("vmnet")))
-            .expect("vmnet is the documented escape hatch");
+        let backend = Backend::from_env(Host::MacOs, |k| {
+            (k == "LNS_NETDEV").then(|| OsString::from("vmnet"))
+        })
+        .expect("vmnet is the documented escape hatch");
         assert_eq!(backend, Backend::Vmnet);
         assert_eq!(backend.label(), "vmnet");
         assert_eq!(backend.detail(), "Apple NAT bridge");
     }
 
     #[test]
+    fn lns_netdev_none_restores_a_linux_guest_with_no_network_device() {
+        let backend = Backend::from_env(Host::Linux, |k| {
+            (k == "LNS_NETDEV").then(|| OsString::from("none"))
+        })
+        .expect("none is the documented escape hatch");
+        assert_eq!(backend, Backend::Off);
+        assert_eq!(backend.label(), "none");
+        assert_eq!(backend.detail(), "no guest network");
+    }
+
+    #[test]
     fn lns_netdev_gvproxy_names_the_default_explicitly() {
-        let backend = Backend::from_env(|k| (k == "LNS_NETDEV").then(|| OsString::from("gvproxy")))
-            .expect("naming the default is allowed");
+        let backend = Backend::from_env(Host::MacOs, |k| {
+            (k == "LNS_NETDEV").then(|| OsString::from("gvproxy"))
+        })
+        .expect("naming the default is allowed");
         assert_eq!(backend, Backend::Gvproxy);
     }
 
     #[test]
+    fn lns_netdev_passt_names_the_linux_default_explicitly() {
+        let backend = Backend::from_env(Host::Linux, |k| {
+            (k == "LNS_NETDEV").then(|| OsString::from("passt"))
+        })
+        .expect("naming the default is allowed");
+        assert_eq!(backend, Backend::Passt);
+    }
+
+    #[test]
     fn an_unknown_backend_is_refused_by_name_with_both_choices() {
-        let err = Backend::from_env(|k| (k == "LNS_NETDEV").then(|| OsString::from("passt")))
-            .expect_err("a typo must not silently pick a backend");
+        let err = Backend::from_env(Host::MacOs, |k| {
+            (k == "LNS_NETDEV").then(|| OsString::from("wireguard"))
+        })
+        .expect_err("a typo must not silently pick a backend");
         let msg = format!("{err:#}");
-        assert!(msg.contains("passt"), "names what was asked for: {msg}");
+        assert!(msg.contains("wireguard"), "names what was asked for: {msg}");
         assert!(msg.contains("gvproxy"), "names the default: {msg}");
         assert!(msg.contains("vmnet"), "names the escape hatch: {msg}");
     }
 
     #[test]
+    fn a_backend_the_other_platform_serves_is_refused_with_this_platforms_choices() {
+        let err = Backend::from_env(Host::Linux, |k| {
+            (k == "LNS_NETDEV").then(|| OsString::from("gvproxy"))
+        })
+        .expect_err("gvproxy serves no Linux guest");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("gvproxy"), "names what was asked for: {msg}");
+        assert!(msg.contains("passt"), "names the default: {msg}");
+        assert!(msg.contains("none"), "names the escape hatch: {msg}");
+    }
+
+    #[test]
     fn a_backend_name_that_is_not_text_is_refused_like_any_other_typo() {
         use std::os::unix::ffi::OsStringExt;
-        let err = Backend::from_env(|k| {
+        let err = Backend::from_env(Host::MacOs, |k| {
             (k == "LNS_NETDEV").then(|| OsString::from_vec(vec![0x66, 0x80, 0x6f]))
         })
         .expect_err("bytes that are not a backend name decide nothing");
         assert!(format!("{err:#}").contains("LNS_NETDEV"));
+    }
+
+    #[test]
+    fn this_host_asks_for_a_backend_its_own_platform_serves() {
+        let default =
+            Backend::from_env(Host::THIS, |_| None).expect("an unset LNS_NETDEV decides nothing");
+        assert!(
+            Host::THIS.backends().contains(&default),
+            "a host must never default to a backend it cannot start: {default:?}"
+        );
     }
 
     #[test]
@@ -356,6 +647,156 @@ mod tests {
         assert_eq!(layout.backend, PathBuf::from("/cache/runs/7/net.sock"));
         assert_eq!(layout.vm, PathBuf::from("/cache/runs/7/net-vm.sock"));
         assert_eq!(layout.log, PathBuf::from("/cache/runs/7/net.log"));
+        assert_eq!(layout.pid, PathBuf::from("/cache/runs/7/net.pid"));
+    }
+
+    #[test]
+    fn passt_serves_the_vhost_user_socket_on_a_private_subnet_and_publishes_no_host_port() {
+        let args = passt_args(&layout_in(Path::new("/cache/runs/7")));
+        assert_eq!(
+            args,
+            vec![
+                "--vhost-user".to_string(),
+                "--socket".to_string(),
+                "/cache/runs/7/net.sock".to_string(),
+                "--foreground".to_string(),
+                "--pid".to_string(),
+                "/cache/runs/7/net.pid".to_string(),
+                "--log-file".to_string(),
+                "/cache/runs/7/net.log".to_string(),
+                "--ipv4-only".to_string(),
+                "--mtu".to_string(),
+                "1500".to_string(),
+                "--address".to_string(),
+                "192.168.127.2".to_string(),
+                "--netmask".to_string(),
+                "24".to_string(),
+                "--gateway".to_string(),
+                "192.168.127.1".to_string(),
+                "--dns".to_string(),
+                "192.168.127.1".to_string(),
+                "--dns-forward".to_string(),
+                "192.168.127.1".to_string(),
+                "--no-map-gw".to_string(),
+                "--tcp-ports".to_string(),
+                "none".to_string(),
+                "--udp-ports".to_string(),
+                "none".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_address_passt_advertises_as_the_resolver_is_one_it_answers_itself() {
+        let args = passt_args(&layout_in(Path::new("/cache/runs/7")));
+        let value_after = |flag: &str| {
+            let at = args.iter().position(|a| a == flag).expect(flag);
+            args[at + 1].clone()
+        };
+        assert_eq!(value_after("--dns"), value_after("--dns-forward"));
+        assert_eq!(value_after("--dns"), GUEST_GATEWAY);
+    }
+
+    #[test]
+    fn a_guest_mac_is_locally_administered_and_unicast_whatever_the_random_bytes_are() {
+        assert_eq!(
+            locally_administered_mac([0xff, 0x01, 0x02, 0x03, 0x04, 0x05]),
+            "fe:01:02:03:04:05"
+        );
+        assert_eq!(
+            locally_administered_mac([0x00, 0xab, 0xcd, 0xef, 0x10, 0x20]),
+            "02:ab:cd:ef:10:20"
+        );
+    }
+
+    #[test]
+    fn every_run_is_handed_a_well_formed_mac_no_vendor_owns() {
+        let mac = random_guest_mac();
+        let octets: Vec<&str> = mac.split(':').collect();
+        assert_eq!(octets.len(), 6, "{mac}");
+        assert!(
+            octets
+                .iter()
+                .all(|o| o.len() == 2 && o.chars().all(|c| c.is_ascii_hexdigit())),
+            "{mac}"
+        );
+        let first = u8::from_str_radix(octets[0], 16).expect("an octet is hex");
+        assert_eq!(
+            first & 0x03,
+            0x02,
+            "locally administered and unicast: {mac}"
+        );
+    }
+
+    #[test]
+    fn the_guest_link_becomes_the_vhost_user_net_device_cloud_hypervisor_connects_to() {
+        let net = VhostUserNet {
+            socket: PathBuf::from("/cache/runs/7/net.sock"),
+            mac: "3a:1b:2c:3d:4e:5f".to_string(),
+        };
+        assert_eq!(
+            net.cloud_hypervisor_arg(),
+            "vhost_user=true,socket=/cache/runs/7/net.sock,mac=3a:1b:2c:3d:4e:5f"
+        );
+    }
+
+    #[test]
+    fn lns_passt_bin_is_used_without_consulting_path() {
+        let d = tempfile::TempDir::new().unwrap();
+        let pinned = executable(d.path(), "my-passt");
+        let for_env = pinned.clone();
+        let env = move |k: &str| (k == "LNS_PASST_BIN").then(|| for_env.clone().into_os_string());
+        assert_eq!(located_passt(&env).unwrap(), pinned);
+    }
+
+    #[test]
+    fn lns_passt_bin_naming_nothing_refuses_the_run_rather_than_falling_back() {
+        let env = |k: &str| (k == "LNS_PASST_BIN").then(|| OsString::from("/does/not/exist/passt"));
+        let err = located_passt(&env).expect_err("a wrong override must not be papered over");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("LNS_PASST_BIN"), "{msg}");
+        assert!(msg.contains("/does/not/exist/passt"), "{msg}");
+    }
+
+    #[test]
+    fn a_passt_on_path_serves_the_guest() {
+        let d = tempfile::TempDir::new().unwrap();
+        let on_path = executable(d.path(), "passt");
+        let dir = d.path().to_path_buf();
+        let env = move |k: &str| (k == "PATH").then(|| dir.clone().into_os_string());
+        assert_eq!(located_passt_in(&[], &env).unwrap(), on_path);
+    }
+
+    #[test]
+    fn a_passt_the_distro_package_installed_is_found_without_it_being_on_path() {
+        let d = tempfile::TempDir::new().unwrap();
+        let packaged = executable(d.path(), "passt");
+        let dirs = [PathBuf::from("/nowhere"), d.path().to_path_buf()];
+        assert_eq!(located_passt_in(&dirs, &|_| None).unwrap(), packaged);
+    }
+
+    #[test]
+    fn a_host_without_passt_is_refused_by_the_package_that_provides_it() {
+        let err = located_passt_in(&[PathBuf::from("/nowhere")], &|_| None)
+            .expect_err("a guest with no network must not boot");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("passt is not installed"), "{msg}");
+        assert!(
+            msg.contains("apt install passt"),
+            "names the package: {msg}"
+        );
+        assert!(
+            msg.contains("dnf install passt"),
+            "names the package: {msg}"
+        );
+        assert!(msg.contains("LNS_PASST_BIN"), "names the override: {msg}");
+        assert!(msg.contains("LNS_NETDEV=none"), "names the hatch: {msg}");
+    }
+
+    #[test]
+    fn the_well_known_paths_are_the_ones_the_distro_packages_use() {
+        assert!(packaged_passt_dirs().contains(&PathBuf::from("/usr/bin")));
+        assert!(packaged_passt_dirs().contains(&PathBuf::from("/usr/local/bin")));
     }
 
     #[test]
@@ -826,5 +1267,90 @@ mod tests {
             spawner.spawned.lock().unwrap().is_empty(),
             "nothing is spawned for a run that cannot have a socket"
         );
+    }
+
+    #[tokio::test]
+    async fn a_started_passt_binds_the_socket_cloud_hypervisor_will_connect_to() {
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = layout_in(d.path());
+        let spawner = FakeSpawner::listening(&layout.backend);
+
+        let running = start_passt_with(
+            &spawner,
+            Path::new("/usr/bin/passt"),
+            &layout,
+            START_TIMEOUT,
+        )
+        .await
+        .expect("the backend comes up");
+
+        drop(running);
+        let spawned = spawner.spawned.lock().unwrap().clone();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].0, PathBuf::from("/usr/bin/passt"));
+        assert_eq!(spawned[0].1, passt_args(&layout));
+        assert!(
+            !spawner.killed.load(Ordering::SeqCst),
+            "a healthy backend stays up"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_passt_that_cannot_be_spawned_names_the_binary_it_tried() {
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = layout_in(d.path());
+
+        let err = start_passt_with(
+            &FakeSpawner::failing(),
+            Path::new("/nowhere/passt"),
+            &layout,
+            START_TIMEOUT,
+        )
+        .await
+        .err()
+        .expect("a missing binary refuses the run");
+
+        assert!(format!("{err:#}").contains("/nowhere/passt"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_passt_that_never_binds_its_socket_is_reaped_rather_than_left_behind() {
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = layout_in(d.path());
+        let spawner = FakeSpawner::silent();
+
+        let err = start_passt_with(
+            &spawner,
+            Path::new("/usr/bin/passt"),
+            &layout,
+            Duration::from_millis(30),
+        )
+        .await
+        .err()
+        .expect("no socket means cloud-hypervisor has nothing to connect to");
+
+        assert!(
+            format!("{err:#}").contains("did not expose its vhost-user socket"),
+            "{err:#}"
+        );
+        assert!(spawner.killed.load(Ordering::SeqCst), "the child is killed");
+        assert!(spawner.waited.load(Ordering::SeqCst), "and reaped");
+    }
+
+    #[tokio::test]
+    async fn a_previous_boots_passt_socket_does_not_stop_the_next_one() {
+        let d = tempfile::TempDir::new().unwrap();
+        let layout = layout_in(d.path());
+        std::fs::write(&layout.backend, b"stale").unwrap();
+        let spawner = FakeSpawner::listening(&layout.backend);
+
+        start_passt_with(
+            &spawner,
+            Path::new("/usr/bin/passt"),
+            &layout,
+            START_TIMEOUT,
+        )
+        .await
+        .expect("a restart reuses its run dir");
     }
 }

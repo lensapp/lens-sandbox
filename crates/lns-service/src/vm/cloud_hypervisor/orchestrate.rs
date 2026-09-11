@@ -354,6 +354,8 @@ mod tests {
             console_fd: -1,
             #[cfg(target_os = "macos")]
             net: crate::vm::netdev::NetAttachment::Nat,
+            #[cfg(target_os = "linux")]
+            net: None,
         }
     }
 

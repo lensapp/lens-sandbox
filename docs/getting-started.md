@@ -15,10 +15,13 @@ LNS boots a real microVM under a hardware hypervisor:
   [The background service](service.md#the-guest-network).
 - **Linux on x86_64 or aarch64** — uses KVM via Cloud Hypervisor. You need
   `/dev/kvm` accessible to your user (typically `sudo usermod -aG kvm $USER`) and
-  the `cloud-hypervisor` and `virtiofsd` binaries available on `PATH` (or pointed
-  to with `LNS_CLOUD_HYPERVISOR_BIN` / `LNS_VIRTIOFSD_BIN`). `virtiofsd` must
-  support read-only shares through `--readonly`. The installer checks these
-  requirements and tells you what's missing or unsupported.
+  the `cloud-hypervisor`, `virtiofsd` and `passt` binaries available on `PATH`
+  (or pointed to with `LNS_CLOUD_HYPERVISOR_BIN` / `LNS_VIRTIOFSD_BIN` /
+  `LNS_PASST_BIN`). `virtiofsd` must support read-only shares through
+  `--readonly`. `passt` serves the guest's network, one per run, and comes from
+  your distro (`apt install passt`, `dnf install passt`) — see
+  [The background service](service.md#the-guest-network). The installer checks
+  these requirements and tells you what's missing or unsupported.
 - **Windows 11 with WSL2** — Run LNS inside WSL2. It uses the Linux
   build, with the same requirements. To run workloads, turn on nested
   virtualization so WSL2 can start virtual machines. Windows 11 turns this on by
