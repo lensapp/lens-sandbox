@@ -711,9 +711,9 @@ mod tests {
     fn native_oauth_has_one_public_output_and_strict_registration() {
         for kind in ["oauth_device", "oauth_authorization_code"] {
             let auth = if kind == "oauth_device" {
-                serde_json::json!({"kind":kind,"clientId":"public-id","deviceAuthorizationEndpoint":"https://auth.example/device","tokenEndpoint":"https://auth.example/token","verificationHosts":["auth.example"],"scopes":["read"]})
+                serde_json::json!({"kind":kind,"scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"public-id","deviceAuthorizationEndpoint":"https://auth.example/device","tokenEndpoint":"https://auth.example/token","verificationHosts":["auth.example"]})
             } else {
-                serde_json::json!({"kind":kind,"clientId":"public-id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback","port":53682},"scopes":["read"]})
+                serde_json::json!({"kind":kind,"scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"public-id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback","port":53682}})
             };
             let read = |auth: &serde_json::Value| {
                 parse(&with_methods(

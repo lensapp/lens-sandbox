@@ -10,8 +10,7 @@ pub enum OAuth {
         token_endpoint: String,
         device_authorization_endpoint: String,
         verification_hosts: Vec<String>,
-        #[serde(default)]
-        scopes: Vec<String>,
+        scope_options: Vec<ScopeOption>,
     },
     #[serde(rename = "oauth_authorization_code", rename_all = "camelCase")]
     AuthorizationCode {
@@ -19,8 +18,7 @@ pub enum OAuth {
         token_endpoint: String,
         authorization_endpoint: String,
         redirect: Redirect,
-        #[serde(default)]
-        scopes: Vec<String>,
+        scope_options: Vec<ScopeOption>,
     },
 }
 
@@ -53,11 +51,60 @@ impl OAuth {
         }
     }
 
-    pub fn scopes(&self) -> &[String] {
+    pub fn scope_options(&self) -> &[ScopeOption] {
         match self {
-            Self::Device { scopes, .. } | Self::AuthorizationCode { scopes, .. } => scopes,
+            Self::Device { scope_options, .. } | Self::AuthorizationCode { scope_options, .. } => {
+                scope_options
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeOption {
+    pub name: String,
+    pub label: String,
+    pub scopes: Vec<String>,
+}
+
+fn validate_options(options: &[ScopeOption]) -> Result<()> {
+    if options.is_empty() || options.len() > 32 {
+        bail!("scopeOptions must contain 1–32 permission presets");
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for option in options {
+        if option.name.is_empty()
+            || option.name.len() > 64
+            || !option
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+            || !names.insert(&option.name)
+        {
+            bail!(
+                "scopeOptions names must be unique 1–64 byte identifiers using letters, digits, hyphens, or underscores"
+            );
+        }
+        if option.label.trim().is_empty()
+            || option.label.len() > 256
+            || option.label.chars().any(char::is_control)
+        {
+            bail!(
+                "scopeOptions labels must be visible text of 1–256 bytes without control characters"
+            );
+        }
+        let scopes: std::collections::BTreeSet<_> = option.scopes.iter().collect();
+        if option.scopes.len() > 128
+            || scopes.len() != option.scopes.len()
+            || option.scopes.iter().any(|s| !scope_token(s))
+        {
+            bail!(
+                "scopeOptions scopes must contain at most 128 distinct individual OAuth scope tokens, each 1–256 bytes"
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn parse(value: serde_json::Value) -> Result<OAuth> {
@@ -77,9 +124,7 @@ pub(super) fn parse(value: serde_json::Value) -> Result<OAuth> {
         );
     }
     endpoint(oauth.token_endpoint())?;
-    if oauth.scopes().len() > 128 || oauth.scopes().iter().any(|s| !scope_token(s)) {
-        bail!("scopes must contain at most 128 individual OAuth scope tokens, each 1–256 bytes");
-    }
+    validate_options(oauth.scope_options())?;
     match &oauth {
         OAuth::Device {
             device_authorization_endpoint,
@@ -187,6 +232,84 @@ fn callback_path_valid(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_presets_are_bounded_unambiguous_and_strict() {
+        let valid = serde_json::json!({"name":"read-only","label":"Read only","scopes":["read"]});
+        let parse_option = |v| {
+            serde_json::from_value::<ScopeOption>(v)
+                .and_then(|option| validate_options(&[option]).map_err(serde::de::Error::custom))
+        };
+        assert!(parse_option(valid.clone()).is_ok());
+        assert!(
+            parse_option(
+                serde_json::json!({"name":"defaults","label":"Provider defaults","scopes":[]})
+            )
+            .is_ok()
+        );
+        for (key, values) in [
+            (
+                "name",
+                vec![
+                    serde_json::json!(""),
+                    serde_json::json!("a b"),
+                    serde_json::json!("a".repeat(65)),
+                ],
+            ),
+            (
+                "label",
+                vec![
+                    serde_json::json!(" "),
+                    serde_json::json!("a\n"),
+                    serde_json::json!("a".repeat(257)),
+                ],
+            ),
+            (
+                "scopes",
+                vec![
+                    serde_json::json!(["read", "read"]),
+                    serde_json::json!(["read write"]),
+                    serde_json::json!([""]),
+                    serde_json::json!(["a".repeat(257)]),
+                    serde_json::json!(vec!["read"; 129]),
+                ],
+            ),
+            ("extra", vec![serde_json::json!(true)]),
+        ] {
+            for value in values {
+                let mut invalid = valid.clone();
+                invalid[key] = value;
+                assert!(parse_option(invalid).is_err(), "{key}");
+            }
+        }
+        for key in ["name", "label", "scopes"] {
+            let mut invalid = valid.clone();
+            invalid.as_object_mut().unwrap().remove(key);
+            assert!(parse_option(invalid).is_err());
+        }
+        let option: ScopeOption = serde_json::from_value(valid).unwrap();
+        assert!(validate_options(&[]).is_err());
+        assert!(validate_options(&vec![option.clone(); 33]).is_err());
+        assert!(validate_options(&[option.clone(), option]).is_err());
+    }
+
+    #[test]
+    fn permission_presets_replace_fixed_scopes() {
+        let value = serde_json::json!({
+            "kind":"oauth_device", "clientId":"public", "tokenEndpoint":"https://a.example/token",
+            "deviceAuthorizationEndpoint":"https://a.example/device", "verificationHosts":["a.example"],
+            "scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]},
+                {"name":"read-write","label":"Read and write","scopes":["read","write"]}]
+        });
+        let parsed = parse(value.clone()).expect("connectors must declare permission choices");
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["scopeOptions"],
+            value["scopeOptions"]
+        );
+        let mut legacy = value;
+        legacy["scopes"] = serde_json::json!(["read"]);
+        assert!(parse(legacy).is_err());
+    }
 
     #[test]
     fn provider_templates_are_valid_public_client_connectors() {
@@ -305,13 +428,13 @@ mod tests {
 
     #[test]
     fn kind_specific_fields_and_bounds_survive_round_trips() {
-        let device = serde_json::json!({"kind":"oauth_device","clientId":"id","tokenEndpoint":"https://a.example/token","deviceAuthorizationEndpoint":"https://a.example/device","verificationHosts":["a.example"]});
-        let code = serde_json::json!({"kind":"oauth_authorization_code","clientId":"id","tokenEndpoint":"https://a.example/token","authorizationEndpoint":"https://a.example/authorize","redirect":{"kind":"loopback"}});
+        let device = serde_json::json!({"kind":"oauth_device","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"id","tokenEndpoint":"https://a.example/token","deviceAuthorizationEndpoint":"https://a.example/device","verificationHosts":["a.example"]});
+        let code = serde_json::json!({"kind":"oauth_authorization_code","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"id","tokenEndpoint":"https://a.example/token","authorizationEndpoint":"https://a.example/authorize","redirect":{"kind":"loopback"}});
         for original in [&device, &code] {
             let read = parse(original.clone()).unwrap();
             assert_eq!(parse(serde_json::to_value(&read).unwrap()).unwrap(), read);
             let mut invalid = original.clone();
-            invalid["scopes"] = serde_json::json!(vec!["read"; 129]);
+            invalid["scopeOptions"][0]["scopes"] = serde_json::json!(vec!["read"; 129]);
             assert!(parse(invalid).is_err());
             let mut invalid = original.clone();
             invalid["clientId"] = "a".repeat(4097).into();

@@ -145,7 +145,11 @@ fn device() -> OAuth {
         token_endpoint: "https://auth.example/token".into(),
         device_authorization_endpoint: "https://auth.example/device".into(),
         verification_hosts: vec!["auth.example".into()],
-        scopes: vec!["read".into()],
+        scope_options: vec![lns_artifact::connector::oauth::ScopeOption {
+            name: "read-only".into(),
+            label: "Read only".into(),
+            scopes: vec!["read".into()],
+        }],
     }
 }
 fn pending(advance: Advance) -> Pending {
@@ -165,7 +169,7 @@ fn device_polls_automatically_at_the_provider_interval_and_keeps_device_code_pri
             serde_json::json!({"access_token":"access","token_type":"Bearer","refresh_token":"refresh"}),
         ],
     );
-    let start = native.start(&host, 0).unwrap();
+    let start = selected(&native, &host, 0);
     assert!(fake.requests.lock().unwrap().is_empty());
     let first = pending(native.advance(&host, &start.state, 0).unwrap());
     assert_eq!(first.next_at_millis, 5000);
@@ -202,13 +206,17 @@ fn authorization_code_uses_matching_pkce_and_the_exact_configured_callback() {
             path: "/oauth/callback".into(),
             port: Some(53682),
         },
-        scopes: vec!["read".into()],
+        scope_options: vec![lns_artifact::connector::oauth::ScopeOption {
+            name: "read-only".into(),
+            label: "Read only".into(),
+            scopes: vec!["read".into()],
+        }],
     };
     let (native, host, fake) = setup(
         config,
         vec![serde_json::json!({"access_token":"access","token_type":"Bearer"})],
     );
-    let start = native.start(&host, 0).unwrap();
+    let start = selected(&native, &host, 0);
     let waiting = pending(native.advance(&host, &start.state, 0).unwrap());
     let url = reqwest::Url::parse(&fake.opened.lock().unwrap()[0]).unwrap();
     let params: std::collections::BTreeMap<_, _> = url
@@ -250,7 +258,11 @@ fn code() -> OAuth {
             path: "/callback".into(),
             port: None,
         },
-        scopes: vec![],
+        scope_options: vec![lns_artifact::connector::oauth::ScopeOption {
+            name: "read-only".into(),
+            label: "Read only".into(),
+            scopes: vec![],
+        }],
     }
 }
 fn device_response() -> serde_json::Value {
@@ -267,7 +279,7 @@ fn device_denial_expiry_and_timeouts_have_distinct_bounded_transitions() {
             device(),
             vec![device_response(), serde_json::json!({"error":error})],
         );
-        let start = native.start(&host, 0).unwrap();
+        let start = selected(&native, &host, 0);
         let waiting = pending(native.advance(&host, &start.state, 0).unwrap());
         assert_eq!(waiting.next_at_millis, 2000);
         let Err(error) = native.advance(&host, &waiting.state, 2000) else {
@@ -276,7 +288,7 @@ fn device_denial_expiry_and_timeouts_have_distinct_bounded_transitions() {
         assert!(error.to_string().contains(expected));
     }
     let (native, host, fake) = setup(device(), vec![device_response()]);
-    let start = native.start(&host, 0).unwrap();
+    let start = selected(&native, &host, 0);
     let waiting = pending(native.advance(&host, &start.state, 0).unwrap());
     assert_eq!(
         fake.opened.lock().unwrap()[0],
@@ -332,14 +344,14 @@ fn device_responses_cannot_open_untrusted_or_malformed_browser_destinations() {
         let mut response = device_response();
         response[key] = value;
         let (native, host, fake) = setup(device(), vec![response]);
-        let start = native.start(&host, 0).unwrap();
+        let start = selected(&native, &host, 0);
         assert!(native.advance(&host, &start.state, 0).is_err(), "{key}");
         assert!(fake.opened.lock().unwrap().is_empty());
     }
     let mut response = device_response();
     response.as_object_mut().unwrap().remove("expires_in");
     let (native, host, _) = setup(device(), vec![response]);
-    let start = native.start(&host, 0).unwrap();
+    let start = selected(&native, &host, 0);
     assert!(native.advance(&host, &start.state, 0).is_err());
 }
 #[test]
@@ -356,7 +368,7 @@ fn browser_failures_denial_and_deadline_release_callbacks_without_token_exchange
         let (native, host, fake) = setup(code(), vec![]);
         fake.fail_prepare.store(reason == "bind", Relaxed);
         fake.fail_open.store(reason == "open", Relaxed);
-        let start = native.start(&host, 0).unwrap();
+        let start = selected(&native, &host, 0);
         let advanced = native.advance(&host, &start.state, 0);
         if matches!(reason, "bind" | "open") {
             assert!(advanced.is_err());
@@ -469,11 +481,11 @@ fn renewal_binds_registration_retains_rotates_and_never_starts_interaction() {
 #[test]
 fn an_oversized_authorization_session_releases_its_callback_before_opening_a_browser() {
     let mut config = code();
-    if let OAuth::AuthorizationCode { scopes, .. } = &mut config {
-        *scopes = vec!["#".repeat(256); 128];
+    if let OAuth::AuthorizationCode { scope_options, .. } = &mut config {
+        scope_options[0].scopes = vec!["#".repeat(256); 100];
     }
     let (native, host, fake) = setup(config, vec![]);
-    let start = native.start(&host, 0).unwrap();
+    let start = selected(&native, &host, 0);
     assert!(native.advance(&host, &start.state, 0).is_err());
     assert_eq!(fake.canceled.lock().unwrap().as_slice(), ["handle"]);
     assert!(fake.opened.lock().unwrap().is_empty());
@@ -513,7 +525,7 @@ fn corrupt_state_entropy_failure_and_request_bounds_never_reach_a_provider() {
     *fake.entropy_length.lock().unwrap() = Some(31);
     assert!(native.start(&host, 0).is_err());
     *fake.entropy_length.lock().unwrap() = None;
-    let start = native.start(&host, 0).unwrap();
+    let start = selected(&native, &host, 0);
     *fake.entropy_length.lock().unwrap() = Some(31);
     assert!(native.advance(&host, &start.state, 0).is_err());
     assert!(
@@ -538,11 +550,88 @@ fn a_pending_error_cannot_hide_a_redirect_or_server_failure_status() {
             serde_json::json!({"error":"authorization_pending"}),
         ],
     );
-    let start = native.start(&host, 0).unwrap();
+    let start = selected(&native, &host, 0);
     let waiting = pending(native.advance(&host, &start.state, 0).unwrap());
     *fake.status.lock().unwrap() = Some(302);
     let Err(error) = native.advance(&host, &waiting.state, 2000) else {
         panic!("a redirect is not pending authorization")
     };
     assert!(error.to_string().contains("invalid polling status"));
+}
+
+#[test]
+fn authorization_waits_for_an_explicit_permission_choice() {
+    let (native, host, fake) = setup(device(), vec![]);
+    let waiting = native.start(&host, 0).unwrap();
+    assert_eq!(
+        serde_json::to_value(&waiting.progress).unwrap()["kind"],
+        "selecting_scopes"
+    );
+    assert!(fake.requests.lock().unwrap().is_empty());
+    assert!(fake.opened.lock().unwrap().is_empty());
+}
+
+fn selected(native: &Native, host: &Host, now: u64) -> Pending {
+    native
+        .select(&native.start(host, now).unwrap().state, "read-only", now)
+        .unwrap()
+}
+
+#[test]
+fn choosing_provider_defaults_omits_the_scope_parameter() {
+    for mut config in [device(), code()] {
+        match &mut config {
+            OAuth::Device { scope_options, .. }
+            | OAuth::AuthorizationCode { scope_options, .. } => scope_options[0].scopes.clear(),
+        }
+        let (native, host, fake) = setup(
+            config,
+            vec![
+                serde_json::json!({"device_code":"private","user_code":"ABCD","verification_uri":"https://auth.example/verify","expires_in":900}),
+            ],
+        );
+        let start = selected(&native, &host, 0);
+        native.advance(&host, &start.state, 0).unwrap();
+        for request in fake.requests.lock().unwrap().iter() {
+            assert!(
+                !form_urlencoded::parse(&request.body).any(|(key, _)| key == "scope"),
+                "provider defaults must omit scope"
+            );
+        }
+        for url in fake.opened.lock().unwrap().iter() {
+            assert!(
+                !reqwest::Url::parse(url)
+                    .unwrap()
+                    .query_pairs()
+                    .any(|(key, _)| key == "scope")
+            );
+        }
+    }
+}
+
+#[test]
+fn selected_scopes_survive_configuration_changes_and_cannot_be_selected_twice() {
+    let (mut native, host, fake) = setup(
+        device(),
+        vec![
+            serde_json::json!({"device_code":"private","user_code":"ABCD","verification_uri":"https://auth.example/verify","expires_in":900}),
+            serde_json::json!({"access_token":"access","token_type":"Bearer"}),
+        ],
+    );
+    let waiting = native.start(&host, 0).unwrap();
+    assert!(native.select(&waiting.state, "unknown", 0).is_err());
+    assert!(native.select(&waiting.state, "read-only", 900000).is_err());
+    assert!(native.select(b"invalid", "read-only", 0).is_err());
+    let start = native.select(&waiting.state, "read-only", 0).unwrap();
+    assert!(native.select(&start.state, "read-only", 0).is_err());
+    if let OAuth::Device { scope_options, .. } = &mut native.config {
+        scope_options[0].scopes = vec!["admin".into()];
+    }
+    let active = pending(native.advance(&host, &start.state, 0).unwrap());
+    let body = fake.requests.lock().unwrap()[0].body.clone();
+    assert!(form_urlencoded::parse(&body).any(|(k, v)| k == "scope" && v == "read"));
+    let Advance::Done(outcome) = native.advance(&host, &active.state, 5000).unwrap() else {
+        panic!("connected")
+    };
+    assert_eq!(outcome.authority, ["read".into()].into());
 }

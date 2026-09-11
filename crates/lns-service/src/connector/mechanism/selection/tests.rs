@@ -83,8 +83,8 @@ fn native_mechanism_selection_does_not_initialize_wasmtime() {
         )
         .unwrap();
     for auth in [
-        serde_json::json!({"kind":"oauth_device","clientId":"id","deviceAuthorizationEndpoint":"https://auth.example/device","tokenEndpoint":"https://auth.example/token","verificationHosts":["auth.example"]}),
-        serde_json::json!({"kind":"oauth_authorization_code","clientId":"id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback"}}),
+        serde_json::json!({"kind":"oauth_device","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"id","deviceAuthorizationEndpoint":"https://auth.example/device","tokenEndpoint":"https://auth.example/token","verificationHosts":["auth.example"]}),
+        serde_json::json!({"kind":"oauth_authorization_code","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback"}}),
     ] {
         let prepared = native.for_method("provider", &method(auth), None).unwrap();
         assert!(prepared.mechanism.native().is_some());

@@ -99,6 +99,32 @@ impl Operations {
         Ok((handle, replaced))
     }
 
+    pub fn select(
+        &self,
+        handle: &str,
+        now: u64,
+        choose: impl FnOnce(&Work) -> Result<Pending>,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(Entry {
+            work: Some(work),
+            status: status @ Status::Pending(OAuthProgress::SelectingScopes { .. }),
+            next,
+            ..
+        }) = inner
+            .entries
+            .get_mut(handle)
+            .filter(|entry| !entry.busy && entry.expires > now)
+        else {
+            bail!("that OAuth permission choice is no longer open");
+        };
+        let selected = choose(work)?;
+        work.session.state = selected.state;
+        *next = selected.next_at_millis;
+        *status = Status::Pending(selected.progress);
+        Ok(())
+    }
+
     pub fn status(&self, handle: &str) -> Option<(String, Status)> {
         self.inner
             .lock()

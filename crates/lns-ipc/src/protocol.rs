@@ -518,13 +518,23 @@ impl ConnectorView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthDisclosure {
     pub destinations: Vec<String>,
-    pub scopes: Vec<String>,
+    pub scope_options: Vec<OAuthScopeOption>,
     pub callback: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthScopeOption {
+    pub name: String,
+    pub label: String,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OAuthProgress {
+    SelectingScopes {
+        options: Vec<OAuthScopeOption>,
+    },
     Starting {
         destinations: Vec<String>,
         scopes: Vec<String>,

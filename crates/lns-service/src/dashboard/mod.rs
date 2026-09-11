@@ -1800,7 +1800,7 @@ mod tests {
         let mut method = method_that(false);
         method.oauth = Some(lns_ipc::OAuthDisclosure {
             destinations: vec![],
-            scopes: vec![],
+            scope_options: vec![],
             callback: None,
         });
         let mut draft = crate::tray::OfferDraft::default();

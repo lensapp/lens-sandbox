@@ -155,6 +155,21 @@ impl FakeConnectorService {
                 connection,
             } => {
                 *self.connecting.lock().unwrap() = Some((name.clone(), connection.clone()));
+                if let Some(oauth) = self
+                    .held
+                    .iter()
+                    .flat_map(|c| &c.methods)
+                    .find(|m| &m.name == method)
+                    .and_then(|m| m.oauth.as_ref())
+                {
+                    return Some(Response::ConnectorPending {
+                        session: "oauth/1".into(),
+                        progress: lns_ipc::OAuthProgress::SelectingScopes {
+                            options: oauth.scope_options.clone(),
+                        },
+                    });
+                }
+
                 Response::ConnectorAsks {
                     session: format!("{name}/{method}/1"),
                     message: self.asks_message.clone(),
@@ -883,4 +898,30 @@ fn prompt_does_not_say(world: &mut BehaviourWorld, said: String) {
 fn prompt_says_hidden(world: &mut BehaviourWorld) {
     let run = run_of(world);
     assert!(run.output.contains("not shown"), "got: {}", run.output);
+}
+
+#[given("the connector offers native OAuth permission presets")]
+fn oauth_presets(w: &mut BehaviourWorld) {
+    w.connector.held[0].methods[0].oauth = Some(lns_ipc::OAuthDisclosure {
+        destinations: vec!["https://auth.example/authorize".into()],
+        callback: None,
+        scope_options: vec![
+            lns_ipc::OAuthScopeOption {
+                name: "read-only".into(),
+                label: "Read only".into(),
+                scopes: vec!["read".into()],
+            },
+            lns_ipc::OAuthScopeOption {
+                name: "read-write".into(),
+                label: "Read and write".into(),
+                scopes: vec!["read".into(), "write".into()],
+            },
+        ],
+    });
+}
+
+#[then(expr = "the CLI submits native permission preset {string}")]
+fn chosen_oauth_preset(w: &mut BehaviourWorld, name: String) {
+    let requests = w.connector.requests.lock().unwrap();
+    assert!(requests.iter().any(|r| matches!(r,Request::AnswerConnect { values,.. } if values.0 == [("scopeOption".into(),name.clone())].into())));
 }

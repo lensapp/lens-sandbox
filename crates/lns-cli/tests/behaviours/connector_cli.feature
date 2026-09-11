@@ -359,3 +359,13 @@ Feature: lns connector, on this machine
     When the user runs connector command "grant some-provider --run reviewer --method token"
     Then the connector command succeeds
     And the disclosure does not say "lns cannot show what this code does"
+
+  Scenario: OAuth permission presets are selected before automatic sign-in
+    Given the service holds the connector "some-provider" serving "api.some-provider.example"
+    And the connector offers native OAuth permission presets
+    And the user types "2"
+    When the user runs connector command "connect some-provider --method token --as personal"
+    Then the connector command succeeds
+    And the prompt says "Read only: read"
+    And the prompt says "Read and write: read write"
+    And the CLI submits native permission preset "read-write"

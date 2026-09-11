@@ -4,7 +4,7 @@ use crate::connector::mechanism::real::RealMechanisms;
 use std::sync::Arc;
 
 fn document() -> String {
-    serde_json::json!({"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.example"],"methods":[{"name":"sign-in","auth":{"kind":"oauth_device","clientId":"public-id","deviceAuthorizationEndpoint":"https://auth.example/device","tokenEndpoint":"https://auth.example/token","verificationHosts":["auth.example"],"scopes":["read"]},"credentials":[{"envVar":"TOKEN","placeholder":"LNSPLACEHOLDER0000000000","injections":[{"kind":"bearer_header","domain":"api.example"}]}]}]}}).to_string()
+    serde_json::json!({"apiVersion":"lns.run/v1","kind":"connector","name":"some-provider","spec":{"serves":["api.example"],"methods":[{"name":"sign-in","auth":{"kind":"oauth_device","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"public-id","deviceAuthorizationEndpoint":"https://auth.example/device","tokenEndpoint":"https://auth.example/token","verificationHosts":["auth.example"]},"credentials":[{"envVar":"TOKEN","placeholder":"LNSPLACEHOLDER0000000000","injections":[{"kind":"bearer_header","domain":"api.example"}]}]}]}}).to_string()
 }
 fn machine() -> (Rig, RealMechanisms, Arc<Fake>) {
     let fake = Arc::new(Fake::default());
@@ -33,6 +33,12 @@ fn begin(rig: &Rig, mechanisms: &RealMechanisms) -> String {
     else {
         panic!("pending")
     };
+    at(rig, mechanisms, 0)
+        .answer(
+            &session,
+            [("scopeOption".into(), "read-only".into())].into(),
+        )
+        .unwrap();
     session
 }
 #[test]
@@ -171,7 +177,7 @@ fn noninteractive_native_auth_never_starts_browser_or_provider_work() {
 fn uninstalling_a_pending_browser_operation_releases_its_original_listener() {
     let (rig, mechanisms, fake) = machine();
     let mut code: serde_json::Value = serde_json::from_str(&document()).unwrap();
-    code["spec"]["methods"][0]["auth"] = serde_json::json!({"kind":"oauth_authorization_code","clientId":"public-id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback","port":53682}});
+    code["spec"]["methods"][0]["auth"] = serde_json::json!({"kind":"oauth_authorization_code","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"public-id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback","port":53682}});
     rig.installs("sha256:code", &code.to_string(), None);
     let handle = begin(&rig, &mechanisms);
     at(&rig, &mechanisms, 0)
@@ -417,7 +423,7 @@ fn native_browser_actions_and_provider_failures_do_not_reuse_stale_operations() 
 fn cancellation_during_callback_preparation_releases_the_new_listener() {
     let (rig, mechanisms, fake) = machine();
     let mut code: serde_json::Value = serde_json::from_str(&document()).unwrap();
-    code["spec"]["methods"][0]["auth"] = serde_json::json!({"kind":"oauth_authorization_code","clientId":"public-id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback"}});
+    code["spec"]["methods"][0]["auth"] = serde_json::json!({"kind":"oauth_authorization_code","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"public-id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback"}});
     rig.installs("sha256:code", &code.to_string(), None);
     let handle = begin(&rig, &mechanisms);
     at(&rig, &mechanisms, 0)
@@ -466,7 +472,7 @@ fn replacing_native_auth_with_code_requires_reconnect_before_running_that_code()
 fn cancellation_during_code_exchange_drops_the_token_and_closes_the_callback() {
     let (rig, mechanisms, fake) = machine();
     let mut code: serde_json::Value = serde_json::from_str(&document()).unwrap();
-    code["spec"]["methods"][0]["auth"] = serde_json::json!({"kind":"oauth_authorization_code","clientId":"public-id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback"}});
+    code["spec"]["methods"][0]["auth"] = serde_json::json!({"kind":"oauth_authorization_code","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"public-id","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback"}});
     rig.installs("sha256:code", &code.to_string(), None);
     fake.replies.lock().unwrap().pop_front();
     let handle = begin(&rig, &mechanisms);
@@ -488,4 +494,75 @@ fn cancellation_during_code_exchange_drops_the_token_and_closes_the_callback() {
     );
     assert!(!fake.canceled.lock().unwrap().is_empty());
     assert_eq!(fake.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn selecting_permissions_is_explicit_once_and_bound_to_the_live_operation() {
+    let (rig, mechanisms, fake) = machine();
+    let driver = at(&rig, &mechanisms, 0);
+    let Connecting::Pending { session, progress } =
+        driver.begin("some-provider", "sign-in", "work").unwrap()
+    else {
+        panic!("pending")
+    };
+    assert!(matches!(
+        progress,
+        lns_ipc::OAuthProgress::SelectingScopes { .. }
+    ));
+    for _ in 0..10 {
+        driver.advance_native(&session, || 0).unwrap();
+        driver.native_status(&session).unwrap();
+    }
+    assert!(rig.sessions.operations().due(899999).is_empty());
+    assert!(fake.requests.lock().unwrap().is_empty());
+    for answer in [
+        Answers::new(),
+        [("scopeOption".into(), "invented".into())].into(),
+        [
+            ("scopeOption".into(), "read-only".into()),
+            ("scope".into(), "admin".into()),
+        ]
+        .into(),
+    ] {
+        assert!(driver.answer(&session, answer).is_err());
+    }
+    let answer: Answers = [("scopeOption".into(), "read-only".into())].into();
+    driver.answer(&session, answer.clone()).unwrap();
+    assert!(driver.answer(&session, answer.clone()).is_err());
+    driver.advance_native(&session, || 0).unwrap();
+    assert_eq!(fake.requests.lock().unwrap().len(), 1);
+    assert!(driver.answer(&session, answer).is_err());
+    assert_eq!(fake.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn canceled_expired_or_changed_connectors_cannot_accept_permission_answers() {
+    for cause in ["cancel", "expiry", "changed"] {
+        let (rig, mechanisms, fake) = machine();
+        let Connecting::Pending { session, .. } = at(&rig, &mechanisms, 0)
+            .begin("some-provider", "sign-in", "work")
+            .unwrap()
+        else {
+            panic!("pending")
+        };
+        let mut now = 0;
+        match cause {
+            "cancel" => at(&rig, &mechanisms, 0).abandon_handle(&session),
+            "expiry" => now = 900000,
+            "changed" => {
+                rig.store().uninstall("some-provider").unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            at(&rig, &mechanisms, now)
+                .answer(
+                    &session,
+                    [("scopeOption".into(), "read-only".into())].into()
+                )
+                .is_err()
+        );
+        assert!(fake.requests.lock().unwrap().is_empty());
+        assert!(fake.opened.lock().unwrap().is_empty());
+    }
 }
