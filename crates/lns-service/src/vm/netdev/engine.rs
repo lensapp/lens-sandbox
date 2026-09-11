@@ -1480,16 +1480,14 @@ mod tests {
                         })
                         .unwrap();
                 }
-                if back.len() >= 2
-                    && back.len() >= 2 + usize::from(u16::from_be_bytes([back[0], back[1]]))
-                {
-                    return back;
-                }
+                let read = back.len();
                 assert!(
                     tokio::time::Instant::now() < deadline,
-                    "the gateway never answered over TCP, got {} bytes",
-                    back.len()
+                    "the gateway never answered over TCP, got {read} bytes"
                 );
+                if read >= 2 && read >= 2 + usize::from(u16::from_be_bytes([back[0], back[1]])) {
+                    return back;
+                }
             }
         }
 
@@ -1686,6 +1684,13 @@ mod tests {
         }
     }
 
+    fn framed(outcome: Outcome) -> Option<Vec<u8>> {
+        match outcome {
+            Outcome::Frame(frame) => Some(frame),
+            _ => None,
+        }
+    }
+
     #[test]
     fn a_syn_the_guest_repeats_is_dropped_so_one_flow_allocates_once() {
         let admissions = admissions(Limits::default());
@@ -1733,9 +1738,7 @@ mod tests {
             &tcp_packet("93.184.216.36:443", true),
         );
 
-        let Outcome::Frame(frame) = sent_back else {
-            panic!("the reset goes back to the guest over its own link");
-        };
+        let frame = framed(sent_back).expect("the reset goes back to the guest over its own link");
         let (_, refused) = etherparse::Ethernet2Header::from_slice(&frame).unwrap();
         let (_, segment) = Ipv4Header::from_slice(refused).unwrap();
         assert!(TcpHeader::from_slice(segment).unwrap().0.rst);
@@ -1950,6 +1953,12 @@ mod tests {
 
         assert_eq!(carried(), Ingress::Forward);
         assert_eq!(refused_by(carried()), None, "nothing was refused");
+        assert_eq!(reset_of(carried()), None, "no bound was reached");
+        assert_eq!(
+            framed(Outcome::Dropped(DROPPED_MALFORMED)),
+            None,
+            "and nothing was sent back"
+        );
         assert_eq!(leased_by(carried()), None, "nothing was leased");
         assert_eq!(answered_by(carried()), None, "nothing was answered here");
         assert_eq!(
@@ -2283,11 +2292,8 @@ mod tests {
     fn an_answer_too_big_for_a_guest_that_advertised_nothing_keeps_its_question_and_sets_tc() {
         let query = question_of("large.test", hickory_proto::rr::RecordType::A, 7, None);
         let whole = answer_of(&query, false).unwrap();
-        assert!(
-            whole.len() > 1800,
-            "the stand-in answers with {} bytes",
-            whole.len()
-        );
+        let asked = whole.len();
+        assert!(asked > 1800, "the stand-in answers with {asked} bytes");
 
         let fitted = fit_to_guest(&query, whole).expect("the guest gets an answer it can take");
 
@@ -2316,10 +2322,10 @@ mod tests {
 
         let fitted = fit_to_guest(&query, whole).expect("the guest gets an answer it can take");
 
+        let sent = fitted.len();
         assert!(
-            fitted.len() <= DNS_UDP_CEILING,
-            "no answer over {DNS_UDP_CEILING} bytes fits one frame of this link, and this one is {}",
-            fitted.len()
+            sent <= DNS_UDP_CEILING,
+            "no answer over {DNS_UDP_CEILING} bytes fits one frame of this link, and this one is {sent}"
         );
         let fitted = Message::from_vec(&fitted).unwrap();
         assert!(fitted.metadata.truncation);
@@ -2421,6 +2427,89 @@ mod tests {
             .expect("a guest over its limit is not left waiting")
             .unwrap();
         assert_eq!(counters.seen(DROPPED_DNS_IN_FLIGHT), 1);
+    }
+
+    #[tokio::test]
+    async fn a_connection_the_guest_closed_before_its_answer_is_not_written_to() {
+        let counters = Arc::new(Counters::default());
+        let (guest, mut asking) = tokio::io::duplex(4096);
+        let query = question_of("example.test", hickory_proto::rr::RecordType::A, 1, None);
+        asking
+            .write_all(&u16::try_from(query.len()).unwrap().to_be_bytes())
+            .await
+            .unwrap();
+        asking.write_all(&query).await.unwrap();
+        drop(asking);
+
+        let serving = serve_dns_over_tcp(
+            guest,
+            resolving(Limits::default(), &counters, &Relays::new()),
+        );
+
+        tokio::time::timeout(PATIENCE, serving)
+            .await
+            .expect("an answer nobody can take ends the connection");
+    }
+
+    /// A stand-in nameserver whose UDP answer is truncated and whose whole answer, over TCP, is not a message at all.
+    struct Babbling;
+
+    impl Upstream for Babbling {
+        fn over_udp(
+            &self,
+            _server: SocketAddr,
+            query: Vec<u8>,
+        ) -> BoxFuture<'static, std::io::Result<Vec<u8>>> {
+            let asked = Message::from_vec(&query).expect("a question");
+            let mut answer = Message::new(
+                asked.metadata.id,
+                hickory_proto::op::MessageType::Response,
+                hickory_proto::op::OpCode::Query,
+            );
+            answer.metadata.truncation = true;
+            answer.queries = asked.queries;
+            let answered = answer.to_vec().map_err(std::io::Error::other);
+            Box::pin(async move { answered })
+        }
+
+        fn over_tcp(
+            &self,
+            _server: SocketAddr,
+            _query: Vec<u8>,
+        ) -> BoxFuture<'static, std::io::Result<Vec<u8>>> {
+            Box::pin(async { Ok(vec![0xff; 600]) })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_the_gateway_cannot_fit_to_the_guest_is_dropped_and_counted() {
+        let counters = Arc::new(Counters::default());
+        let (replies, mut heard) = channel(1);
+        let mut relaying = resolving(Limits::default(), &counters, &Relays::new());
+        relaying.gateway = Arc::new(Gateway {
+            address: IpAddr::V4(Ipv4Addr::new(192, 168, 127, 1)),
+            resolvers: Arc::new(dns::Resolvers::new(
+                Arc::new(TestSources),
+                dns::REFRESH_AFTER,
+            )),
+            upstream: Arc::new(Babbling),
+        });
+
+        relay_query(
+            relaying,
+            question_of("example.test", hickory_proto::rr::RecordType::A, 1, None),
+            "example.test.".to_string(),
+            "192.168.127.2:5353".parse().unwrap(),
+            "192.168.127.1:53".parse().unwrap(),
+            replies,
+        )
+        .await;
+
+        assert!(
+            heard.try_recv().is_err(),
+            "an answer this gateway cannot read and cannot fit is not sent on"
+        );
+        assert_eq!(counters.seen(DROPPED_DNS_ANSWER), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2863,11 +2952,11 @@ mod tests {
             )
             .await;
 
-        assert!(plain.len() <= DNS_UDP_MINIMUM, "{} bytes", plain.len());
+        let (plain_bytes, advertised_bytes) = (plain.len(), advertised.len());
+        assert!(plain_bytes <= DNS_UDP_MINIMUM, "{plain_bytes} bytes");
         assert!(
-            advertised.len() <= DNS_UDP_CEILING,
-            "{} bytes",
-            advertised.len()
+            advertised_bytes <= DNS_UDP_CEILING,
+            "{advertised_bytes} bytes"
         );
         for answer in [&plain, &advertised] {
             let answer = Message::from_vec(answer).unwrap();
