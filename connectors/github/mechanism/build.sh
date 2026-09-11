@@ -18,6 +18,22 @@ if [ "$check" = "--check" ]; then
     # `cargo clippy --workspace` never reach it. Nothing else would.
     cargo fmt -- --check
 fi
+# A rebuild that disagrees says how, because "run build.sh" is no help to the
+# host whose rebuild is the thing disagreeing.
+say_how_it_differs() {
+    export LC_ALL=C
+    echo "  rebuilt by $(rustc --version) on $(rustc -vV | grep '^host: ')" >&2
+    echo "  $2: $(wc -c < "$2") bytes committed, $(wc -c < "$1") rebuilt" >&2
+    cmp "$2" "$1" 2>&1 | head -1 >&2
+    work=$(mktemp -d) || return 0
+    tr -cs '[:print:]' '\n' < "$2" | sort -u > "$work/committed"
+    tr -cs '[:print:]' '\n' < "$1" | sort -u > "$work/rebuilt"
+    diff -u "$work/committed" "$work/rebuilt" > "$work/diff" || true
+    echo "  $(grep -c '^[-+][^-+]' "$work/diff") differing strings, first 40 lines:" >&2
+    head -40 "$work/diff" >&2
+    rm -rf "$work"
+}
+
 stale=""
 for variant in sign-in oauth-sign-in; do
     # --locked: the digest of these bytes is what a grant is reserved against,
@@ -29,7 +45,10 @@ for variant in sign-in oauth-sign-in; do
         # Inside the loop: each variant compiles code the other one does not.
         cargo clippy --locked --release --target wasm32-wasip2 \
             --no-default-features --features "$variant" -- -D warnings
-        cmp -s "$built" "../$variant.wasm" || stale="$stale $variant"
+        cmp -s "$built" "../$variant.wasm" || {
+            stale="$stale $variant"
+            say_how_it_differs "$built" "../$variant.wasm"
+        }
     else
         cp "$built" "../$variant.wasm"
     fi
