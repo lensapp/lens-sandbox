@@ -1,0 +1,33 @@
+# Copy this file, set `bind` to your own LAN IPv4 address, and point each
+# backend at the two binaries it runs. Nothing here is downloaded.
+
+bind = "192.168.1.50"
+base_port = 47200
+guest_subnet = "192.168.127"
+
+images = { curl = "docker.io/curlimages/curl:8.11.1", alpine = "docker.io/library/alpine:3.20" }
+
+[[backend]]
+name = "netstack"
+lns = "bin/lns"
+lns_service = "bin/lns-service"
+env = { LNS_NETDEV = "netstack" }
+expect = { "loopback-witness" = "refused" }
+expected_differences = ["lease-and-resolver"]
+
+[[backend]]
+name = "vmnet"
+lns = "bin/lns"
+lns_service = "bin/lns-service"
+env = { LNS_NETDEV = "vmnet" }
+expect = { "loopback-witness" = "refused" }
+expected_differences = ["lease-and-resolver"]
+
+# A PR #424 build is a third backend: the same shape, another binary and
+# another environment.
+#
+# [[backend]]
+# name = "gvproxy"
+# lns = "builds/424/lns"
+# lns_service = "builds/424/lns-service"
+# env = { LNS_GVPROXY_BIN = "/opt/homebrew/bin/gvproxy" }

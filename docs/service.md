@@ -53,6 +53,20 @@ Two environment variables override the defaults (mostly useful for development):
   decides the next attempt rather than the one that raised it. Pre-authorized
   rules in a mixin the run names avoid the question altogether.
 
+## The guest network
+
+Every run gets its network from the service. On macOS the guest's network
+device is Apple's NAT attachment (`VZNATNetworkDeviceAttachment`): the host
+bridge leases the guest its address and carries its traffic. Egress policy is
+unaffected by which backend serves the link — every request still goes through
+the in-guest proxy, so the approval cards and the [audit](audit.md) chain read
+the same.
+
+Contributors comparing one backend with another run the parity harness in
+[`tests/parity/`](../tests/parity/README.md): it puts the same transfer,
+half-close, reset and lifecycle cases to a guest on each backend and diffs the
+two results. It needs a macOS host and a real microVM, so CI never runs it.
+
 ## Updating
 
 Update both binaries to the latest release:

@@ -1,0 +1,37 @@
+[package]
+name = "net-parity"
+version = "0.25.0"
+edition = "2024"
+publish = false
+
+# Phase-one verification harness for the guest network backends
+# (issue #380, PR #426). It drives REAL `lns` and `lns-service`
+# binaries against a REAL microVM on a macOS host, so nothing in CI
+# runs it: `make e2e`, `make test` and the coverage gate never boot a
+# guest. CI compiles it and runs its own unit tests, which stay
+# in-process over loopback.
+#
+# Run it with:
+#
+#   cargo run -p net-parity -- run --config parity.toml --backend netstack
+#
+# See tests/parity/README.md.
+
+[[bin]]
+# `parity` is the command; the package is `net-parity`, because `make parity`
+# already names the gate's environment-parity step.
+name = "parity"
+path = "src/main.rs"
+
+[dependencies]
+anyhow     = "=1.0.102"
+clap       = { version = "=4.6.1", features = ["derive"] }
+hex        = "=0.4.3"
+libc       = "=0.2.186"
+serde      = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2       = "=0.10.9"
+toml       = "=0.8.23"
+
+[dev-dependencies]
+tempfile = "=3.27.0"

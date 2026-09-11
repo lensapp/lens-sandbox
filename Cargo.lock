@@ -3794,6 +3794,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "net-parity"
+version = "0.25.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "nfq"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
