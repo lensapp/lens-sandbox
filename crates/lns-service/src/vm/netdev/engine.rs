@@ -47,6 +47,9 @@ const UDP_DATAGRAM_BYTES: usize = 65_535;
 
 const PACKET_TTL: u8 = 64;
 
+/// How many distinct refused destinations one run logs before it only counts them.
+const MAX_LOGGED_REFUSALS: usize = 1024;
+
 /// How much of a refused datagram an ICMP port-unreachable carries back, per RFC 792.
 const UNREACHABLE_QUOTE_BYTES: usize = 8;
 
@@ -230,7 +233,7 @@ pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running
     let tcp = tcp.context("the stack was built without its TCP listener")?;
 
     let link = Arc::new(Mutex::new(Link::new(GATEWAY_MAC, config.lease.gateway)));
-    let refused = Arc::new(Mutex::new(HashSet::new()));
+    let refused = Arc::new(Mutex::new(Refusals::default()));
     let counters = Arc::new(Counters::default());
     let allowance = Arc::new(Allowance::of(config.limits));
     let (stack_sink, stack_stream) = stack.split();
@@ -496,18 +499,33 @@ async fn to_guest(link: Arc<Mutex<Link>>, mut stack: StackStream, frames: Sender
     }
 }
 
-type Refused = Arc<Mutex<HashSet<SocketAddr>>>;
+type Refused = Arc<Mutex<Refusals>>;
+
+/// A guest that scans ports refuses a destination it never repeats, so what is remembered to log once is bounded and the count is not.
+#[derive(Default)]
+struct Refusals {
+    logged: HashSet<SocketAddr>,
+    capped: bool,
+}
 
 fn note_refusal(refused: &Refused, counters: &Counters, destination: SocketAddr, refusal: Refusal) {
     counters.note(refusal.reason());
-    if refused
-        .lock()
-        .expect("refusals poisoned")
-        .insert(destination)
-    {
-        let reason = refusal.reason();
-        log::debug!("the guest network refused {destination}: {reason}");
+    let mut refusals = refused.lock().expect("refusals poisoned");
+    if refusals.logged.contains(&destination) {
+        return;
     }
+    if refusals.logged.len() >= MAX_LOGGED_REFUSALS {
+        if !refusals.capped {
+            refusals.capped = true;
+            log::debug!(
+                "the guest network has refused {MAX_LOGGED_REFUSALS} distinct destinations; further refusals are counted, not logged"
+            );
+        }
+        return;
+    }
+    refusals.logged.insert(destination);
+    let reason = refusal.reason();
+    log::debug!("the guest network refused {destination}: {reason}");
 }
 
 async fn accept_tcp(
@@ -1583,6 +1601,43 @@ mod tests {
         assert!(
             guest.device.outbound.send(Vec::new()).await.is_err(),
             "and nothing reads the link"
+        );
+    }
+
+    #[test]
+    fn a_guest_that_scans_the_boundary_stops_growing_the_refusal_log_but_not_the_count() {
+        let refused: Refused = Arc::new(Mutex::new(Refusals::default()));
+        let counters = Counters::default();
+        let scanned = MAX_LOGGED_REFUSALS + 16;
+
+        for port in 0..scanned {
+            let destination = SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                u16::try_from(port + 1).unwrap(),
+            );
+            note_refusal(&refused, &counters, destination, Refusal::Loopback);
+        }
+        note_refusal(
+            &refused,
+            &counters,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+            Refusal::Loopback,
+        );
+
+        let refusals = refused.lock().expect("refusals poisoned");
+        assert_eq!(
+            refusals.logged.len(),
+            MAX_LOGGED_REFUSALS,
+            "a scan may not grow the set of destinations the run remembers"
+        );
+        assert!(
+            refusals.capped,
+            "and the run says once that it counts the rest without logging them"
+        );
+        assert_eq!(
+            counters.seen(Refusal::Loopback.reason()),
+            u64::try_from(scanned + 1).unwrap(),
+            "every refusal is counted, logged or not"
         );
     }
 
