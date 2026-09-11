@@ -10,21 +10,24 @@ struct ApprovalHistory: View {
         VStack(spacing: 0) {
             LNSPageHeading(title: "Approvals", subtitle: model.sandboxName)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(24)
-            HStack {
-                SandboxFilter(model: model)
-                Menu {
-                    Button("All answers") { model.filters.answers = []; model.clearHistory() }
-                    Divider()
-                    ForEach(answers, id: \.self) { answer in
-                        Toggle(answer.capitalized, isOn: Binding(
-                            get: { model.filters.answers.contains(answer) },
-                            set: { on in
-                                if on { model.filters.answers.insert(answer) } else { model.filters.answers.remove(answer) }
-                                model.clearHistory()
-                            }
-                        ))
-                    }
-                } label: { Label(model.filters.answers.isEmpty ? "All answers" : "\(model.filters.answers.count) answers", systemImage: "line.3.horizontal.decrease.circle") }
+            HStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    SandboxFilter(model: model)
+                    Menu {
+                        Button("All answers") { model.filters.answers = []; model.clearHistory() }
+                        Divider()
+                        ForEach(answers, id: \.self) { answer in
+                            Toggle(answer.capitalized, isOn: Binding(
+                                get: { model.filters.answers.contains(answer) },
+                                set: { on in
+                                    if on { model.filters.answers.insert(answer) } else { model.filters.answers.remove(answer) }
+                                    model.clearHistory()
+                                }
+                            ))
+                        }
+                    } label: { Label(model.filters.answers.isEmpty ? "All answers" : "\(model.filters.answers.count) answers", systemImage: "line.3.horizontal.decrease.circle") }
+                }
+                .fixedSize(horizontal: true, vertical: false)
                 Spacer()
                 LNSStatus(title: "\(model.waitingCount) waiting", color: model.waitingCount > 0 ? LNSTheme.warning : LNSTheme.muted)
             }

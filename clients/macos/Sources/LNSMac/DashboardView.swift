@@ -166,20 +166,23 @@ struct AuditTimeline: View {
                     .onExitCommand { model.filters.search = ""; searchFocused = false }
             }
             .padding(.horizontal, 24).padding(.bottom, 12)
-            HStack {
-                SandboxFilter(model: model)
+            HStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    SandboxFilter(model: model)
+                        .disabled(!model.filters.search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Menu {
+                        Button("All event kinds") { model.filters.kinds = [] }
+                        Divider()
+                        ForEach(kinds, id: \.self) { kind in
+                            Toggle(kind.capitalized, isOn: Binding(
+                                get: { model.filters.kinds.contains(kind) },
+                                set: { on in if on { model.filters.kinds.insert(kind) } else { model.filters.kinds.remove(kind) } }
+                            ))
+                        }
+                    } label: { Label(model.filters.kinds.isEmpty ? "All event kinds" : "\(model.filters.kinds.count) kinds", systemImage: "line.3.horizontal.decrease.circle") }
                     .disabled(!model.filters.search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Menu {
-                    Button("All event kinds") { model.filters.kinds = [] }
-                    Divider()
-                    ForEach(kinds, id: \.self) { kind in
-                        Toggle(kind.capitalized, isOn: Binding(
-                            get: { model.filters.kinds.contains(kind) },
-                            set: { on in if on { model.filters.kinds.insert(kind) } else { model.filters.kinds.remove(kind) } }
-                        ))
-                    }
-                } label: { Label(model.filters.kinds.isEmpty ? "All event kinds" : "\(model.filters.kinds.count) kinds", systemImage: "line.3.horizontal.decrease.circle") }
-                .disabled(!model.filters.search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .fixedSize(horizontal: true, vertical: false)
                 Spacer()
                 Text("\(model.events.count) events").font(.caption).foregroundStyle(LNSTheme.muted)
             }
