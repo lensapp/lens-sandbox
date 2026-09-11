@@ -10,6 +10,7 @@ use etherparse::{
 };
 use futures_util::{SinkExt, Stream, StreamExt};
 use netstack_smoltcp::StackBuilder;
+use smoltcp::wire::{Ipv4Packet, UdpPacket};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -54,6 +55,12 @@ const CHANNEL_DEPTH: usize = 512;
 const UDP_IDLE: Duration = Duration::from_secs(60);
 
 const UDP_DATAGRAM_BYTES: usize = 65_535;
+
+/// How many items the library refuses to hand over in a row before the reader waits between polls.
+const UNUSABLE_BEFORE_WAITING: usize = 4;
+
+/// How long the reader waits between polls once the library hands nothing over.
+const UNUSABLE_WAIT: Duration = Duration::from_millis(100);
 
 const PACKET_TTL: u8 = 64;
 
@@ -366,6 +373,34 @@ pub const DROPPED_DNS_IN_FLIGHT: &str = "a DNS query over the guest's limit";
 pub const DROPPED_FRAGMENT: &str = "an IPv4 fragment, which this gateway does not reassemble";
 pub const DROPPED_PROTOCOL: &str = "a packet of a protocol this gateway does not carry";
 pub const DROPPED_MALFORMED: &str = "a packet too short or malformed to read";
+pub const DROPPED_UNUSABLE: &str = "a packet the stack would not hand over";
+
+/// The library ends its stream on one item it cannot parse, which would end UDP and DNS for the rest of the run; a run reads on until it is cancelled.
+async fn next_usable<S: Stream + Unpin>(
+    stream: &mut S,
+    counters: &Counters,
+    token: &CancellationToken,
+) -> Option<S::Item> {
+    let mut unusable = 0usize;
+    loop {
+        let item = tokio::select! {
+            () = token.cancelled() => return None,
+            item = stream.next() => item,
+        };
+        if item.is_some() {
+            return item;
+        }
+        unusable += 1;
+        if unusable > UNUSABLE_BEFORE_WAITING {
+            tokio::select! {
+                () = token.cancelled() => return None,
+                () = tokio::time::sleep(UNUSABLE_WAIT) => {}
+            }
+        } else {
+            counters.note(DROPPED_UNUSABLE);
+        }
+    }
+}
 
 pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running> {
     let (stack, runner, udp, tcp) = StackBuilder::default()
@@ -464,6 +499,7 @@ async fn from_guest(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Outcome {
     Frame(Vec<u8>),
     Packet(Vec<u8>),
@@ -478,6 +514,9 @@ fn ingress(
     link: &Link,
     packet: &[u8],
 ) -> Outcome {
+    let Some(packet) = whole_packet(packet) else {
+        return Outcome::Dropped(DROPPED_MALFORMED);
+    };
     match classify(config, admissions, packet) {
         Ingress::Dhcp(reply) => Outcome::Frame(dhcp_frame(config, &reply)),
         Ingress::Answer(packet) => Outcome::Frame(link.send_ipv4(&packet)),
@@ -496,6 +535,12 @@ fn ingress(
             Outcome::Frame(link.send_ipv4(&answer))
         }
     }
+}
+
+/// The packet the guest sent, trimmed to the length its own header states: a frame padded to the 60-byte ethernet minimum carries trailing bytes the stack must not read as payload.
+fn whole_packet(packet: &[u8]) -> Option<&[u8]> {
+    let checked = Ipv4Packet::new_checked(packet).ok()?;
+    packet.get(..usize::from(checked.total_len()))
 }
 
 /// What the host does with one IPv4 packet the guest sent, decided before any socket exists for it.
@@ -538,6 +583,9 @@ fn udp_ingress(config: &Config, source: Ipv4Addr, destination: Ipv4Addr, rest: &
     let Ok((udp, payload)) = UdpHeader::from_slice(rest) else {
         return Ingress::Dropped(DROPPED_MALFORMED);
     };
+    if UdpPacket::new_checked(rest).is_err() {
+        return Ingress::Dropped(DROPPED_MALFORMED);
+    }
     if udp.destination_port == dhcp::SERVER_PORT {
         return match dhcp::answer(&config.lease, payload) {
             Some(reply) => Ingress::Dhcp(reply),
@@ -733,7 +781,9 @@ async fn accept_tcp<G, S>(
     S: Stream<Item = (G, SocketAddr, SocketAddr)> + Unpin,
     G: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    while let Some((guest, source, destination)) = listener.next().await {
+    while let Some((guest, source, destination)) =
+        next_usable(&mut listener, &counters, &relays.token).await
+    {
         let Some(claim) = admissions.claim((source, destination)) else {
             counters.note(DROPPED_TCP_UNADMITTED);
             continue;
@@ -777,7 +827,9 @@ async fn accept_udp(
 ) {
     let resolver = gateway_resolver(&config);
     let mut flows: HashMap<(SocketAddr, SocketAddr), Sender<Vec<u8>>> = HashMap::new();
-    while let Some((payload, source, destination)) = datagrams.next().await {
+    while let Some((payload, source, destination)) =
+        next_usable(&mut datagrams, &counters, &relays.token).await
+    {
         if destination == resolver {
             answer_dns(
                 &gateway, &allowance, &counters, &relays, payload, source, &replies,
@@ -1558,22 +1610,36 @@ mod tests {
         sweep.abort();
     }
 
+    /// The state a spawned loop reaches on its own, waited for rather than read at once.
+    async fn eventually(what: &str, mut reached: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        while !reached() {
+            assert!(tokio::time::Instant::now() < deadline, "{what}");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stream_whose_flow_has_already_ended_is_dropped_rather_than_carried() {
         let admissions = admissions(Limits::default());
         let counters = Arc::new(Counters::default());
+        let relays = Relays::new();
         let (guest, _test_side) = tokio::io::duplex(64);
         let arriving = flow("192.168.127.2:45000", "93.184.216.34:443");
 
-        accept_tcp(
+        let accepting = tokio::spawn(accept_tcp(
             Arc::clone(&admissions),
             Arc::clone(&counters),
-            Relays::new(),
+            relays.clone(),
             futures_util::stream::iter(vec![(guest, arriving.0, arriving.1)]),
-        )
+        ));
+        eventually("the stream was never judged", || {
+            counters.seen(DROPPED_TCP_UNADMITTED) == 1
+        })
         .await;
+        relays.token.cancel();
 
-        assert_eq!(counters.seen(DROPPED_TCP_UNADMITTED), 1);
+        accepting.await.expect("the accept loop ends with the run");
         assert_eq!(admissions.held(), 0);
     }
 
@@ -1590,26 +1656,25 @@ mod tests {
             address,
         );
         admissions.admit(carried);
-
-        accept_tcp(
+        let accepting = tokio::spawn(accept_tcp(
             Arc::clone(&admissions),
             Arc::new(Counters::default()),
             relays.clone(),
             futures_util::stream::iter(vec![(guest, carried.0, carried.1)]),
-        )
-        .await;
-        drop(test_side);
-        relays.tracker.close();
-        tokio::time::timeout(PATIENCE, relays.tracker.wait())
-            .await
-            .expect("the relay ends when the guest's end closes");
+        ));
 
-        assert!(accepted.await.unwrap(), "the host saw the flow");
-        assert_eq!(
-            admissions.held(),
-            0,
-            "and the flow left the table with its relay"
+        assert!(
+            tokio::time::timeout(PATIENCE, accepted)
+                .await
+                .expect("the host is connected to")
+                .unwrap(),
+            "the host saw the flow"
         );
+        drop(test_side);
+        eventually("the flow never left the table", || admissions.held() == 0).await;
+
+        relays.token.cancel();
+        accepting.await.expect("the accept loop ends with the run");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1814,6 +1879,158 @@ mod tests {
                 .for_each(|(at, byte)| *byte = at as u8);
             Link::new(GATEWAY_MAC, Ipv4Addr::new(192, 168, 127, 1)).receive(&arp);
         }
+    }
+
+    /// One packet judged the way a run judges it, from the link inwards.
+    fn received(config: &Config, packet: &[u8]) -> Outcome {
+        ingress(
+            config,
+            &Arc::new(Mutex::new(Refusals::default())),
+            &Counters::default(),
+            &admissions(Limits::default()),
+            &Link::new(GATEWAY_MAC, config.lease.gateway),
+            packet,
+        )
+    }
+
+    #[test]
+    fn a_datagram_that_declares_more_bytes_than_it_carries_is_dropped_before_the_stack_reads_it() {
+        let mut packet = udp_packet("1.1.1.1:53", b"a query");
+        let length = Ipv4Header::MIN_LEN + 4;
+        let declared = u16::from_be_bytes([packet[length], packet[length + 1]]) + 100;
+        packet[length..length + 2].copy_from_slice(&declared.to_be_bytes());
+
+        assert_eq!(
+            received(&config(Boundary::around(SUBNET, 24)), &packet),
+            Outcome::Dropped(DROPPED_MALFORMED),
+            "the stack ends its UDP stream on a datagram it cannot parse, so it never gets one"
+        );
+    }
+
+    #[test]
+    fn a_packet_that_declares_more_bytes_than_the_frame_carries_is_dropped() {
+        let mut packet = udp_packet("1.1.1.1:53", b"a query");
+        let declared = u16::try_from(packet.len() + 100).unwrap();
+        packet[2..4].copy_from_slice(&declared.to_be_bytes());
+
+        assert_eq!(
+            received(&config(Boundary::around(SUBNET, 24)), &packet),
+            Outcome::Dropped(DROPPED_MALFORMED)
+        );
+    }
+
+    #[test]
+    fn a_frame_padded_to_the_ethernet_minimum_is_carried_at_its_own_length() {
+        let packet = udp_packet("1.1.1.1:53", b"q");
+        let mut padded = packet.clone();
+        padded.resize(60, 0);
+
+        assert_eq!(
+            received(&config(Boundary::around(SUBNET, 24)), &padded),
+            Outcome::Packet(packet),
+            "the padding of a short frame is not payload"
+        );
+    }
+
+    #[test]
+    fn the_engine_reads_a_segment_exactly_as_the_stack_would() {
+        let whole = tcp_packet("93.184.216.34:443", true);
+        let (_, segment) = Ipv4Header::from_slice(&whole).unwrap();
+        for offset in [0x00u8, 0x40, 0x50, 0x60, 0xf0] {
+            for cut in 0..segment.len() + 4 {
+                let mut mutated = segment[..segment.len().min(cut)].to_vec();
+                if mutated.len() > 12 {
+                    mutated[12] = offset;
+                }
+                assert_eq!(
+                    TcpHeader::from_slice(&mutated).is_err(),
+                    smoltcp::wire::TcpPacket::new_checked(&mutated[..]).is_err(),
+                    "a segment this engine reads is one the stack reads ({offset:#x}, {cut} bytes)"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_that_hands_nothing_over_is_read_on_rather_than_taken_as_its_end() {
+        let counters = Counters::default();
+        let token = CancellationToken::new();
+        let mut unusable = 0;
+        let mut items = futures_util::stream::poll_fn(move |_| {
+            unusable += 1;
+            std::task::Poll::Ready((unusable > UNUSABLE_BEFORE_WAITING + 2).then_some(unusable))
+        });
+
+        let item = next_usable(&mut items, &counters, &token).await;
+
+        assert_eq!(item, Some(UNUSABLE_BEFORE_WAITING + 3));
+        assert_eq!(
+            counters.seen(DROPPED_UNUSABLE),
+            u64::try_from(UNUSABLE_BEFORE_WAITING).unwrap(),
+            "what the stack would not hand over is counted, and the reader waits after the first few"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reader_of_a_stream_that_hands_nothing_over_ends_with_its_run() {
+        let counters = Counters::default();
+        let token = CancellationToken::new();
+        let mut nothing = futures_util::stream::poll_fn(|_| std::task::Poll::Ready(None::<u8>));
+        let cancelling = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(UNUSABLE_WAIT * 4).await;
+            cancelling.cancel();
+        });
+
+        assert_eq!(next_usable(&mut nothing, &counters, &token).await, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_malformed_datagram_does_not_end_udp_or_dns_for_the_rest_of_the_run() {
+        let mut guest = FakeGuest::on(Boundary::Permissive);
+        guest.lease().await;
+        let gateway = Ipv4Addr::new(192, 168, 127, 1);
+
+        for mut packet in [
+            {
+                let mut packet = udp_packet("1.1.1.1:53", b"a query");
+                let length = Ipv4Header::MIN_LEN + 4;
+                let declared = u16::from_be_bytes([packet[length], packet[length + 1]]) + 100;
+                packet[length..length + 2].copy_from_slice(&declared.to_be_bytes());
+                packet
+            },
+            {
+                let mut packet = udp_packet("1.1.1.1:53", b"a query");
+                let declared = u16::try_from(packet.len() + 100).unwrap();
+                packet[2..4].copy_from_slice(&declared.to_be_bytes());
+                packet
+            },
+            {
+                let mut packet = tcp_packet("93.184.216.34:443", true);
+                packet[Ipv4Header::MIN_LEN + 12] = 0xf0;
+                packet
+            },
+        ] {
+            packet.truncate(packet.len());
+            let frame = super::super::link::wrap(
+                GUEST_MAC,
+                GATEWAY_MAC,
+                etherparse::EtherType::IPV4,
+                &packet,
+            );
+            guest.device.outbound.send(frame).await.unwrap();
+            guest.settle().await;
+        }
+
+        let answer = guest.ask("example.test", gateway).await;
+
+        assert_eq!(
+            answer.answers[0].data,
+            hickory_proto::rr::RData::A(hickory_proto::rr::rdata::A(
+                "93.184.216.34".parse().unwrap()
+            )),
+            "one datagram the stack could not read may not end DNS for the run"
+        );
     }
 
     #[test]
