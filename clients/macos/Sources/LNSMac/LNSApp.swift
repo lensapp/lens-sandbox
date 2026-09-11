@@ -14,11 +14,6 @@ struct LNSApp: App {
         .defaultSize(width: 1100, height: 740)
         .windowResizability(.contentMinSize)
         .commands { DesktopCommands(model: delegate.model) }
-        Window("LNS Approvals", id: "approvals") {
-            ApprovalList(model: delegate.model)
-                .frame(minWidth: 440, minHeight: 320)
-        }
-        .defaultSize(width: 520, height: 620)
         MenuBarExtra {
             MenuContent(model: delegate.model)
         } label: {
@@ -45,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let panel = ApprovalPanel(model: model)
         self.panel = panel
         model.onSnapshot = { [weak panel] in panel?.update($0) }
+        model.onShowApprovals = { [weak panel] in panel?.show(focus: true) }
         model.start()
     }
 
@@ -67,10 +63,7 @@ struct MenuContent: View {
         Button("Approvals…") {
             dashboard(.approvals)
         }
-        Button("Live Requests…") {
-            openWindow(id: "approvals")
-            NSApplication.shared.activate(ignoringOtherApps: true)
-        }
+        Button("Live Requests…", action: model.showApprovals)
         if !model.connected {
             Button(model.startingService ? "Starting Service…" : "Start Service", action: model.startService)
                 .disabled(!model.canStartService)
@@ -92,18 +85,28 @@ struct MenuContent: View {
 @MainActor
 final class ApprovalPanel: NSPanel {
     private var presentation = ApprovalPresentation()
+    private var hosting: NSHostingView<ApprovalOverlay>?
+    private var anchor: NSRect?
 
     init(model: AppModel) {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
-                   styleMask: [.titled, .closable, .resizable, .nonactivatingPanel],
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 440, height: 289),
+                   styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
-        title = "LNS Approval"
+        title = "LNS Access Requests"
         level = .floating
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         becomesKeyOnlyIfNeeded = false
-        contentView = NSHostingView(rootView: ApprovalList(model: model))
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        appearance = NSAppearance(named: .darkAqua)
+        let hosting = NSHostingView(rootView: ApprovalOverlay(model: model,
+            hide: { [weak self] in self?.orderOut(nil) },
+            resize: { [weak self] in self?.resize(to: $0) }))
+        self.hosting = hosting
+        contentView = hosting
     }
 
     override var canBecomeKey: Bool { true }
@@ -115,11 +118,25 @@ final class ApprovalPanel: NSPanel {
         case .unchanged: return
         case .show: break
         }
+        show()
+    }
+
+    func show(focus: Bool = false) {
         let pointer = NSEvent.mouseLocation
         if let screen = NSScreen.screens.first(where: { NSMouseInRect(pointer, $0.frame, false) }) ?? NSScreen.main {
             let bounds = screen.visibleFrame
-            setFrameTopLeftPoint(NSPoint(x: bounds.maxX - frame.width - 20, y: bounds.maxY - 20))
+            anchor = bounds.insetBy(dx: 20, dy: 20)
+            hosting?.rootView.maximumHeight = min(620, bounds.height - 40)
+            resize(to: min(frame.height, bounds.height - 40))
         }
         orderFrontRegardless()
+        if focus { makeKey() }
+    }
+
+    private func resize(to height: CGFloat) {
+        let top = anchor?.maxY ?? frame.maxY
+        let right = anchor?.maxX ?? frame.maxX
+        let size = NSSize(width: 440, height: height)
+        setFrame(NSRect(x: right - size.width, y: top - size.height, width: size.width, height: size.height), display: true)
     }
 }

@@ -166,3 +166,28 @@ struct LNSNavigationStyle: ButtonStyle {
             .onHover { hovering = $0 }
     }
 }
+
+struct LNSApprovalActionStyle: ButtonStyle {
+    var prominent = false
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.isFocused) private var focused
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(prominent ? LNSTheme.heading : LNSTheme.text)
+            .padding(.horizontal, 12).frame(height: 32)
+            .background(prominent ? LNSTheme.accent : LNSTheme.raised, in: RoundedRectangle(cornerRadius: 4))
+            .overlay {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.12 : hovering ? 0.05 : 0))
+                    .allowsHitTesting(false)
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(focused ? LNSTheme.heading : prominent ? .clear : LNSTheme.border, lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+            .opacity(enabled ? 1 : 0.45)
+            .onHover { hovering = $0 }
+    }
+}

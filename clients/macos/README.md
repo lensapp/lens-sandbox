@@ -169,7 +169,22 @@ signs the macOS service for virtualization; use `bin/lns-service` and `bin/lns`
 in the commands above to test real workloads with that release build.
 
 The menu's **Audit** and **Approvals** items open the dashboard. **Live Requests**
-opens the live approval list; new held requests also raise the floating panel.
+opens the same desktop approval overlay used for new held requests. It is
+borderless, uses the app's dark styling, and grows to fit its cards up to a
+scrollable height limit. New requests appear without taking keyboard focus;
+opening Live Requests explicitly focuses the overlay. It works with the dashboard
+closed and across Spaces, including fullscreen apps.
+
+Network cards show **Deny Once** and **Allow Once**. Their action menu contains
+**Always Allow**, **Always Deny**, and **Dismiss Request**. **View details** opens
+the request in the main app's Approvals view with its full action and connector
+access details. Connector notifications include a single picker for saved
+connections, access that needs no account, and **New connection…**. Choose a
+saved connection and **Grant Access**, or enter a new name and credentials inline
+and choose **Connect & Grant**. Changing the selection clears unsubmitted
+credentials. **Skip Connector** stays in the card's action menu.
+Closing the overlay or pressing Escape hides it without answering any requests.
+Reopen it from Live Requests (⌘3).
 
 Without an override, the app uses
 `~/Library/Application Support/run.lns/service.sock`.
@@ -213,11 +228,11 @@ coordinated app/service updates are still required before shipping it.
 - Disconnecting clears the app's visible snapshot and disables answering. It
   does not dismiss service approvals or retry commands. Credential values are
   cleared from the input controls after submission and are never logged.
-- Closing the panel hides it. **Dismiss Request** explicitly fails the held
+- Closing the overlay hides it. **Dismiss Request** explicitly fails the held
   request without recording a decision. **Quit Interface** leaves the service
   running; **Stop Service and Quit LNS** sends `Shutdown`.
-  New failure notices also raise the panel, even after the last request is gone;
-  unchanged notices do not repeatedly bring a manually hidden panel forward.
+  New failure notices also raise the overlay, even after the last request is gone;
+  unchanged notices do not repeatedly bring a manually hidden overlay forward.
 
 ## Verification
 

@@ -7,6 +7,7 @@ struct DashboardView: View {
     @ObservedObject var model: DashboardModel
     @ObservedObject var live: AppModel
     var mark: NSImage?
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         NavigationSplitView {
@@ -20,7 +21,7 @@ struct DashboardView: View {
                 case .connectors: ConnectorCards(model: model)
                 case .registries: RegistryList(model: model)
                 case .audit: AuditTimeline(model: model)
-                case .approvals: ApprovalHistory(model: model)
+                case .approvals: ApprovalHistory(model: model, live: live)
                 }
             }
             .frame(minWidth: 540, minHeight: 400)
@@ -45,8 +46,18 @@ struct DashboardView: View {
             ManagementForm(model: model, sheet: sheet).id(sheet.id)
         }
         .sheet(isPresented: $model.creatingSandbox) { SandboxCreateForm(model: model) }
-        .onChange(of: model.page) { _ in model.selectedEvent = nil; model.clearHistory() }
-        .onAppear { NSApplication.shared.setActivationPolicy(.regular) }
+        .onChange(of: model.page) { page in
+            model.selectedEvent = nil; model.clearHistory()
+            if page != .approvals { live.reviewingApprovalID = nil }
+        }
+        .onAppear {
+            NSApplication.shared.setActivationPolicy(.regular)
+            let open = openWindow
+            live.openDashboard = {
+                open(id: "dashboard")
+                NSApplication.shared.activate(ignoringOtherApps: true)
+            }
+        }
     }
 
     private var sidebar: some View {
