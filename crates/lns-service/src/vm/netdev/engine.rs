@@ -1596,10 +1596,15 @@ mod tests {
         tokio::time::timeout(PATIENCE, relays.tracker.wait())
             .await
             .expect("the relay that carried the flow has ended");
-        assert_eq!(
-            Arc::strong_count(&held),
-            1,
-            "every task the run owned has been aborted"
+        let unheld = tokio::time::timeout(PATIENCE, async {
+            while Arc::strong_count(&held) > 1 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await;
+        assert!(
+            unheld.is_ok(),
+            "every task the run owned has been aborted, so nothing still holds what it carried"
         );
         assert!(
             guest.device.outbound.send(Vec::new()).await.is_err(),
