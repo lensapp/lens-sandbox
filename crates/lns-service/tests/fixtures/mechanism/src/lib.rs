@@ -4,8 +4,8 @@
 //! component does, so what the tests need is a component that does one legible
 //! thing and reports which way the host answered it.
 //!
-//! One build compiles one feature of the twenty, so what the other nineteen use
-//! is dead in each of them — and `make lint` builds them all.
+//! One build compiles one feature of the twenty-three, so what the other
+//! twenty-two use is dead in each of them — and `make lint` builds them all.
 #![allow(unused_imports, dead_code)]
 
 wit_bindgen::generate!({ world: "mechanism", path: "../../../wit" });
@@ -279,7 +279,12 @@ fn renewed(values: Vec<Answer>) -> Vec<Answer> {
         .collect()
 }
 
-#[cfg(not(any(feature = "hurrying", feature = "refusing", feature = "keeping")))]
+#[cfg(not(any(
+    feature = "hurrying",
+    feature = "refusing",
+    feature = "keeping",
+    feature = "boasting"
+)))]
 fn renew(values: Vec<Answer>, now_millis: u64) -> Result<Outcome, String> {
     Ok(Outcome {
         values: renewed(values),
@@ -321,6 +326,58 @@ fn dropped() -> Result<(), String> {
 #[cfg(feature = "clinging")]
 fn dropped() -> Result<(), String> {
     Err("this component will not let go".to_string())
+}
+
+/// Claims authority under a name that could redraw the line it is shown on.
+#[cfg(feature = "boasting")]
+fn work(_now_millis: u64) -> Step {
+    Step::Done(Outcome {
+        values: vec![Answer {
+            name: "access_token".to_string(),
+            value: "abc".to_string(),
+        }],
+        authority: vec!["read\u{1b}[2J …(cut)".to_string()],
+        expires_at_millis: None,
+    })
+}
+
+/// A renewal claims the same thing a connect did, because nobody is watching this one.
+#[cfg(feature = "boasting")]
+fn renew(_values: Vec<Answer>, _now_millis: u64) -> Result<Outcome, String> {
+    Ok(Outcome {
+        values: vec![Answer {
+            name: "access_token".to_string(),
+            value: "abc".to_string(),
+        }],
+        authority: vec!["read\u{1b}[2J".to_string()],
+        expires_at_millis: None,
+    })
+}
+
+/// Claims more authority, by length, than one call may speak.
+#[cfg(feature = "sprawling")]
+fn work(_now_millis: u64) -> Step {
+    Step::Done(Outcome {
+        values: vec![Answer {
+            name: "access_token".to_string(),
+            value: "abc".to_string(),
+        }],
+        authority: vec!["r".repeat(3000), "w".repeat(3000)],
+        expires_at_millis: None,
+    })
+}
+
+/// Claims more separate authorities than one line can name, each of them short.
+#[cfg(feature = "swarming")]
+fn work(_now_millis: u64) -> Step {
+    Step::Done(Outcome {
+        values: vec![Answer {
+            name: "access_token".to_string(),
+            value: "abc".to_string(),
+        }],
+        authority: (0..64).map(|n| format!("s{n}")).collect(),
+        expires_at_millis: None,
+    })
 }
 
 export!(Fixture);
