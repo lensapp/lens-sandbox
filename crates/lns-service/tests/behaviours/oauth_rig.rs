@@ -121,7 +121,18 @@ fn device() -> OAuth {
         token_endpoint: "https://auth.example/token".into(),
         device_authorization_endpoint: "https://auth.example/device".into(),
         verification_hosts: vec!["auth.example".into()],
-        scopes: vec!["read".into()],
+        scope_options: vec![
+            lns_artifact::connector::oauth::ScopeOption {
+                name: "read-only".into(),
+                label: "Read only".into(),
+                scopes: vec!["read".into()],
+            },
+            lns_artifact::connector::oauth::ScopeOption {
+                name: "read-write".into(),
+                label: "Read and write".into(),
+                scopes: vec!["read".into(), "write".into()],
+            },
+        ],
     }
 }
 
@@ -150,7 +161,18 @@ impl OAuthRig {
                     path: "/callback".into(),
                     port: Some(53682),
                 },
-                scopes: vec!["read".into()],
+                scope_options: vec![
+                    lns_artifact::connector::oauth::ScopeOption {
+                        name: "read-only".into(),
+                        label: "Read only".into(),
+                        scopes: vec!["read".into()],
+                    },
+                    lns_artifact::connector::oauth::ScopeOption {
+                        name: "read-write".into(),
+                        label: "Read and write".into(),
+                        scopes: vec!["read".into(), "write".into()],
+                    },
+                ],
             },
             _ => panic!("unknown test flow"),
         };

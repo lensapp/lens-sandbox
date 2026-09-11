@@ -74,3 +74,43 @@ fn install(w: &mut BehaviourWorld) {
     assert!(rig.fake.requests.lock().unwrap().is_empty());
     assert!(rig.fake.opened.lock().unwrap().is_empty());
 }
+
+#[when(expr = "the user chooses native permission preset {string}")]
+fn select(w: &mut BehaviourWorld, name: String) {
+    let rig = w.oauth.as_mut().unwrap();
+    let waiting = rig.waiting.as_ref().unwrap();
+    rig.waiting = Some(rig.native.select(&waiting.state, &name, rig.now).unwrap());
+}
+
+#[then(expr = "the native provider is asked for scopes {string}")]
+fn requested(w: &mut BehaviourWorld, expected: String) {
+    let rig = w.oauth.as_ref().unwrap();
+    let requests = rig.fake.requests.lock().unwrap();
+    let params: std::collections::BTreeMap<String, String> = if let Some(request) = requests.first()
+    {
+        form_urlencoded::parse(&request.body)
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect()
+    } else {
+        reqwest::Url::parse(&rig.fake.opened.lock().unwrap()[0])
+            .unwrap()
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect()
+    };
+    assert_eq!(params["scope"], expected);
+}
+
+#[then(expr = "native authorization records authority {string}")]
+fn authority(w: &mut BehaviourWorld, expected: String) {
+    assert_eq!(
+        w.oauth
+            .as_ref()
+            .unwrap()
+            .outcome
+            .as_ref()
+            .unwrap()
+            .authority,
+        expected.split(' ').map(str::to_string).collect()
+    );
+}

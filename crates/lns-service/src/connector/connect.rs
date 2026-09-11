@@ -118,6 +118,9 @@ impl Driver<'_> {
 
     /// Finish what one ask started. A handle this machine did not mint, or one whose session has run out, is not one it will resume.
     pub fn answer(&self, handle: &str, values: Answers) -> Result<Turn> {
+        if self.sessions.operations().status(handle).is_some() {
+            return self.select_native_scopes(handle, values);
+        }
         let (store, mechanisms, sessions, now_millis) =
             (&self.store, self.mechanisms, self.sessions, self.now_millis);
         let Some(session) = sessions.take(handle, now_millis) else {
@@ -247,6 +250,31 @@ impl Driver<'_> {
             connector,
             connecting,
         })
+    }
+
+    fn select_native_scopes(&self, handle: &str, values: Answers) -> Result<Turn> {
+        let name = values
+            .get("scopeOption")
+            .filter(|_| values.len() == 1)
+            .ok_or_else(|| {
+                anyhow::anyhow!("select exactly one scopeOption offered by this connector")
+            })?;
+        let work = self
+            .sessions
+            .operations()
+            .inspect(handle)
+            .ok_or_else(|| anyhow::anyhow!("that OAuth operation is no longer open"))?;
+        let prepared = self.native_prepared(&work)?;
+        let native = prepared
+            .mechanism
+            .native()
+            .ok_or_else(|| anyhow::anyhow!("this operation is no longer native OAuth"))?;
+        self.sessions
+            .operations()
+            .select(handle, self.now_millis, |current| {
+                native.select(&current.session.state, name, self.now_millis)
+            })?;
+        self.native_status(handle)
     }
 
     fn native_prepared(

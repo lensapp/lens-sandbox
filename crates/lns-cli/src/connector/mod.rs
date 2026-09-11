@@ -217,6 +217,36 @@ fn single_offerable(
     }
 }
 
+fn choose_oauth_scope(
+    options: &[lns_ipc::OAuthScopeOption],
+    terminal: &mut dyn Terminal,
+    prompt: &mut impl Write,
+) -> Result<String> {
+    writeln!(prompt, "Choose permissions:")?;
+    for (index, option) in options.iter().enumerate() {
+        let scopes = if option.scopes.is_empty() {
+            "provider default permissions".into()
+        } else {
+            option.scopes.join(" ")
+        };
+        writeln!(prompt, "  {}. {}: {}", index + 1, option.label, scopes)?;
+    }
+    write!(prompt, "Permission number (blank to cancel): ")?;
+    prompt.flush()?;
+    let answer = terminal.read_answer()?;
+    let index = answer
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| index.checked_sub(1));
+    index
+        .and_then(|index| options.get(index))
+        .map(|option| option.name.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!("OAuth authorization canceled: choose an offered permission number")
+        })
+}
+
 async fn connect(
     svc: &dyn ConnectorService,
     args: &ConnectArgs,
@@ -236,9 +266,8 @@ async fn connect(
     if let Some(oauth) = &method.oauth {
         writeln!(
             prompt,
-            "OAuth destinations: {}\nRequested scopes: {}",
-            oauth.destinations.join(", "),
-            oauth.scopes.join(" ")
+            "OAuth destinations: {}",
+            oauth.destinations.join(", ")
         )?;
         if let Some(callback) = &oauth.callback {
             writeln!(prompt, "Registered callback: {callback}")?;
@@ -263,6 +292,26 @@ async fn connect(
             Response::ConnectorPending { session, progress } => {
                 if last_progress.as_ref() != Some(&progress) {
                     match &progress {
+                        lns_ipc::OAuthProgress::SelectingScopes { options } => {
+                            let choice = match choose_oauth_scope(options, terminal, prompt) {
+                                Ok(choice) => choice,
+                                Err(error) => {
+                                    send(svc, Request::CancelConnect { session }).await?;
+                                    return Err(error);
+                                }
+                            };
+                            turn = send(
+                                svc,
+                                Request::AnswerConnect {
+                                    session,
+                                    values: lns_ipc::SecretValues(
+                                        [("scopeOption".into(), choice)].into(),
+                                    ),
+                                },
+                            )
+                            .await?;
+                            continue;
+                        }
                         lns_ipc::OAuthProgress::Starting {
                             destinations,
                             scopes,
@@ -2086,11 +2135,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_or_canceled_permission_choices_cancel_the_operation() {
+        for answer in ["", "0", "2", "admin"] {
+            let svc = CannedService::with([
+                Some(listing(vec![with_methods(vec![method("token", true)])])),
+                Some(Response::ConnectorPending {
+                    session: "oauth/1".into(),
+                    progress: lns_ipc::OAuthProgress::SelectingScopes {
+                        options: vec![lns_ipc::OAuthScopeOption {
+                            name: "defaults".into(),
+                            label: "Defaults".into(),
+                            scopes: vec![],
+                        }],
+                    },
+                }),
+                Some(Response::ConnectorPending {
+                    session: "oauth/1".into(),
+                    progress: lns_ipc::OAuthProgress::Canceled,
+                }),
+            ]);
+            let result = drive(
+                ConnectorCommand::Connect(ConnectArgs {
+                    name: "some-provider".into(),
+                    method: None,
+                    label: Some("work".into()),
+                }),
+                &svc,
+                &[answer],
+                &cwd(),
+            )
+            .await;
+            assert!(result.is_err());
+            assert!(
+                matches!(&svc.sent()[2],Request::CancelConnect {session} if session=="oauth/1")
+            );
+        }
+        let mut out = Vec::new();
+        assert!(choose_oauth_scope(&[], &mut crate::terminal::NoTerminal, &mut out).is_err());
+    }
+
+    #[tokio::test]
+    async fn oauth_permission_selection_sends_only_the_offered_name() {
+        let options = vec![
+            lns_ipc::OAuthScopeOption {
+                name: "read-only".into(),
+                label: "Read only".into(),
+                scopes: vec!["read".into()],
+            },
+            lns_ipc::OAuthScopeOption {
+                name: "read-write".into(),
+                label: "Read and write".into(),
+                scopes: vec!["read".into(), "write".into()],
+            },
+        ];
+        let svc = CannedService::with([
+            Some(listing(vec![with_methods(vec![method("token", true)])])),
+            Some(Response::ConnectorPending {
+                session: "oauth/1".into(),
+                progress: lns_ipc::OAuthProgress::SelectingScopes { options },
+            }),
+            Some(Response::ConnectorConnected {
+                name: "some-provider".into(),
+                connection: "work".into(),
+                invalidated: vec![],
+            }),
+        ]);
+        let (code, seen) = drive(
+            ConnectorCommand::Connect(ConnectArgs {
+                name: "some-provider".into(),
+                method: None,
+                label: Some("work".into()),
+            }),
+            &svc,
+            &["2"],
+            &cwd(),
+        )
+        .await
+        .expect("users must be able to select offered permissions");
+        assert_eq!(code, 0);
+        assert!(seen.contains("Read only: read"));
+        assert!(seen.contains("Read and write: read write"));
+        assert!(
+            matches!(&svc.sent()[2],Request::AnswerConnect { values,.. } if values.0 == [("scopeOption".into(),"read-write".into())].into())
+        );
+    }
+
+    #[tokio::test]
     async fn browser_oauth_discloses_registration_and_waits_without_spending_answer_rounds() {
         let mut native = method("browser", true);
         native.oauth = Some(lns_ipc::OAuthDisclosure {
             destinations: vec!["https://auth.example/authorize".into()],
-            scopes: vec!["read".into()],
+            scope_options: vec![lns_ipc::OAuthScopeOption {
+                name: "read-only".into(),
+                label: "Read only".into(),
+                scopes: vec!["read".into()],
+            }],
             callback: Some("http://127.0.0.1:53682/callback".into()),
         });
         native.asks.clear();
@@ -2102,6 +2241,13 @@ mod tests {
             },
         });
         let mut responses = vec![Some(listing(vec![with_methods(vec![native])]))];
+        responses.push(Some(Response::ConnectorPending {
+            session: "oauth/1".into(),
+            progress: lns_ipc::OAuthProgress::Starting {
+                destinations: vec!["https://auth.example/authorize".into()],
+                scopes: vec!["read".into()],
+            },
+        }));
         responses.extend(vec![waiting; 20]);
         responses.push(Some(Response::ConnectorConnected {
             name: "some-provider".into(),
@@ -2130,7 +2276,7 @@ mod tests {
                 .iter()
                 .filter(|r| matches!(r, Request::ConnectStatus { .. }))
                 .count(),
-            20
+            21
         );
         assert!(
             !svc.sent()

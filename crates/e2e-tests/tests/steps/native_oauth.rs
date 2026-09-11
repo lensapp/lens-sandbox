@@ -20,7 +20,7 @@ fn install(world: &mut E2eWorld) {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
-    let document = serde_json::json!({"apiVersion":"lns.run/v1","kind":"connector","name":"native-demo","spec":{"serves":["api.example.test"],"methods":[{"name":"sign-in","auth":{"kind":"oauth_device","clientId":"test-public-client","deviceAuthorizationEndpoint":format!("https://127.0.0.1:{port}/device"),"tokenEndpoint":format!("https://127.0.0.1:{port}/token"),"verificationHosts":["example.test"]},"credentials":[{"envVar":"API_TOKEN","placeholder":"LNSPLACEHOLDER0000000000","injections":[{"kind":"bearer_header","domain":"api.example.test"}]}]}]}});
+    let document = serde_json::json!({"apiVersion":"lns.run/v1","kind":"connector","name":"native-demo","spec":{"serves":["api.example.test"],"methods":[{"name":"sign-in","auth":{"kind":"oauth_device","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"test-public-client","deviceAuthorizationEndpoint":format!("https://127.0.0.1:{port}/device"),"tokenEndpoint":format!("https://127.0.0.1:{port}/token"),"verificationHosts":["example.test"]},"credentials":[{"envVar":"API_TOKEN","placeholder":"LNSPLACEHOLDER0000000000","injections":[{"kind":"bearer_header","domain":"api.example.test"}]}]}]}});
     let path = world.home.as_ref().unwrap().path().join("native.yaml");
     std::fs::write(&path, document.to_string()).unwrap();
     assert!(matches!(
@@ -47,12 +47,54 @@ fn start(world: &mut E2eWorld) {
     );
     let Response::ConnectorPending {
         session,
-        progress: OAuthProgress::Starting { .. },
+        progress: OAuthProgress::SelectingScopes { .. },
     } = response
     else {
         panic!("native authorization did not start: {response:?}")
     };
     world.native_pending = Some(session);
+}
+
+#[when("I choose the native read-only permission preset")]
+fn select(world: &mut E2eWorld) {
+    let session = world.native_pending.clone().unwrap();
+    for _ in 0..3 {
+        assert!(matches!(
+            request(
+                world,
+                Request::ConnectStatus {
+                    session: session.clone()
+                }
+            ),
+            Response::ConnectorPending {
+                progress: OAuthProgress::SelectingScopes { .. },
+                ..
+            }
+        ));
+    }
+    assert_eq!(
+        world
+            .native_provider
+            .as_ref()
+            .unwrap()
+            .accept()
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(matches!(
+        request(
+            world,
+            Request::AnswerConnect {
+                session,
+                values: lns_ipc::SecretValues([("scopeOption".into(), "read-only".into())].into())
+            }
+        ),
+        Response::ConnectorPending {
+            progress: OAuthProgress::Starting { .. },
+            ..
+        }
+    ));
 }
 
 #[then("repeated native OAuth status requests share one background operation")]
@@ -153,7 +195,7 @@ fn callback_adapter(world: &mut E2eWorld) {
     use lns_service::connector::mechanism::traits::Mechanisms;
     use std::io::Read;
     let mechanisms = lns_service::connector::mechanism::real::RealMechanisms::new().unwrap();
-    let method = serde_json::from_value(serde_json::json!({"name":"browser","auth":{"kind":"oauth_authorization_code","clientId":"test-public","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback"}}})).unwrap();
+    let method = serde_json::from_value(serde_json::json!({"name":"browser","auth":{"kind":"oauth_authorization_code","scopeOptions":[{"name":"read-only","label":"Read only","scopes":["read"]}],"clientId":"test-public","authorizationEndpoint":"https://auth.example/authorize","tokenEndpoint":"https://auth.example/token","redirect":{"kind":"loopback"}}})).unwrap();
     let prepared = mechanisms.for_method("provider", &method, None).unwrap();
     let browser = &prepared.mechanism.native().unwrap().browser;
     let occupied = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();

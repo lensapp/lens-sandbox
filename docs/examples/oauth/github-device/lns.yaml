@@ -15,8 +15,13 @@ spec:
         tokenEndpoint: https://github.com/login/oauth/access_token
         verificationHosts:
           - github.com
-        scopes:
-          - read:user
+        scopeOptions:
+          - name: read-only
+            label: Read only
+            scopes: [read:user]
+          - name: profile-email
+            label: Read profile and email addresses
+            scopes: [read:user, user:email]
       egress:
         http:
           - match: api.github.com

@@ -23,10 +23,12 @@ struct State {
     next: u64,
     phase: Phase,
     progress: OAuthProgress,
+    scopes: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 enum Phase {
+    Select,
     Start,
     Device {
         code: String,
@@ -51,6 +53,46 @@ pub enum FlowError {
 
 impl Native {
     pub fn start(&self, host: &Host, now: u64) -> Result<Pending> {
+        pending(&State {
+            owner: random(host)?,
+            deadline: now.checked_add(900_000).ok_or(FlowError::Expired)?,
+            next: now.saturating_add(900_000),
+            phase: Phase::Select,
+            scopes: Vec::new(),
+            progress: OAuthProgress::SelectingScopes {
+                options: self.scope_options(),
+            },
+        })
+    }
+
+    pub fn scope_options(&self) -> Vec<lns_ipc::OAuthScopeOption> {
+        self.config
+            .scope_options()
+            .iter()
+            .map(|option| lns_ipc::OAuthScopeOption {
+                name: option.name.clone(),
+                label: option.label.clone(),
+                scopes: option.scopes.clone(),
+            })
+            .collect()
+    }
+
+    pub fn select(&self, bytes: &[u8], name: &str, now: u64) -> Result<Pending> {
+        let mut state = read_state(bytes)?;
+        if now >= state.deadline {
+            return Err(FlowError::Expired.into());
+        }
+        if !matches!(state.phase, Phase::Select) {
+            bail!("OAuth permissions have already been selected");
+        }
+        let option = self
+            .config
+            .scope_options()
+            .iter()
+            .find(|option| option.name == name)
+            .ok_or_else(|| {
+                anyhow::anyhow!("choose one of the connector's offered permission presets")
+            })?;
         let endpoint = match &self.config {
             OAuth::Device {
                 device_authorization_endpoint,
@@ -61,16 +103,14 @@ impl Native {
                 ..
             } => authorization_endpoint,
         };
-        pending(&State {
-            owner: random(host)?,
-            deadline: now.checked_add(900_000).ok_or(FlowError::Expired)?,
-            next: now,
-            phase: Phase::Start,
-            progress: OAuthProgress::Starting {
-                destinations: vec![endpoint.clone(), self.config.token_endpoint().into()],
-                scopes: self.config.scopes().to_vec(),
-            },
-        })
+        state.scopes = option.scopes.clone();
+        state.progress = OAuthProgress::Starting {
+            destinations: vec![endpoint.clone(), self.config.token_endpoint().into()],
+            scopes: state.scopes.clone(),
+        };
+        state.phase = Phase::Start;
+        state.next = now;
+        pending(&state)
     }
 
     pub fn advance(&self, host: &Host, bytes: &[u8], now: u64) -> Result<Advance> {
@@ -79,16 +119,17 @@ impl Native {
             self.cancel(bytes);
             return Err(FlowError::Expired.into());
         }
-        if now < state.next {
+        if now < state.next && !matches!(state.phase, Phase::Select) {
             return pending(&state).map(Advance::Pending);
         }
         match &mut state.phase {
+            Phase::Select => pending(&state).map(Advance::Pending),
             Phase::Start => {
                 self.begin(host, &mut state, now)?;
                 pending(&state).map(Advance::Pending)
             }
             Phase::Device { code, interval, .. } => {
-                match self.poll_device(host, code, interval, now)? {
+                match self.poll_device(host, code, interval, &state.scopes, now)? {
                     Some(outcome) => Ok(Advance::Done(outcome)),
                     None => {
                         state.next = now.saturating_add(*interval);
@@ -127,7 +168,8 @@ impl Native {
                             ("code", &code),
                         ],
                     )?;
-                    self.complete(&response, now).map(Advance::Done)
+                    self.complete(&response, &state.scopes, now)
+                        .map(Advance::Done)
                 }
             },
         }
@@ -145,7 +187,7 @@ impl Native {
                     device_authorization_endpoint,
                     &[
                         ("client_id", self.config.client_id()),
-                        ("scope", &self.config.scopes().join(" ")),
+                        ("scope", &state.scopes.join(" ")),
                     ],
                 )?;
                 let body = token::json_body(&response)?;
@@ -200,15 +242,19 @@ impl Native {
                     state.deadline,
                 )?;
                 let mut url = lns_artifact::connector::oauth::endpoint(authorization_endpoint)?;
-                url.query_pairs_mut().extend_pairs([
-                    ("response_type", "code"),
-                    ("client_id", self.config.client_id()),
-                    ("redirect_uri", actual.as_str()),
-                    ("state", state.owner.as_str()),
-                    ("code_challenge_method", "S256"),
-                    ("code_challenge", challenge.as_str()),
-                    ("scope", &self.config.scopes().join(" ")),
-                ]);
+                url.query_pairs_mut().extend_pairs(
+                    [
+                        ("response_type", "code"),
+                        ("client_id", self.config.client_id()),
+                        ("redirect_uri", actual.as_str()),
+                        ("state", state.owner.as_str()),
+                        ("code_challenge_method", "S256"),
+                        ("code_challenge", challenge.as_str()),
+                        ("scope", &state.scopes.join(" ")),
+                    ]
+                    .into_iter()
+                    .filter(|(key, value)| *key != "scope" || !value.is_empty()),
+                );
                 state.progress = OAuthProgress::WaitingForBrowser {
                     authorization_endpoint: authorization_endpoint.clone(),
                     redirect_uri: actual.clone(),
@@ -234,6 +280,7 @@ impl Native {
         host: &Host,
         code: &str,
         interval: &mut u64,
+        scopes: &[String],
         now: u64,
     ) -> Result<Option<Outcome>> {
         let request = token::form(
@@ -258,7 +305,7 @@ impl Native {
             Some("slow_down") => *interval = interval.saturating_add(5000),
             Some("access_denied") => return Err(FlowError::Denied.into()),
             Some("expired_token") => return Err(FlowError::Expired.into()),
-            _ => return self.complete(&response, now).map(Some),
+            _ => return self.complete(&response, scopes, now).map(Some),
         }
         if !matches!(response.status, 200 | 400) {
             bail!("OAuth provider returned an invalid polling status");
@@ -280,11 +327,11 @@ impl Native {
         }
     }
 
-    fn complete(&self, response: &HttpResponse, now: u64) -> Result<Outcome> {
+    fn complete(&self, response: &HttpResponse, scopes: &[String], now: u64) -> Result<Outcome> {
         let tokens = token::parse(
             response,
             self.binding(),
-            &self.config.scopes().iter().cloned().collect(),
+            &scopes.iter().cloned().collect(),
             now,
         )?;
         Ok(outcome(tokens))
@@ -331,7 +378,7 @@ impl Native {
     pub fn open_browser(&self, bytes: &[u8]) -> Result<()> {
         match read_state(bytes)?.phase {
             Phase::Device { url, .. } | Phase::Code { url, .. } => self.browser.open(&url),
-            Phase::Start => bail!("OAuth is still preparing authorization"),
+            Phase::Select | Phase::Start => bail!("OAuth is still preparing authorization"),
         }
     }
 }
@@ -356,7 +403,12 @@ fn outcome(tokens: token::Tokens) -> Outcome {
 }
 
 fn fetch(host: &Host, endpoint: &str, fields: &[(&str, &str)]) -> Result<HttpResponse> {
-    let request = token::form(endpoint, fields);
+    let fields: Vec<_> = fields
+        .iter()
+        .copied()
+        .filter(|(key, value)| *key != "scope" || !value.is_empty())
+        .collect();
+    let request = token::form(endpoint, &fields);
     if request.body.len() > token::MAX_BODY {
         bail!("OAuth request exceeds 65536 bytes");
     }

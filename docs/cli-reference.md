@@ -335,7 +335,9 @@ publishing that directory would produce, so a grant survives the publish, and
 naming the document records the same digest as naming its directory.
 
 Native `oauth_device` and `oauth_authorization_code` methods show the provider,
-authentication destinations, scopes, and callback configuration. Device sign-in
+authentication destinations, permission presets with exact scopes, and callback
+configuration. Choose a preset explicitly before sign-in starts; even a single
+preset requires confirmation. Blank input cancels. Device sign-in
 shows a verification URL and user code; browser sign-in opens the configured
 loopback callback flow with PKCE. The service owns polling and completion, and
 the CLI waits automatically. Ctrl-C cancels. No Wasm component or client secret

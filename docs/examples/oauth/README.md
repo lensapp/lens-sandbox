@@ -17,7 +17,9 @@ provider discovery, or a hosted broker.
    Follow GitHub's [device-flow setup and protocol instructions](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow).
 2. Copy [github-device/lns.yaml](github-device/lns.yaml) to a local directory.
    Set `clientId` to that app's public client ID. No client secret is needed.
-   The template requests `read:user`, a read-only profile scope.
+   The template offers read-only profile access (`read:user`) or profile and
+   email access (`read:user`, `user:email`), using GitHub’s
+   [documented scopes](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
 3. Install and connect:
 
    ```sh
@@ -25,7 +27,8 @@ provider discovery, or a hosted broker.
    lns connector connect github-native --method device --as personal
    ```
 
-LNS shows the verification destination and user code and opens the browser.
+Choose the profile-only preset for the identity demo. LNS then shows the
+verification destination and user code and opens the browser.
 Check the displayed code, sign in, and consent there. The service polls
 automatically; do not press Continue. Ctrl-C cancels the terminal operation.
 GitHub may return no refresh token or expiry; LNS keeps those facts as returned
@@ -49,16 +52,44 @@ and does not schedule an impossible renewal.
    lns connector connect linear-native --method browser --as personal
    ```
 
-LNS binds only `127.0.0.1`, opens the system browser with fresh PKCE S256 and state,
+Choose the Read only preset (`read`). LNS then binds only `127.0.0.1`,
+opens the system browser with fresh PKCE S256 and state,
 and waits automatically for the callback. An occupied port fails with an
 explanation; LNS does not select an unregistered replacement. Providers allowing
 variable loopback ports can use an omitted `redirect.port`; register their
 supported loopback callback form first. The actual callback URI appears in LNS.
 
-The Rust approval card supports the same sign-in, including Open browser,
+The Rust approval card presents the same permission choices before sign-in,
+with no choice selected automatically. It also supports Open browser,
 Copy code for device flow, and Cancel. Completion advances automatically. The
 Approvals list can grant an existing connection; start sign-in on the card or
 in the CLI first. Noninteractive `connect` fails without launching a browser.
+
+## Defining permission choices
+
+Both native OAuth kinds require `scopeOptions`. Each preset has a unique `name`,
+a user-facing `label`, and its complete `scopes` list. The CLI asks for a preset
+number; the approval card uses radio buttons followed by Authorize. Even a single
+preset needs confirmation. Blank terminal input or Cancel abandons the operation.
+
+```yaml
+scopeOptions:
+  - name: read-only
+    label: Read only
+    scopes: [read]
+  - name: read-write
+    label: Read and write
+    scopes: [read, write]
+```
+
+These illustrative scopes must be replaced with the provider's documented tokens.
+The built-ins join tokens with the OAuth standard space separator. Linear currently
+documents a comma separator for multiple scopes, so its template deliberately offers
+only `read`; provider-specific extensions belong in `kind: code` until supported.
+An empty scope list means provider default permissions, not zero access. The old
+fixed `auth.scopes` field is rejected. To change a saved connection's permissions,
+connect again and select a preset; authority changes require run grants again.
+Renewal retains the connection's actual permissions and never selects a new preset.
 
 ## Grant and verify direct API access
 

@@ -13,8 +13,10 @@ spec:
         clientId: REPLACE_WITH_REGISTERED_PUBLIC_CLIENT_ID
         authorizationEndpoint: https://linear.app/oauth/authorize
         tokenEndpoint: https://api.linear.app/oauth/token
-        scopes:
-          - read
+        scopeOptions:
+          - name: read-only
+            label: Read only
+            scopes: [read]
         redirect:
           kind: loopback
           path: /callback

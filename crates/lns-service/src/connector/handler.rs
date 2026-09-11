@@ -158,7 +158,15 @@ fn oauth_disclosure(method: &lns_artifact::connector::Method) -> Option<lns_ipc:
     };
     Some(lns_ipc::OAuthDisclosure {
         destinations: vec![endpoint, config.token_endpoint().into()],
-        scopes: config.scopes().to_vec(),
+        scope_options: config
+            .scope_options()
+            .iter()
+            .map(|option| lns_ipc::OAuthScopeOption {
+                name: option.name.clone(),
+                label: option.label.clone(),
+                scopes: option.scopes.clone(),
+            })
+            .collect(),
         callback,
     })
 }

@@ -1320,10 +1320,7 @@ fn render_connector_card(
                     match &stage {
                         ConnectStage::Asking(ask) => {
                             render_round(ui, ask, draft);
-                            ready.set(!matches!(
-                                ask.oauth,
-                                Some(lns_ipc::OAuthProgress::Starting { .. })
-                            ));
+                            ready.set(round_ready(ask, draft));
                         }
                         ConnectStage::Working => ready.set(false),
                         ConnectStage::Idle { .. } => ready.set(ready_to_grant(method, draft)),
@@ -1342,6 +1339,14 @@ fn render_connector_card(
                     && ready
                 {
                     chosen = Some(match stage {
+                        ConnectStage::Asking(ask)
+                            if matches!(
+                                ask.oauth,
+                                Some(lns_ipc::OAuthProgress::SelectingScopes { .. })
+                            ) =>
+                        {
+                            ConnectorChoice::Answer
+                        }
                         ConnectStage::Asking(ask) if ask.oauth.is_some() => {
                             ConnectorChoice::OpenBrowser
                         }
@@ -1438,6 +1443,16 @@ fn connect_stage<'a>(
     }
 }
 
+fn round_ready(ask: &ConnectAsk, draft: &OfferDraft) -> bool {
+    match &ask.oauth {
+        Some(lns_ipc::OAuthProgress::SelectingScopes { options }) => options
+            .iter()
+            .any(|option| draft.answers.get("scopeOption") == Some(&option.name)),
+        Some(lns_ipc::OAuthProgress::Starting { .. }) => false,
+        _ => true,
+    }
+}
+
 /// The round in the connector's own words, with the fields it asked for. Every label here is the component's, so the card says so before any of it is read (§3.2.6).
 fn render_round(ui: &mut egui::Ui, ask: &ConnectAsk, draft: &mut OfferDraft) {
     use egui::RichText;
@@ -1445,6 +1460,22 @@ fn render_round(ui: &mut egui::Ui, ask: &ConnectAsk, draft: &mut OfferDraft) {
     ui.add_space(8.0);
     if let Some(progress) = &ask.oauth {
         match progress {
+            lns_ipc::OAuthProgress::SelectingScopes { options } => {
+                ui.label("Choose permissions");
+                let selected = draft.answers.entry("scopeOption".into()).or_default();
+                for option in options {
+                    let scopes = if option.scopes.is_empty() {
+                        "provider default permissions".into()
+                    } else {
+                        option.scopes.join(" ")
+                    };
+                    ui.radio_value(
+                        selected,
+                        option.name.clone(),
+                        format!("{}: {scopes}", option.label),
+                    );
+                }
+            }
             lns_ipc::OAuthProgress::Starting { .. } => {
                 ui.label("Preparing OAuth authorization…");
             }
@@ -1534,6 +1565,14 @@ fn primary_label(stage: &ConnectStage<'_>) -> &'static str {
             if matches!(ask.oauth, Some(lns_ipc::OAuthProgress::Starting { .. })) =>
         {
             "Preparing…"
+        }
+        ConnectStage::Asking(ask)
+            if matches!(
+                ask.oauth,
+                Some(lns_ipc::OAuthProgress::SelectingScopes { .. })
+            ) =>
+        {
+            "Authorize"
         }
         ConnectStage::Asking(ask) if ask.oauth.is_some() => "Open browser",
         ConnectStage::Asking(_) => "Continue",
@@ -1740,7 +1779,9 @@ fn disclosure_lines(
             "OAuth destinations: {}",
             oauth.destinations.join(", ")
         ));
-        lines.push(format!("Requested scopes: {}", oauth.scopes.join(" ")));
+        for option in &oauth.scope_options {
+            lines.push(format!("{}: {}", option.label, option.scopes.join(" ")));
+        }
         if let Some(callback) = &oauth.callback {
             lines.push(format!("Registered callback: {callback}"));
         }
@@ -2829,6 +2870,76 @@ mod tests {
             ),
             "a connection is kept under its name, so an unnamed one has nowhere to go"
         );
+    }
+
+    #[test]
+    fn approval_card_selects_exactly_one_permission_preset_and_can_cancel() {
+        use egui_kittest::kittest::Queryable;
+        let mut snapshot = offered_prompt("token", &[], &[]);
+        let mut ask = round("", vec![], false);
+        ask.oauth = Some(lns_ipc::OAuthProgress::SelectingScopes {
+            options: vec![
+                lns_ipc::OAuthScopeOption {
+                    name: "read-only".into(),
+                    label: "Read only".into(),
+                    scopes: vec!["read".into()],
+                },
+                lns_ipc::OAuthScopeOption {
+                    name: "defaults".into(),
+                    label: "Defaults".into(),
+                    scopes: vec![],
+                },
+            ],
+        });
+        assert!(!round_ready(&ask, &OfferDraft::default()));
+        snapshot.pending[0].connect = Some(ask);
+        assert_eq!(
+            click_labelled_control(snapshot.clone(), "Cancel", false),
+            Some(CardAction::DismissNetwork { id: "r1".into() })
+        );
+        let fired = Arc::new(Mutex::new(None));
+        let sink = fired.clone();
+        let mut cards = CardState::default();
+        let mut prepared = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(520.0, 1200.0))
+            .build_ui(move |ui| {
+                if !prepared {
+                    crate::approval_flow::window::install_icon_font(ui.ctx());
+                    prepared = true;
+                    return;
+                }
+                if let (Some(action), _) = render_stack(ui, &snapshot, &mut cards, 1000.0) {
+                    *sink.lock().unwrap() = Some(action);
+                }
+            });
+        harness.run();
+        harness.run();
+        harness.get_by_label("Defaults: provider default permissions");
+        harness.get_by_label("Read only: read").click();
+        harness.run();
+        harness.get_by_label("Authorize").click();
+        harness.run();
+        assert_eq!(
+            fired.lock().unwrap().take(),
+            Some(CardAction::AnswerConnect {
+                id: "r1".into(),
+                values: lns_ipc::SecretValues([("scopeOption".into(), "read-only".into())].into())
+            })
+        );
+    }
+
+    #[test]
+    fn scope_selection_must_be_confirmed_before_browser_work() {
+        let mut ask = round("", vec![], false);
+        ask.oauth = Some(lns_ipc::OAuthProgress::SelectingScopes {
+            options: vec![lns_ipc::OAuthScopeOption {
+                name: "read-only".into(),
+                label: "Read only".into(),
+                scopes: vec!["read".into()],
+            }],
+        });
+        assert_eq!(primary_label(&ConnectStage::Asking(&ask)), "Authorize");
     }
 
     #[test]
