@@ -2077,7 +2077,9 @@ destination and user code, even when opening a complete verification URL. Both
 verification URLs must use HTTPS and match `verificationHosts`; they may carry a
 query but no userinfo or fragment. Browser navigation afterwards belongs to the
 browser. The device code is never displayed, logged, or sent through IPC.
-No callback listener is created for this flow.
+No callback listener is created for this flow. Failure to open a local browser
+does not end device authorization; the displayed destination and user code remain
+usable from another browser or device.
 
 The service polls automatically, no sooner than the provider's interval (five
 seconds when omitted). `authorization_pending` retains that interval;
@@ -2110,7 +2112,9 @@ Duplicate parameters, mismatched state, ambiguous code/error, expired ownership,
 and replay cannot complete it. An authenticated `access_denied` callback is a
 denial; unrelated traffic leaves the operation waiting. No issuer discovery is
 performed; an `iss` parameter is refused because no issuer identifier has been
-configured against which to validate it. Provider extensions requiring an issuer
+configured against which to validate it. Once path and state match unambiguously,
+`iss` ends the operation immediately with an unsupported-issuer error; it is not
+treated as unrelated traffic. Provider extensions requiring an issuer
 contract remain a `code` concern until explicitly specified.
 
 The one-time code is exchanged with the original verifier, public client ID, and
@@ -2147,6 +2151,17 @@ apply. Notifications contain only minimal status, never credentials or sensitive
 authorization URLs. Connecting and granting stay separate; sign-in-and-grant
 applies only while its requesting run and operation remain valid and that grant
 was authorized.
+
+HTTP 429 and 5xx responses are transient regardless of response body format.
+Interactive requests retry within the original deadline: device polling doubles
+its interval after transient failures; device initiation and code exchange use
+exponential backoff starting at five seconds, capped at one minute. Code exchange
+retries retain the same code, verifier, client ID, and redirect URI without
+reopening the browser or accepting another callback. A subsequent terminal
+provider response ends the operation.
+
+Cancellation is idempotent: canceling an expired or removed operation acknowledges
+cancellation without recreating it.
 
 **Token lifecycle (RFC 6749).** Only nonempty Bearer access tokens are accepted.
 Token bytes must fit the Bearer credential grammar. A supplied `expires_in` must
