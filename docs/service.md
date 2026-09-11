@@ -63,8 +63,11 @@ shared between runs.
 On macOS the service creates a datagram socket pair, hands one end to the
 virtual machine as its network device, and keeps the other. It then speaks
 ethernet on that socket itself: it answers ARP for the gateway, leases the
-guest its address over DHCP, resolves names on the gateway, and turns the
-guest's TCP and UDP flows into ordinary host sockets.
+guest its address over DHCP, relays DNS on the gateway, and turns the guest's
+TCP and UDP flows into ordinary host sockets.
+
+The link is **IPv4 only**. IPv6, VLAN-tagged frames and IPv4 fragments are
+dropped and counted; the gateway does no reassembly.
 
 | | |
 |---|---|
@@ -72,7 +75,7 @@ guest's TCP and UDP flows into ordinary host sockets.
 | Gateway and DNS resolver | `192.168.127.1` |
 | Guest address | `192.168.127.2` |
 | Gateway MAC | `0e:6c:6e:73:00:01` (locally administered) |
-| MTU | 1500 |
+| MTU | 1500, both ways |
 
 Egress policy is unaffected. Every request still goes through the in-guest
 proxy, so the approval cards and the [audit](audit.md) chain read the same as
@@ -93,24 +96,73 @@ $ lns run -- curl -sS https://example.com
 
 ### What the guest can reach
 
-The stack decides every destination before it opens a host socket. A refused
-TCP connection is answered with a reset, so the guest fails at once; a refused
-datagram is dropped.
+The stack decides every destination before it opens a host socket — before
+the stack itself sees the packet. A refused TCP segment is answered with a
+reset and a refused datagram with an ICMP port-unreachable, so the guest
+fails at once instead of waiting out a timeout.
 
 | Destination | Result |
 |---|---|
-| `192.168.127.1:53` (UDP) | The gateway resolver answers. |
+| `192.168.127.1:53` (UDP) | The gateway relays the query. |
+| `192.168.127.1`, ICMP echo | The gateway answers, so a guest can tell a dead link from a refused destination. |
 | Anything else in `192.168.127.0/24` | Refused. There is no control API on the gateway and no address that forwards to the host. |
 | `127.0.0.0/8` | Refused. The guest cannot reach anything bound to the host's loopback. |
 | `0.0.0.0/8`, `169.254.0.0/16`, `224.0.0.0/4`, `255.255.255.255` | Refused. |
 | Every other address, including the host's own LAN addresses | Carried, exactly as it was on the `vmnet` bridge. |
 
-Names are resolved through the host's own resolver, so a VPN or a scoped
-resolver answers for the guest too. Question types the host resolver does not
-answer go to the first nameserver in `/etc/resolv.conf`.
-
 Published ports (`-p`, `spec.ports`) are unaffected: they travel over the
 run's vsock channel, not over this link.
+
+### DNS
+
+The gateway is a plain relay. It does not resolve anything itself and caches
+nothing: your host's answer, its TTLs and its negative answers are what the
+guest gets.
+
+The resolver list is your host's own — the nameservers of
+`/etc/resolv.conf`, plus the per-domain resolvers `scutil --dns` reports.
+That second source matters: a split-DNS VPN's internal resolvers appear only
+there, never in `resolv.conf`. The longest matching domain suffix decides
+which servers answer a name; a name no suffix covers goes to the default
+ones. The list is read again every 30 seconds, and again after any query
+nobody answered, so a VPN that comes up mid-run is picked up.
+
+Each query goes to the servers in turn over UDP, 5 seconds each. A truncated
+answer is asked again over TCP to the same server. When no server answers,
+the guest gets SERVFAIL — never silence.
+
+### Bounds
+
+One guest holds no more of the host than this:
+
+| | |
+|---|---|
+| Concurrent TCP flows | 1024 |
+| Concurrent UDP flows | 512 |
+| DNS queries in flight | 256 |
+| TCP connect timeout | 10 s |
+| TCP buffer per direction per flow | 256 KiB |
+| UDP flow idle timeout | 60 s |
+| Frames queued between the device and the stack | 512 |
+
+Anything over a limit is dropped and counted, and the count is written to the
+developer trace stream (`lns run --debug`). A guest that outruns the stack
+loses frames, as it would on a busy wire.
+
+### Moving the guest subnet
+
+`LNS_GUEST_SUBNET=<a /24>` replaces `192.168.127.0/24`, for hosts that
+already use it. The gateway is always `.1` and the guest `.2`, and the
+boundary policy follows:
+
+```bash
+LNS_GUEST_SUBNET=10.99.7.0/24 lns run -- curl -sS https://example.com
+```
+
+The value must be a `/24` whose last octet is `0`. If the host holds an
+address inside the guest subnet, the service says so at startup: that address
+is one no guest can reach, because the boundary refuses the guest's own
+subnet whole.
 
 ### Going back to the old bridge
 

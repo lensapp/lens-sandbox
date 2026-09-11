@@ -72,12 +72,16 @@ pub fn wrap(source: Mac, destination: Mac, ether_type: EtherType, payload: &[u8]
     frame
 }
 
-/// What a frame off the guest's link turns into: an answer to send back, an IPv4 packet to route, or nothing.
+pub const DROPPED_SHORT: &str = "a frame too short to be ethernet";
+pub const DROPPED_ETHERTYPE: &str = "a frame of a protocol this link does not speak";
+pub const DROPPED_ARP: &str = "an ARP request this link does not answer";
+
+/// What a frame off the guest's link turns into: an answer to send back, an IPv4 packet to route, or a drop with its reason.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Received<'a> {
     Answer(Vec<u8>),
     Ipv4(&'a [u8]),
-    Dropped,
+    Dropped(&'static str),
 }
 
 /// One guest's ethernet link: it learns the guest's MAC from the frames it sends and answers ARP for the gateway itself.
@@ -102,22 +106,22 @@ impl Link {
 
     pub fn receive<'a>(&mut self, frame: &'a [u8]) -> Received<'a> {
         let Ok((header, payload)) = Ethernet2Header::from_slice(frame) else {
-            return Received::Dropped;
+            return Received::Dropped(DROPPED_SHORT);
         };
         self.guest_mac.get_or_insert(header.source);
         match header.ether_type {
             EtherType::ARP => self.answer_arp(payload),
             EtherType::IPV4 => Received::Ipv4(payload),
-            _ => Received::Dropped,
+            _ => Received::Dropped(DROPPED_ETHERTYPE),
         }
     }
 
     fn answer_arp(&self, payload: &[u8]) -> Received<'static> {
         let Some(request) = parse_arp_request(payload) else {
-            return Received::Dropped;
+            return Received::Dropped(DROPPED_ARP);
         };
         if request.target_ip != self.gateway_ip {
-            return Received::Dropped;
+            return Received::Dropped(DROPPED_ARP);
         }
         Received::Answer(wrap(
             self.gateway_mac,
@@ -225,7 +229,7 @@ mod tests {
         let mut frame = arp_request(GATEWAY);
         frame[Ethernet2Header::LEN + 6..Ethernet2Header::LEN + 8]
             .copy_from_slice(&ARP_REPLY.to_be_bytes());
-        assert_eq!(link.receive(&frame), Received::Dropped);
+        assert_eq!(link.receive(&frame), Received::Dropped(DROPPED_ARP));
     }
 
     #[test]
@@ -233,7 +237,7 @@ mod tests {
         let mut link = Link::new(GATEWAY_MAC, GATEWAY);
         assert_eq!(
             link.receive(&wrap(GUEST_MAC, BROADCAST_MAC, EtherType::ARP, &[0; 10])),
-            Received::Dropped
+            Received::Dropped(DROPPED_ARP)
         );
     }
 
@@ -244,7 +248,7 @@ mod tests {
             let at = Ethernet2Header::LEN + offset as usize;
             frame[at..at + 2].copy_from_slice(&value.to_be_bytes());
             let mut link = Link::new(GATEWAY_MAC, GATEWAY);
-            assert_eq!(link.receive(&frame), Received::Dropped);
+            assert_eq!(link.receive(&frame), Received::Dropped(DROPPED_ARP));
         }
     }
 
@@ -254,7 +258,7 @@ mod tests {
             let mut frame = arp_request(GATEWAY);
             frame[Ethernet2Header::LEN + offset] = value;
             let mut link = Link::new(GATEWAY_MAC, GATEWAY);
-            assert_eq!(link.receive(&frame), Received::Dropped);
+            assert_eq!(link.receive(&frame), Received::Dropped(DROPPED_ARP));
         }
     }
 
@@ -273,14 +277,17 @@ mod tests {
         let mut link = Link::new(GATEWAY_MAC, GATEWAY);
         assert_eq!(
             link.receive(&wrap(GUEST_MAC, GATEWAY_MAC, EtherType::IPV6, &[0x60])),
-            Received::Dropped
+            Received::Dropped(DROPPED_ETHERTYPE)
         );
     }
 
     #[test]
     fn bytes_too_short_to_be_a_frame_are_dropped_without_learning_a_mac() {
         let mut link = Link::new(GATEWAY_MAC, GATEWAY);
-        assert_eq!(link.receive(&[0x01, 0x02]), Received::Dropped);
+        assert_eq!(
+            link.receive(&[0x01, 0x02]),
+            Received::Dropped(DROPPED_SHORT)
+        );
         assert_eq!(link.guest_mac(), None);
     }
 

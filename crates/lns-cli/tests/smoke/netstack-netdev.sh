@@ -10,6 +10,8 @@
 #   3. The run's audit chain names the backend that served the link.
 #   4. Nothing else on the guest's subnet answers: neither the gateway
 #      on any port but DNS, nor any other address in 192.168.127.0/24.
+#   5. A host listener that logs every accept sees none of them. A failed
+#      connect alone does not prove nothing was reached.
 #
 # Like `interactive-shell.exp`, it writes its own sandbox definition
 # into a temp project first. The negative checks need a definition
@@ -86,10 +88,33 @@ case "$OUTPUT" in
   *) fail "expected the guest to hold 192.168.127.2/24, got: ${OUTPUT}" ;;
 esac
 
+printf '[test]  a dual-stack host is reached over its A record\n'
+if ! DUAL=$("$LNS" run --rm --yes --quiet --name "${RUN_NAME}-dual" \
+  --entrypoint /bin/sh -f "$PROJECT/lns.yaml" -- \
+  -c 'curl -sS -o /dev/null -w "%{http_code} %{remote_ip}" https://example.com'); then
+  fail "the dual-stack fetch did not complete. Output: ${DUAL}"
+fi
+
+case "$DUAL" in
+  *"200 "*) pass "example.com answered over IPv4: ${DUAL}" ;;
+  *) fail "expected 200 from the dual-stack host, got: ${DUAL}" ;;
+esac
+
+printf '[test]  a host listener sees no accept from the guest\n'
+WITNESS_PORT="${LNS_SMOKE_WITNESS_PORT:-47123}"
+WITNESS_LOG="${PROJECT}/witness.log"
+( while true; do
+    printf 'HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nREACHED!' | nc -l 127.0.0.1 "$WITNESS_PORT" >>"$WITNESS_LOG" 2>&1 || break
+    printf 'accepted\n' >>"$WITNESS_LOG"
+  done ) &
+WITNESS_PID=$!
+trap 'kill "$WITNESS_PID" 2>/dev/null; rm -rf "$PROJECT"' EXIT
+sleep 1
+
 printf '[test]  nothing on the guest subnet answers but the resolver\n'
 if ! REFUSED=$("$LNS" run --rm --yes --quiet --name "${RUN_NAME}-refused" \
   --entrypoint /bin/sh -f "$PROJECT/lns.yaml" -- \
-  -c 'curl -sS --max-time 5 http://192.168.127.1/ && echo GATEWAY-ANSWERED; curl -sS --max-time 5 http://192.168.127.254/ && echo HOST-LOOPBACK-ANSWERED; echo done'); then
+  -c "curl -sS --max-time 5 http://192.168.127.1/ && echo GATEWAY-ANSWERED; curl -sS --max-time 5 http://192.168.127.254:${WITNESS_PORT}/ && echo HOST-LOOPBACK-ANSWERED; curl -sS --max-time 5 http://127.0.0.1:${WITNESS_PORT}/ && echo LOOPBACK-ANSWERED; echo done"); then
   fail "the refusal run did not complete. Output: ${REFUSED}"
 fi
 
@@ -102,6 +127,16 @@ case "$REFUSED" in
   *HOST-LOOPBACK-ANSWERED*) fail "192.168.127.254 answered; there must be no NAT entry to the host's loopback." ;;
   *) pass "http://192.168.127.254/ is refused" ;;
 esac
+
+case "$REFUSED" in
+  *LOOPBACK-ANSWERED*) fail "127.0.0.1 answered; the guest must not reach the host's loopback." ;;
+  *) pass "http://127.0.0.1/ is refused" ;;
+esac
+
+if [ -s "$WITNESS_LOG" ] && grep -q accepted "$WITNESS_LOG"; then
+  fail "the host listener accepted a connection from the guest: $(cat "$WITNESS_LOG")"
+fi
+pass "the host listener saw no accept at all"
 
 printf '[test]  the audit chain names the backend that served the link\n'
 AUDIT=$("$LNS" audit "$RUN_NAME") || fail "\`lns audit ${RUN_NAME}\` failed."

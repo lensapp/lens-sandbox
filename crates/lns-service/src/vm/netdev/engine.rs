@@ -5,26 +5,37 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use etherparse::{IpNumber, Ipv4Header, PacketBuilder, TcpHeader, UdpHeader};
+use etherparse::{
+    IpNumber, Ipv4Header, PacketBuilder, TcpHeader, UdpHeader, icmpv4::DestUnreachableHeader,
+};
 use futures_util::{SinkExt, StreamExt};
 use netstack_smoltcp::StackBuilder;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 use super::dhcp::{self, Lease, ReplyTo};
-use super::dns::{self, Resolver};
+use super::dns::{self, Resolvers, Upstream};
 use super::link::{BROADCAST_MAC, GATEWAY_MAC, Link, Received};
 use super::policy::{Boundary, Refusal};
 use crate::log;
 
-/// A guest's ethernet frames, up to an untagged 1500-byte MTU.
-pub const MAX_FRAME: usize = 1514;
-
 /// Vz refuses an MTU below this and the guest's link is configured for it.
 pub const MTU: usize = 1500;
 
-/// One TCP window per socket. 512 KiB carries a 1 Gbit/s path at 4 ms without stalling on the window.
-const TCP_WINDOW_BYTES: u32 = 512 * 1024;
+/// One TCP window per direction per flow. 256 KiB carries a gigabit path at 2 ms without stalling on the window.
+const TCP_WINDOW_BYTES: u32 = 256 * 1024;
+
+/// At most this many TCP flows are carried for one guest at a time.
+pub const MAX_TCP_FLOWS: usize = 1024;
+
+/// At most this many UDP flows are carried for one guest at a time.
+pub const MAX_UDP_FLOWS: usize = 512;
+
+/// At most this many of a guest's DNS queries are in flight at once.
+pub const MAX_DNS_IN_FLIGHT: usize = 256;
+
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const CHANNEL_DEPTH: usize = 512;
 
@@ -34,11 +45,33 @@ const UDP_DATAGRAM_BYTES: usize = 65_535;
 
 const PACKET_TTL: u8 = 64;
 
+/// How much of a refused datagram an ICMP port-unreachable carries back, per RFC 792.
+const UNREACHABLE_QUOTE_BYTES: usize = 8;
+
 /// What the guest's link is and where it may reach. One run, one stack, no state shared with any other run.
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
     pub lease: Lease,
     pub boundary: Boundary,
+    pub limits: Limits,
+}
+
+/// How much of the host one guest may hold at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub tcp_flows: usize,
+    pub udp_flows: usize,
+    pub dns_in_flight: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            tcp_flows: MAX_TCP_FLOWS,
+            udp_flows: MAX_UDP_FLOWS,
+            dns_in_flight: MAX_DNS_IN_FLIGHT,
+        }
+    }
 }
 
 impl Config {
@@ -52,8 +85,16 @@ impl Config {
                 duration: Duration::from_secs(24 * 60 * 60),
             },
             boundary,
+            limits: Limits::default(),
         }
     }
+}
+
+/// What the gateway answers DNS with: the host's resolver list, and the way a query reaches one.
+pub struct Gateway {
+    pub address: IpAddr,
+    pub resolvers: Arc<Resolvers>,
+    pub upstream: Arc<dyn Upstream>,
 }
 
 /// Frames in, frames out. The macOS device is a datagram socketpair; a vhost-user front end would hand over the same two channels.
@@ -80,7 +121,68 @@ impl Drop for Running {
     }
 }
 
-pub fn start(config: Config, resolver: Arc<dyn Resolver>, frames: Frames) -> Result<Running> {
+/// What the guest network threw away, and how often. Every drop is silent on the wire, so it is never silent in the log.
+#[derive(Default)]
+pub struct Counters {
+    counts: Mutex<HashMap<&'static str, u64>>,
+}
+
+impl Counters {
+    pub fn note(&self, what: &'static str) {
+        let mut counts = self.counts.lock().expect("counters poisoned");
+        let seen = counts.entry(what).or_default();
+        *seen += 1;
+        let seen = *seen;
+        log::debug!("the guest network dropped {what} ({seen} so far)");
+    }
+
+    pub fn seen(&self, what: &str) -> u64 {
+        self.counts
+            .lock()
+            .expect("counters poisoned")
+            .get(what)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// The flows one guest holds. A permit lives as long as its flow and is given back when the flow ends.
+pub struct Allowance {
+    tcp: Arc<Semaphore>,
+    udp: Arc<Semaphore>,
+    dns: Arc<Semaphore>,
+}
+
+impl Allowance {
+    pub fn of(limits: Limits) -> Self {
+        Self {
+            tcp: Arc::new(Semaphore::new(limits.tcp_flows)),
+            udp: Arc::new(Semaphore::new(limits.udp_flows)),
+            dns: Arc::new(Semaphore::new(limits.dns_in_flight)),
+        }
+    }
+
+    pub fn tcp_flow(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.tcp).try_acquire_owned().ok()
+    }
+
+    pub fn udp_flow(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.udp).try_acquire_owned().ok()
+    }
+
+    pub fn dns_query(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.dns).try_acquire_owned().ok()
+    }
+}
+
+pub const DROPPED_TCP_FLOWS: &str = "a TCP flow over the guest's limit";
+pub const DROPPED_UDP_FLOWS: &str = "a UDP flow over the guest's limit";
+pub const DROPPED_DNS_IN_FLIGHT: &str = "a DNS query over the guest's limit";
+pub const DROPPED_FRAGMENT: &str = "an IPv4 fragment, which this gateway does not reassemble";
+pub const DROPPED_PROTOCOL: &str = "a packet of a protocol this gateway does not carry";
+pub const DROPPED_MALFORMED: &str = "a packet too short or malformed to read";
+
+pub fn start(config: Config, gateway: Gateway, frames: Frames) -> Result<Running> {
     let (stack, runner, udp, tcp) = StackBuilder::default()
         .enable_tcp(true)
         .enable_udp(true)
@@ -98,6 +200,8 @@ pub fn start(config: Config, resolver: Arc<dyn Resolver>, frames: Frames) -> Res
 
     let link = Arc::new(Mutex::new(Link::new(GATEWAY_MAC, config.lease.gateway)));
     let refused = Arc::new(Mutex::new(HashSet::new()));
+    let counters = Arc::new(Counters::default());
+    let allowance = Arc::new(Allowance::of(config.limits));
     let (stack_sink, stack_stream) = stack.split();
     let (udp_read, udp_write) = udp.split();
     let (replies_tx, replies_rx) = channel(CHANNEL_DEPTH);
@@ -109,14 +213,21 @@ pub fn start(config: Config, resolver: Arc<dyn Resolver>, frames: Frames) -> Res
     tasks.spawn(from_guest(
         config,
         refused,
+        Arc::clone(&counters),
         Arc::clone(&link),
         frames.from_guest,
         frames.to_guest.clone(),
         stack_sink,
     ));
     tasks.spawn(to_guest(link, stack_stream, frames.to_guest));
-    tasks.spawn(accept_tcp(tcp));
-    tasks.spawn(accept_udp(config, resolver, udp_read, replies_tx));
+    tasks.spawn(accept_tcp(
+        Arc::clone(&allowance),
+        Arc::clone(&counters),
+        tcp,
+    ));
+    tasks.spawn(accept_udp(
+        config, gateway, allowance, counters, udp_read, replies_tx,
+    ));
     tasks.spawn(write_udp(udp_write, replies_rx));
     Ok(Running { tasks })
 }
@@ -124,9 +235,11 @@ pub fn start(config: Config, resolver: Arc<dyn Resolver>, frames: Frames) -> Res
 type StackSink = futures_util::stream::SplitSink<netstack_smoltcp::Stack, Vec<u8>>;
 type StackStream = futures_util::stream::SplitStream<netstack_smoltcp::Stack>;
 
+#[allow(clippy::too_many_arguments)]
 async fn from_guest(
     config: Config,
     refused: Refused,
+    counters: Arc<Counters>,
     link: Arc<Mutex<Link>>,
     mut frames: Receiver<Vec<u8>>,
     answers: Sender<Vec<u8>>,
@@ -136,15 +249,15 @@ async fn from_guest(
         let outcome = {
             let mut link = link.lock().expect("link poisoned");
             match link.receive(&frame) {
-                Received::Answer(reply) => Some(Outcome::Frame(reply)),
-                Received::Ipv4(packet) => ingress(&config, &refused, &link, packet),
-                Received::Dropped => None,
+                Received::Answer(reply) => Outcome::Frame(reply),
+                Received::Ipv4(packet) => ingress(&config, &refused, &counters, &link, packet),
+                Received::Dropped(what) => Outcome::Dropped(what),
             }
         };
         match outcome {
-            Some(Outcome::Frame(reply)) => drop(answers.send(reply).await),
-            Some(Outcome::Packet(packet)) => drop(stack.send(packet).await),
-            None => {}
+            Outcome::Frame(reply) => drop(answers.send(reply).await),
+            Outcome::Packet(packet) => drop(stack.send(packet).await),
+            Outcome::Dropped(what) => counters.note(what),
         }
     }
 }
@@ -152,19 +265,28 @@ async fn from_guest(
 enum Outcome {
     Frame(Vec<u8>),
     Packet(Vec<u8>),
+    Dropped(&'static str),
 }
 
-fn ingress(config: &Config, refused: &Refused, link: &Link, packet: &[u8]) -> Option<Outcome> {
-    match classify(config, packet)? {
-        Ingress::Dhcp(reply) => Some(Outcome::Frame(dhcp_frame(config, &reply))),
-        Ingress::Forward => Some(Outcome::Packet(packet.to_vec())),
+fn ingress(
+    config: &Config,
+    refused: &Refused,
+    counters: &Counters,
+    link: &Link,
+    packet: &[u8],
+) -> Outcome {
+    match classify(config, packet) {
+        Ingress::Dhcp(reply) => Outcome::Frame(dhcp_frame(config, &reply)),
+        Ingress::Answer(packet) => Outcome::Frame(link.send_ipv4(&packet)),
+        Ingress::Forward => Outcome::Packet(packet.to_vec()),
+        Ingress::Dropped(what) => Outcome::Dropped(what),
         Ingress::Refused {
             destination,
             refusal,
-            reset,
+            answer,
         } => {
-            note_refusal(refused, destination, refusal);
-            reset.map(|packet| Outcome::Frame(link.send_ipv4(&packet)))
+            note_refusal(refused, counters, destination, refusal);
+            Outcome::Frame(link.send_ipv4(&answer))
         }
     }
 }
@@ -173,70 +295,142 @@ fn ingress(config: &Config, refused: &Refused, link: &Link, packet: &[u8]) -> Op
 #[derive(Debug, PartialEq, Eq)]
 enum Ingress {
     Dhcp(dhcp::Reply),
+    Answer(Vec<u8>),
     Refused {
         destination: SocketAddr,
         refusal: Refusal,
-        reset: Option<Vec<u8>>,
+        answer: Vec<u8>,
     },
     Forward,
+    Dropped(&'static str),
 }
 
-fn classify(config: &Config, packet: &[u8]) -> Option<Ingress> {
+fn classify(config: &Config, packet: &[u8]) -> Ingress {
     let Ok((header, rest)) = Ipv4Header::from_slice(packet) else {
-        return None;
+        return Ingress::Dropped(DROPPED_MALFORMED);
     };
+    if header.more_fragments || header.fragment_offset.value() != 0 {
+        return Ingress::Dropped(DROPPED_FRAGMENT);
+    }
     let source = Ipv4Addr::from(header.source);
     let destination = Ipv4Addr::from(header.destination);
     match header.protocol {
-        IpNumber::UDP => {
-            let Ok((udp, payload)) = UdpHeader::from_slice(rest) else {
-                return None;
-            };
-            if udp.destination_port == dhcp::SERVER_PORT {
-                return dhcp::answer(&config.lease, payload).map(Ingress::Dhcp);
-            }
-            let to = SocketAddr::new(IpAddr::V4(destination), udp.destination_port);
-            if to == gateway_resolver(config) {
-                return Some(Ingress::Forward);
-            }
-            Some(refused_or_forward(config, to, None))
-        }
-        IpNumber::TCP => {
-            let Ok((tcp, _)) = TcpHeader::from_slice(rest) else {
-                return None;
-            };
-            let to = SocketAddr::new(IpAddr::V4(destination), tcp.destination_port);
-            let reset = (tcp.syn && !tcp.ack).then(|| reset_packet(source, destination, &tcp));
-            Some(refused_or_forward(config, to, reset))
-        }
-        _ => Some(Ingress::Forward),
+        IpNumber::UDP => udp_ingress(config, source, destination, rest),
+        IpNumber::TCP => tcp_ingress(config, source, destination, rest),
+        IpNumber::ICMP => icmp_ingress(config, source, destination, rest),
+        _ => Ingress::Dropped(DROPPED_PROTOCOL),
     }
+}
+
+fn udp_ingress(config: &Config, source: Ipv4Addr, destination: Ipv4Addr, rest: &[u8]) -> Ingress {
+    let Ok((udp, payload)) = UdpHeader::from_slice(rest) else {
+        return Ingress::Dropped(DROPPED_MALFORMED);
+    };
+    if udp.destination_port == dhcp::SERVER_PORT {
+        return match dhcp::answer(&config.lease, payload) {
+            Some(reply) => Ingress::Dhcp(reply),
+            None => Ingress::Dropped(DROPPED_MALFORMED),
+        };
+    }
+    let to = SocketAddr::new(IpAddr::V4(destination), udp.destination_port);
+    if to == gateway_resolver(config) {
+        return Ingress::Forward;
+    }
+    let unreachable = port_unreachable(source, destination, &udp, payload);
+    refused_or_forward(config, to, unreachable)
+}
+
+fn tcp_ingress(config: &Config, source: Ipv4Addr, destination: Ipv4Addr, rest: &[u8]) -> Ingress {
+    let Ok((tcp, _)) = TcpHeader::from_slice(rest) else {
+        return Ingress::Dropped(DROPPED_MALFORMED);
+    };
+    let to = SocketAddr::new(IpAddr::V4(destination), tcp.destination_port);
+    let reset = reset_packet(source, destination, &tcp);
+    refused_or_forward(config, to, reset)
+}
+
+/// The gateway answers a ping at its own address, so a guest can tell a dead link from a refused destination.
+fn icmp_ingress(config: &Config, source: Ipv4Addr, destination: Ipv4Addr, rest: &[u8]) -> Ingress {
+    let Ok((icmp, payload)) = etherparse::Icmpv4Header::from_slice(rest) else {
+        return Ingress::Dropped(DROPPED_MALFORMED);
+    };
+    let etherparse::Icmpv4Type::EchoRequest(echo) = icmp.icmp_type else {
+        return Ingress::Dropped(DROPPED_PROTOCOL);
+    };
+    if destination != config.lease.gateway {
+        return Ingress::Dropped(DROPPED_PROTOCOL);
+    }
+    let builder = PacketBuilder::ipv4(destination.octets(), source.octets(), PACKET_TTL)
+        .icmpv4_echo_reply(echo.id, echo.seq);
+    let mut reply = Vec::with_capacity(builder.size(payload.len()));
+    let _ = builder.write(&mut reply, payload);
+    Ingress::Answer(reply)
 }
 
 fn gateway_resolver(config: &Config) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(config.lease.gateway), dns::PORT)
 }
 
-fn refused_or_forward(config: &Config, destination: SocketAddr, reset: Option<Vec<u8>>) -> Ingress {
+fn refused_or_forward(config: &Config, destination: SocketAddr, answer: Vec<u8>) -> Ingress {
     match config.boundary.refusal(destination) {
         Some(refusal) => Ingress::Refused {
             destination,
             refusal,
-            reset,
+            answer,
         },
         None => Ingress::Forward,
     }
 }
 
 /// A refused connection is answered the way a closed port is, so the guest fails at once instead of waiting out a timeout.
-fn reset_packet(source: Ipv4Addr, destination: Ipv4Addr, syn: &TcpHeader) -> Vec<u8> {
-    let builder = PacketBuilder::ipv4(destination.octets(), source.octets(), PACKET_TTL)
-        .tcp(syn.destination_port, syn.source_port, 0, 0)
-        .rst()
-        .ack(syn.sequence_number.wrapping_add(1));
+fn reset_packet(source: Ipv4Addr, destination: Ipv4Addr, segment: &TcpHeader) -> Vec<u8> {
+    let ip = PacketBuilder::ipv4(destination.octets(), source.octets(), PACKET_TTL);
+    let ports = (segment.destination_port, segment.source_port);
+    // RFC 793: a segment that carries an acknowledgement is reset from its own ACK; one that does not is reset from zero.
+    let builder = if segment.ack {
+        ip.tcp(ports.0, ports.1, segment.acknowledgment_number, 0)
+            .rst()
+    } else {
+        ip.tcp(ports.0, ports.1, 0, 0)
+            .rst()
+            .ack(segment.sequence_number.wrapping_add(1))
+    };
     let mut packet = Vec::with_capacity(builder.size(0));
     let _ = builder.write(&mut packet, &[]);
     packet
+}
+
+/// A refused datagram is answered the way a closed port is: the quoted header lets the guest match it to what it sent.
+fn port_unreachable(
+    source: Ipv4Addr,
+    destination: Ipv4Addr,
+    udp: &UdpHeader,
+    payload: &[u8],
+) -> Vec<u8> {
+    let quoted = quote(source, destination, udp, payload);
+    let builder = PacketBuilder::ipv4(destination.octets(), source.octets(), PACKET_TTL).icmpv4(
+        etherparse::Icmpv4Type::DestinationUnreachable(DestUnreachableHeader::Port),
+    );
+    let mut packet = Vec::with_capacity(builder.size(quoted.len()));
+    let _ = builder.write(&mut packet, &quoted);
+    packet
+}
+
+fn quote(source: Ipv4Addr, destination: Ipv4Addr, udp: &UdpHeader, payload: &[u8]) -> Vec<u8> {
+    let mut quoted = Vec::new();
+    let length = UdpHeader::LEN + payload.len();
+    if let Ok(header) = Ipv4Header::new(
+        u16::try_from(length).unwrap_or(u16::MAX),
+        PACKET_TTL,
+        IpNumber::UDP,
+        source.octets(),
+        destination.octets(),
+    ) {
+        let _ = header.write(&mut quoted);
+    }
+    quoted.extend_from_slice(&udp.to_bytes());
+    quoted.extend_from_slice(&payload[..payload.len().min(UNREACHABLE_QUOTE_BYTES)]);
+    quoted
 }
 
 fn dhcp_frame(config: &Config, reply: &dhcp::Reply) -> Vec<u8> {
@@ -265,7 +459,8 @@ async fn to_guest(link: Arc<Mutex<Link>>, mut stack: StackStream, frames: Sender
 
 type Refused = Arc<Mutex<HashSet<SocketAddr>>>;
 
-fn note_refusal(refused: &Refused, destination: SocketAddr, refusal: Refusal) {
+fn note_refusal(refused: &Refused, counters: &Counters, destination: SocketAddr, refusal: Refusal) {
+    counters.note(refusal.reason());
     if refused
         .lock()
         .expect("refusals poisoned")
@@ -276,15 +471,28 @@ fn note_refusal(refused: &Refused, destination: SocketAddr, refusal: Refusal) {
     }
 }
 
-async fn accept_tcp(mut listener: netstack_smoltcp::TcpListener) {
+async fn accept_tcp(
+    allowance: Arc<Allowance>,
+    counters: Arc<Counters>,
+    mut listener: netstack_smoltcp::TcpListener,
+) {
     while let Some((guest, _, destination)) = listener.next().await {
-        tokio::spawn(carry_tcp(guest, destination));
+        match allowance.tcp_flow() {
+            Some(permit) => {
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    carry_tcp(guest, destination).await;
+                });
+            }
+            None => counters.note(DROPPED_TCP_FLOWS),
+        }
     }
 }
 
 async fn carry_tcp(mut guest: netstack_smoltcp::TcpStream, destination: SocketAddr) {
+    let connect = tokio::net::TcpStream::connect(destination);
     // copy_bidirectional shuts each write half down on the other's EOF, and dropping both ends closes what is left.
-    if let Ok(mut host) = tokio::net::TcpStream::connect(destination).await {
+    if let Ok(Ok(mut host)) = tokio::time::timeout(TCP_CONNECT_TIMEOUT, connect).await {
         let _ = tokio::io::copy_bidirectional(&mut guest, &mut host).await;
     }
 }
@@ -299,35 +507,94 @@ async fn write_udp(mut write: netstack_smoltcp::udp::WriteHalf, mut replies: Rec
 
 async fn accept_udp(
     config: Config,
-    resolver: Arc<dyn Resolver>,
+    gateway: Gateway,
+    allowance: Arc<Allowance>,
+    counters: Arc<Counters>,
     mut datagrams: netstack_smoltcp::udp::ReadHalf,
     replies: Sender<UdpReply>,
 ) {
-    let gateway_dns = gateway_resolver(&config);
+    let resolver = gateway_resolver(&config);
     let mut flows: HashMap<(SocketAddr, SocketAddr), Sender<Vec<u8>>> = HashMap::new();
     while let Some((payload, source, destination)) = datagrams.next().await {
-        if destination == gateway_dns {
-            tokio::spawn(answer_dns(
-                Arc::clone(&resolver),
-                payload,
-                source,
-                destination,
-                replies.clone(),
-            ));
+        if destination == resolver {
+            answer_dns(&gateway, &allowance, &counters, payload, source, &replies);
             continue;
         }
         let key = (source, destination);
-        let sender = match flows.get(&key) {
-            Some(open) if !open.is_closed() => open.clone(),
-            _ => {
-                let (tx, rx) = channel(CHANNEL_DEPTH);
-                tokio::spawn(carry_udp(source, destination, rx, replies.clone()));
-                flows.insert(key, tx.clone());
-                tx
-            }
+        let open = match flows.get(&key) {
+            Some(open) if !open.is_closed() => Some(open.clone()),
+            _ => open_flow(&allowance, &counters, &mut flows, key, &replies),
         };
-        let _ = sender.send(payload).await;
+        if let Some(open) = open {
+            let _ = open.send(payload).await;
+        }
     }
+}
+
+fn open_flow(
+    allowance: &Allowance,
+    counters: &Counters,
+    flows: &mut HashMap<(SocketAddr, SocketAddr), Sender<Vec<u8>>>,
+    key: (SocketAddr, SocketAddr),
+    replies: &Sender<UdpReply>,
+) -> Option<Sender<Vec<u8>>> {
+    flows.retain(|_, open| !open.is_closed());
+    let Some(permit) = allowance.udp_flow() else {
+        counters.note(DROPPED_UDP_FLOWS);
+        return None;
+    };
+    let (tx, rx) = channel(CHANNEL_DEPTH);
+    let replies = replies.clone();
+    tokio::spawn(async move {
+        let _permit = permit;
+        carry_udp(key.0, key.1, rx, replies).await;
+    });
+    flows.insert(key, tx.clone());
+    Some(tx)
+}
+
+fn answer_dns(
+    gateway: &Gateway,
+    allowance: &Allowance,
+    counters: &Counters,
+    query: Vec<u8>,
+    source: SocketAddr,
+    replies: &Sender<UdpReply>,
+) {
+    let Some(name) = dns::question_name(&query) else {
+        counters.note(DROPPED_MALFORMED);
+        return;
+    };
+    let Some(permit) = allowance.dns_query() else {
+        counters.note(DROPPED_DNS_IN_FLIGHT);
+        return;
+    };
+    let resolvers = Arc::clone(&gateway.resolvers);
+    let upstream = Arc::clone(&gateway.upstream);
+    let replies = replies.clone();
+    let resolver = SocketAddr::new(gateway.address, dns::PORT);
+    tokio::spawn(async move {
+        let _permit = permit;
+        relay_query(resolvers, upstream, query, name, source, resolver, replies).await;
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn relay_query(
+    resolvers: Arc<Resolvers>,
+    upstream: Arc<dyn Upstream>,
+    query: Vec<u8>,
+    name: String,
+    source: SocketAddr,
+    resolver: SocketAddr,
+    replies: Sender<UdpReply>,
+) {
+    let servers = resolvers.servers_for(&name);
+    let answer = dns::relay(&query, &servers, upstream.as_ref()).await;
+    if answer == dns::servfail(&query) {
+        resolvers.stale();
+    }
+    let _ = replies.send((answer, resolver, source)).await;
 }
 
 /// One host socket per (guest source, destination) flow, kept for as long as the flow is used and no longer.
@@ -380,19 +647,6 @@ enum Step {
     Out(Vec<u8>),
     In(usize),
 }
-
-async fn answer_dns(
-    resolver: Arc<dyn Resolver>,
-    query: Vec<u8>,
-    source: SocketAddr,
-    gateway: SocketAddr,
-    replies: Sender<UdpReply>,
-) {
-    if let Some(answer) = dns::answer(&query, resolver.as_ref()).await {
-        let _ = replies.send((answer, gateway, source)).await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,23 +662,83 @@ mod tests {
     const SUBNET: Ipv4Addr = Ipv4Addr::new(192, 168, 127, 0);
     const PATIENCE: Duration = Duration::from_secs(10);
 
-    /// What the test's upstream nameserver answers a question this gateway does not resolve itself.
-    const FORWARDED: &[u8] = b"from the upstream";
+    /// The one nameserver the test guest's questions reach, standing in for the host's own.
+    const NAMESERVER: &str = "203.0.113.53:53";
 
-    struct TestResolver;
+    struct TestSources;
 
-    impl Resolver for TestResolver {
-        fn lookup(&self, name: String) -> BoxFuture<'static, std::io::Result<Vec<IpAddr>>> {
-            Box::pin(async move {
-                match name.as_str() {
-                    "example.test" => Ok(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
-                    _ => Err(std::io::Error::other("no such name")),
-                }
-            })
+    impl dns::Sources for TestSources {
+        fn scopes(&self) -> Vec<dns::Scope> {
+            vec![dns::Scope {
+                suffix: None,
+                servers: vec![NAMESERVER.parse().unwrap()],
+            }]
+        }
+    }
+
+    struct TestUpstream;
+
+    impl Upstream for TestUpstream {
+        fn over_udp(
+            &self,
+            _server: SocketAddr,
+            query: Vec<u8>,
+        ) -> BoxFuture<'static, std::io::Result<Vec<u8>>> {
+            let answered = answer_of(&query, true);
+            Box::pin(async move { answered })
         }
 
-        fn forward(&self, _query: Vec<u8>) -> BoxFuture<'static, std::io::Result<Vec<u8>>> {
-            Box::pin(async { Ok(FORWARDED.to_vec()) })
+        fn over_tcp(
+            &self,
+            _server: SocketAddr,
+            query: Vec<u8>,
+        ) -> BoxFuture<'static, std::io::Result<Vec<u8>>> {
+            let answered = answer_of(&query, false);
+            Box::pin(async move { answered })
+        }
+    }
+
+    /// The name whose UDP answer this stand-in nameserver truncates, so the guest's query is asked again over TCP.
+    const TRUNCATED: &str = "big.test.";
+
+    /// `example.test` and `big.test` resolve; every other name is one this stand-in nameserver never answers.
+    fn answer_of(query: &[u8], truncate: bool) -> std::io::Result<Vec<u8>> {
+        let request = hickory_proto::op::Message::from_vec(query)
+            .map_err(|_| std::io::Error::other("not a question"))?;
+        let name = request.queries[0].name().to_string();
+        if name != "example.test." && name != TRUNCATED {
+            return Err(std::io::Error::other("no such name"));
+        }
+        let mut reply = hickory_proto::op::Message::new(
+            request.metadata.id,
+            hickory_proto::op::MessageType::Response,
+            hickory_proto::op::OpCode::Query,
+        );
+        reply.metadata.truncation = truncate && name == TRUNCATED;
+        reply.queries = request.queries;
+        reply.answers = vec![hickory_proto::rr::Record::from_rdata(
+            hickory_proto::rr::Name::from_ascii("example.test.").unwrap(),
+            60,
+            hickory_proto::rr::RData::A(hickory_proto::rr::rdata::A(Ipv4Addr::new(
+                93, 184, 216, 34,
+            ))),
+        )];
+        reply.to_vec().map_err(std::io::Error::other)
+    }
+
+    fn gateway_of(subnet: Ipv4Addr) -> Gateway {
+        Gateway {
+            address: IpAddr::V4(Ipv4Addr::new(
+                subnet.octets()[0],
+                subnet.octets()[1],
+                subnet.octets()[2],
+                1,
+            )),
+            resolvers: Arc::new(dns::Resolvers::new(
+                Arc::new(TestSources),
+                dns::REFRESH_AFTER,
+            )),
+            upstream: Arc::new(TestUpstream),
         }
     }
 
@@ -498,11 +812,18 @@ mod tests {
 
     impl FakeGuest {
         fn on(boundary: Boundary) -> Self {
+            Self::limited(boundary, Limits::default())
+        }
+
+        fn limited(boundary: Boundary, limits: Limits) -> Self {
             let (to_stack, from_guest) = channel(CHANNEL_DEPTH);
             let (to_guest, from_stack) = channel(CHANNEL_DEPTH);
             let running = start(
-                Config::for_subnet(SUBNET, boundary),
-                Arc::new(TestResolver),
+                Config {
+                    limits,
+                    ..Config::for_subnet(SUBNET, boundary)
+                },
+                gateway_of(SUBNET),
                 Frames {
                     from_guest,
                     to_guest,
@@ -583,6 +904,16 @@ mod tests {
                 .bind(from)
                 .expect("a free client port");
             handle
+        }
+
+        async fn send_only(&mut self, handle: SocketHandle, to: SocketAddr, payload: &[u8]) {
+            self.sockets
+                .get_mut::<udp::Socket>(handle)
+                .send_slice(payload, IpEndpoint::from((to.ip(), to.port())))
+                .expect("the datagram is sent");
+            for _ in 0..500 {
+                self.settle().await;
+            }
         }
 
         async fn exchange(
@@ -671,22 +1002,29 @@ mod tests {
         Config::for_subnet(SUBNET, boundary)
     }
 
-    type Refusal3 = (SocketAddr, Refusal, Option<Vec<u8>>);
+    type Refusal3 = (SocketAddr, Refusal, Vec<u8>);
 
-    fn refused_by(ingress: Option<Ingress>) -> Option<Refusal3> {
+    fn refused_by(ingress: Ingress) -> Option<Refusal3> {
         match ingress {
-            Some(Ingress::Refused {
+            Ingress::Refused {
                 destination,
                 refusal,
-                reset,
-            }) => Some((destination, refusal, reset)),
+                answer,
+            } => Some((destination, refusal, answer)),
             _ => None,
         }
     }
 
-    fn leased_by(ingress: Option<Ingress>) -> Option<dhcp::Reply> {
+    fn leased_by(ingress: Ingress) -> Option<dhcp::Reply> {
         match ingress {
-            Some(Ingress::Dhcp(reply)) => Some(reply),
+            Ingress::Dhcp(reply) => Some(reply),
+            _ => None,
+        }
+    }
+
+    fn answered_by(ingress: Ingress) -> Option<Vec<u8>> {
+        match ingress {
+            Ingress::Answer(packet) => Some(packet),
             _ => None,
         }
     }
@@ -746,14 +1084,14 @@ mod tests {
                 &config(Boundary::around(SUBNET, 24)),
                 &udp_packet("192.168.127.1:53", b"q")
             ),
-            Some(Ingress::Forward),
+            Ingress::Forward,
             "DNS is the one service the gateway offers"
         );
     }
 
     #[test]
     fn a_datagram_for_any_other_gateway_port_is_dropped_without_a_reply() {
-        let (destination, refusal, reset) = refused_by(classify(
+        let (destination, refusal, answer) = refused_by(classify(
             &config(Boundary::around(SUBNET, 24)),
             &udp_packet("192.168.127.1:8080", b"x"),
         ))
@@ -761,18 +1099,37 @@ mod tests {
 
         assert_eq!(destination, "192.168.127.1:8080".parse().unwrap());
         assert_eq!(refusal, Refusal::GuestSubnet);
-        assert_eq!(reset, None, "a refused datagram is dropped, not answered");
+        let unreachable = answer;
+        let (header, rest) = Ipv4Header::from_slice(&unreachable).unwrap();
+        assert_eq!(header.protocol, IpNumber::ICMP);
+        assert_eq!(
+            Ipv4Addr::from(header.destination),
+            Ipv4Addr::new(192, 168, 127, 2)
+        );
+        let (icmp, quoted) = etherparse::Icmpv4Header::from_slice(rest).unwrap();
+        assert_eq!(
+            icmp.icmp_type,
+            etherparse::Icmpv4Type::DestinationUnreachable(DestUnreachableHeader::Port)
+        );
+        let (quoted_ip, quoted_rest) = Ipv4Header::from_slice(quoted).unwrap();
+        assert_eq!(
+            Ipv4Addr::from(quoted_ip.destination),
+            Ipv4Addr::new(192, 168, 127, 1),
+            "the quote lets the guest match the refusal to the datagram it sent"
+        );
+        let (quoted_udp, _) = UdpHeader::from_slice(quoted_rest).unwrap();
+        assert_eq!(quoted_udp.destination_port, 8080);
     }
 
     #[test]
     fn a_syn_to_a_refused_destination_is_answered_with_a_reset() {
-        let (_, refusal, reset) = refused_by(classify(
+        let (_, refusal, answer) = refused_by(classify(
             &config(Boundary::around(SUBNET, 24)),
             &tcp_packet("127.0.0.1:8080", true),
         ))
         .expect("a refused connection fails at once");
         assert_eq!(refusal, Refusal::Loopback);
-        let reset = reset.expect("the guest is answered rather than left waiting");
+        let reset = answer;
 
         let (header, rest) = Ipv4Header::from_slice(&reset).unwrap();
         assert_eq!(Ipv4Addr::from(header.source), Ipv4Addr::new(127, 0, 0, 1));
@@ -790,13 +1147,26 @@ mod tests {
 
     #[test]
     fn a_later_packet_of_a_refused_connection_is_dropped_without_another_reset() {
-        let (_, _, reset) = refused_by(classify(
+        let (_, _, answer) = refused_by(classify(
             &config(Boundary::around(SUBNET, 24)),
             &tcp_packet("127.0.0.1:8080", false),
         ))
         .expect("every packet of a refused flow stays refused");
 
-        assert_eq!(reset, None, "only the opening SYN is worth an answer");
+        let (_, rest) = Ipv4Header::from_slice(&answer).unwrap();
+        let (tcp, _) = TcpHeader::from_slice(rest).unwrap();
+        assert!(
+            tcp.rst,
+            "every packet of a refused flow is reset, not only the SYN"
+        );
+        assert!(
+            !tcp.ack,
+            "a segment that carries an acknowledgement is reset from its own"
+        );
+        assert_eq!(
+            tcp.sequence_number, 1,
+            "the ACK number of the segment that came in"
+        );
     }
 
     #[test]
@@ -804,43 +1174,143 @@ mod tests {
         let boundary = Boundary::around(SUBNET, 24);
         let carried = || classify(&config(boundary), &tcp_packet("93.184.216.34:443", true));
 
-        assert_eq!(carried(), Some(Ingress::Forward));
+        assert_eq!(carried(), Ingress::Forward);
         assert_eq!(refused_by(carried()), None, "nothing was refused");
         assert_eq!(leased_by(carried()), None, "nothing was leased");
+        assert_eq!(answered_by(carried()), None, "nothing was answered here");
         assert_eq!(
             classify(&config(boundary), &udp_packet("1.1.1.1:443", b"x")),
-            Some(Ingress::Forward)
+            Ingress::Forward
+        );
+    }
+
+    fn echo_request(destination: [u8; 4], payload: &[u8]) -> Vec<u8> {
+        let builder = PacketBuilder::ipv4([192, 168, 127, 2], destination, PACKET_TTL)
+            .icmpv4_echo_request(7, 9);
+        let mut packet = Vec::with_capacity(builder.size(payload.len()));
+        builder.write(&mut packet, payload).unwrap();
+        packet
+    }
+
+    #[test]
+    fn a_ping_at_the_gateway_is_answered_by_the_gateway() {
+        let packet = echo_request([192, 168, 127, 1], b"are you there");
+
+        let reply = answered_by(classify(&config(Boundary::around(SUBNET, 24)), &packet))
+            .expect("a guest can tell a dead link from a refused destination");
+
+        let (header, rest) = Ipv4Header::from_slice(&reply).unwrap();
+        assert_eq!(
+            Ipv4Addr::from(header.source),
+            Ipv4Addr::new(192, 168, 127, 1)
+        );
+        assert_eq!(
+            Ipv4Addr::from(header.destination),
+            Ipv4Addr::new(192, 168, 127, 2)
+        );
+        let (icmp, payload) = etherparse::Icmpv4Header::from_slice(rest).unwrap();
+        assert_eq!(
+            icmp.icmp_type,
+            etherparse::Icmpv4Type::EchoReply(etherparse::IcmpEchoHeader { id: 7, seq: 9 })
+        );
+        assert_eq!(payload, b"are you there");
+    }
+
+    #[test]
+    fn a_ping_at_anything_but_the_gateway_is_dropped_rather_than_carried() {
+        let packet = echo_request([93, 184, 216, 34], b"");
+
+        assert_eq!(
+            classify(&config(Boundary::around(SUBNET, 24)), &packet),
+            Ingress::Dropped(DROPPED_PROTOCOL)
         );
     }
 
     #[test]
-    fn a_protocol_this_gateway_does_not_decide_on_is_left_to_the_stack() {
-        let builder = PacketBuilder::ipv4([192, 168, 127, 2], [93, 184, 216, 34], PACKET_TTL)
-            .icmpv4_echo_request(1, 1);
+    fn an_icmp_message_that_is_not_an_echo_request_is_dropped() {
+        let builder = PacketBuilder::ipv4([192, 168, 127, 2], [192, 168, 127, 1], PACKET_TTL)
+            .icmpv4_echo_reply(1, 1);
         let mut packet = Vec::with_capacity(builder.size(0));
         builder.write(&mut packet, &[]).unwrap();
 
         assert_eq!(
             classify(&config(Boundary::around(SUBNET, 24)), &packet),
-            Some(Ingress::Forward)
+            Ingress::Dropped(DROPPED_PROTOCOL)
+        );
+    }
+
+    #[test]
+    fn a_protocol_this_gateway_does_not_carry_is_dropped_and_counted() {
+        let mut packet = tcp_packet("93.184.216.34:443", true);
+        packet[9] = IpNumber::IPV6_ROUTE_HEADER.0;
+
+        assert_eq!(
+            classify(&config(Boundary::around(SUBNET, 24)), &packet),
+            Ingress::Dropped(DROPPED_PROTOCOL)
+        );
+    }
+
+    #[test]
+    fn a_fragment_is_dropped_rather_than_reassembled() {
+        let mut packet = udp_packet("1.1.1.1:443", b"the first half");
+        packet[6] |= 0x20;
+
+        assert_eq!(
+            classify(&config(Boundary::around(SUBNET, 24)), &packet),
+            Ingress::Dropped(DROPPED_FRAGMENT)
+        );
+
+        let mut later = udp_packet("1.1.1.1:443", b"the second half");
+        later[6] = 0;
+        later[7] = 2;
+        assert_eq!(
+            classify(&config(Boundary::around(SUBNET, 24)), &later),
+            Ingress::Dropped(DROPPED_FRAGMENT)
         );
     }
 
     #[test]
     fn bytes_that_are_not_a_packet_this_gateway_can_read_decide_nothing() {
         let boundary = Boundary::around(SUBNET, 24);
-        assert_eq!(classify(&config(boundary), &[0x45, 0x00]), None);
+        let malformed = Ingress::Dropped(DROPPED_MALFORMED);
+        assert_eq!(classify(&config(boundary), &[0x45, 0x00]), malformed);
 
         let mut truncated_udp = udp_packet("1.1.1.1:53", b"x");
         truncated_udp.truncate(22);
-        assert_eq!(classify(&config(boundary), &truncated_udp), None);
+        assert_eq!(classify(&config(boundary), &truncated_udp), malformed);
 
         let mut truncated_tcp = tcp_packet("1.1.1.1:443", true);
         truncated_tcp.truncate(24);
-        assert_eq!(classify(&config(boundary), &truncated_tcp), None);
+        assert_eq!(classify(&config(boundary), &truncated_tcp), malformed);
+
+        let mut truncated_icmp = echo_request([192, 168, 127, 1], b"");
+        truncated_icmp.truncate(21);
+        assert_eq!(classify(&config(boundary), &truncated_icmp), malformed);
 
         let not_dhcp = udp_packet("255.255.255.255:67", b"not a lease request");
-        assert_eq!(classify(&config(boundary), &not_dhcp), None);
+        assert_eq!(classify(&config(boundary), &not_dhcp), malformed);
+
+        for cut in 0..Ipv4Header::MIN_LEN + UdpHeader::LEN {
+            let mut short = udp_packet("1.1.1.1:53", b"a datagram");
+            short.truncate(cut);
+            assert_eq!(
+                classify(&config(boundary), &short),
+                malformed,
+                "nothing shorter than its own headers is carried ({cut} bytes)"
+            );
+        }
+
+        for cut in 0..64 {
+            let mut short = tcp_packet("1.1.1.1:443", true);
+            short.truncate(cut);
+            classify(&config(boundary), &short);
+
+            let mut arp = vec![0u8; cut];
+            arp.iter_mut()
+                .enumerate()
+                .for_each(|(at, byte)| *byte = at as u8);
+            Link::new(GATEWAY_MAC, Ipv4Addr::new(192, 168, 127, 1)).receive(&arp);
+        }
     }
 
     #[test]
@@ -909,17 +1379,128 @@ mod tests {
     #[tokio::test]
     async fn bytes_that_are_not_a_question_get_no_answer_from_the_gateway() {
         let (replies, mut heard) = channel(1);
+        let counters = Counters::default();
+        let allowance = Allowance::of(Limits::default());
 
         answer_dns(
-            Arc::new(TestResolver),
+            &gateway_of(SUBNET),
+            &allowance,
+            &counters,
             b"not a question".to_vec(),
             "192.168.127.2:5353".parse().unwrap(),
-            "192.168.127.1:53".parse().unwrap(),
-            replies,
-        )
-        .await;
+            &replies,
+        );
 
         assert!(heard.try_recv().is_err());
+        assert_eq!(counters.seen(DROPPED_MALFORMED), 1);
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_asks_more_questions_than_it_may_has_the_rest_dropped() {
+        let (replies, mut heard) = channel(1);
+        let counters = Counters::default();
+        let allowance = Allowance::of(Limits {
+            dns_in_flight: 0,
+            ..Limits::default()
+        });
+        let query = {
+            let mut message = hickory_proto::op::Message::new(
+                1,
+                hickory_proto::op::MessageType::Query,
+                hickory_proto::op::OpCode::Query,
+            );
+            message.add_query(hickory_proto::op::Query::query(
+                hickory_proto::rr::Name::from_ascii("example.test.").unwrap(),
+                hickory_proto::rr::RecordType::A,
+            ));
+            message.to_vec().unwrap()
+        };
+
+        answer_dns(
+            &gateway_of(SUBNET),
+            &allowance,
+            &counters,
+            query,
+            "192.168.127.2:5353".parse().unwrap(),
+            &replies,
+        );
+
+        assert!(heard.try_recv().is_err());
+        assert_eq!(counters.seen(DROPPED_DNS_IN_FLIGHT), 1);
+    }
+
+    #[test]
+    fn a_guest_gets_no_more_flows_than_its_limits_allow() {
+        let allowance = Allowance::of(Limits::default());
+
+        let tcp: Vec<_> = (0..MAX_TCP_FLOWS)
+            .filter_map(|_| allowance.tcp_flow())
+            .collect();
+        let udp: Vec<_> = (0..MAX_UDP_FLOWS)
+            .filter_map(|_| allowance.udp_flow())
+            .collect();
+        let dns: Vec<_> = (0..MAX_DNS_IN_FLIGHT)
+            .filter_map(|_| allowance.dns_query())
+            .collect();
+
+        assert_eq!(tcp.len(), MAX_TCP_FLOWS);
+        assert_eq!(udp.len(), MAX_UDP_FLOWS);
+        assert_eq!(dns.len(), MAX_DNS_IN_FLIGHT);
+        assert!(
+            allowance.tcp_flow().is_none(),
+            "the 1025th TCP flow is refused"
+        );
+        assert!(
+            allowance.udp_flow().is_none(),
+            "the 513th UDP flow is refused"
+        );
+        assert!(
+            allowance.dns_query().is_none(),
+            "the 257th query is refused"
+        );
+
+        drop(tcp);
+        assert!(
+            allowance.tcp_flow().is_some(),
+            "a flow that ended gives its place back"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_guard_aborts_every_task_of_the_run() {
+        let held = Arc::new(());
+        let (to_stack, from_guest) = channel(1);
+        let (to_guest, _from_stack) = channel(1);
+        let mut running = start(
+            Config::for_subnet(SUBNET, Boundary::Permissive),
+            gateway_of(SUBNET),
+            Frames {
+                from_guest,
+                to_guest,
+            },
+        )
+        .expect("the stack comes up");
+        let carried = Arc::clone(&held);
+        running.adopt(async move {
+            let _carried = carried;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        drop(running);
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            Arc::strong_count(&held),
+            1,
+            "every task the run owned has been aborted"
+        );
+        assert!(
+            to_stack.send(Vec::new()).await.is_err(),
+            "and nothing reads the link"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -987,12 +1568,24 @@ mod tests {
             hickory_proto::op::ResponseCode::ServFail,
             "a name the host cannot resolve is a failure the guest can see"
         );
+        let relayed = guest
+            .question(gateway, "example.test", hickory_proto::rr::RecordType::MX)
+            .await;
+        let relayed = hickory_proto::op::Message::from_vec(&relayed).unwrap();
         assert_eq!(
-            guest
-                .question(gateway, "example.test", hickory_proto::rr::RecordType::MX)
-                .await,
-            FORWARDED,
-            "a question this gateway does not answer itself goes upstream"
+            relayed.queries[0].query_type(),
+            hickory_proto::rr::RecordType::MX,
+            "every question type is relayed, not only the ones a gateway could answer itself"
+        );
+        assert_eq!(relayed.metadata.id, 0x1234);
+
+        let whole = guest
+            .question(gateway, "big.test", hickory_proto::rr::RecordType::A)
+            .await;
+        let whole = hickory_proto::op::Message::from_vec(&whole).unwrap();
+        assert!(
+            !whole.metadata.truncation,
+            "an answer too big for UDP is asked again over TCP, so the guest gets all of it"
         );
 
         let handle = guest.open(address, 40_000);
@@ -1044,6 +1637,72 @@ mod tests {
             "the guest closing its own end ends the connection"
         );
         assert_eq!(&served.await.unwrap(), b"ping!", "the host heard the guest");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_guest_over_its_flow_limits_reaches_the_host_no_further() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let carried = listener.local_addr().unwrap();
+        let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::mem::forget(stream);
+            }
+        });
+        let echo = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let echoed = echo.local_addr().unwrap();
+        let datagrams = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&datagrams);
+        tokio::spawn(async move {
+            let mut heard = [0u8; 16];
+            loop {
+                let (read, from) = echo.recv_from(&mut heard).await.unwrap();
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                echo.send_to(&heard[..read], from).await.unwrap();
+            }
+        });
+
+        let mut guest = FakeGuest::limited(
+            Boundary::Permissive,
+            Limits {
+                tcp_flows: 1,
+                udp_flows: 1,
+                ..Limits::default()
+            },
+        );
+        guest.lease().await;
+
+        let first = guest.open(carried, 41_000);
+        assert!(
+            guest
+                .wait_until(first, PATIENCE, |socket| socket.may_send())
+                .await,
+            "the first flow is carried"
+        );
+        let second = guest.open(carried, 41_001);
+        guest
+            .wait_until(second, Duration::from_secs(2), |_| false)
+            .await;
+
+        assert_eq!(
+            accepts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a guest over its TCP limit reaches the host no further"
+        );
+
+        let flow = guest.bind_udp(41_100);
+        assert_eq!(guest.exchange(flow, echoed, b"first").await, b"first");
+        let over = guest.bind_udp(41_101);
+        guest.send_only(over, echoed, b"second").await;
+
+        assert_eq!(
+            datagrams.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a guest over its UDP limit reaches the host no further"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

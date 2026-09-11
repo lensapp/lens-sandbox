@@ -520,13 +520,13 @@ async fn orchestrate(
     let netdev = vm::netdev::real::start(|k| std::env::var_os(k))?;
     #[cfg(target_os = "macos")]
     {
-        let backend = netdev.backend;
-        log::info!("Network", "{} ({})", backend.label(), backend.detail());
+        let label = netdev.backend.label();
+        log::info!("Network", "{label} ({})", netdev.detail);
         crate::audit::record_net_backend(
             &run_id,
             &microvm,
-            backend.label(),
-            backend.detail(),
+            label,
+            &netdev.detail,
             &crate::clock::RealClock,
         )?;
     }
