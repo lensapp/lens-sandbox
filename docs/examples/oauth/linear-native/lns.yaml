@@ -1,0 +1,32 @@
+apiVersion: lns.run/v1
+kind: connector
+name: linear-native
+spec:
+  serves:
+    - api.linear.app
+  methods:
+    - name: browser
+      auth:
+        kind: oauth_authorization_code
+        label: Linear account
+        help: Register this public client with http://127.0.0.1:53682/callback.
+        clientId: REPLACE_WITH_REGISTERED_PUBLIC_CLIENT_ID
+        authorizationEndpoint: https://linear.app/oauth/authorize
+        tokenEndpoint: https://api.linear.app/oauth/token
+        scopes:
+          - read
+        redirect:
+          kind: loopback
+          path: /callback
+          port: 53682
+      egress:
+        http:
+          - match: api.linear.app
+            verdict: allow
+      credentials:
+        - envVar: LINEAR_TOKEN
+          placeholder: linear_LNSPLACEHOLDER0000000000
+          field: access_token
+          injections:
+            - kind: bearer_header
+              domain: api.linear.app

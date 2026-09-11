@@ -156,6 +156,15 @@ pub enum Request {
         session: String,
         values: SecretValues,
     },
+    ConnectStatus {
+        session: String,
+    },
+    CancelConnect {
+        session: String,
+    },
+    OpenConnectBrowser {
+        session: String,
+    },
     DisconnectConnector {
         name: String,
         connection: Option<String>,
@@ -362,6 +371,10 @@ pub enum Response {
         name: String,
     },
     /// The mechanism is waiting to be told these, in this order. `message` is the connector author's own words and is shown as theirs; it is empty where the mechanism is one lns implements (§3.2.6).
+    ConnectorPending {
+        session: String,
+        progress: OAuthProgress,
+    },
     ConnectorAsks {
         session: String,
         message: String,
@@ -426,6 +439,8 @@ pub struct ConnectorView {
 /// One method, with the whole payload a grant applies — a card that showed less would take consent for what it did not disclose (sandbox-spec §1.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorMethodView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthDisclosure>,
     pub name: String,
     pub label: String,
     /// What a connect calls the value it asks for — the `auth`'s own label, else its kind. Absent for a method with no `auth`: there is nothing to connect, so it is granted directly.
@@ -500,6 +515,32 @@ impl ConnectorView {
 }
 
 /// One value a mechanism is waiting for. `secret` decides whether the caller echoes what is typed, so it travels rather than being guessed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthDisclosure {
+    pub destinations: Vec<String>,
+    pub scopes: Vec<String>,
+    pub callback: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OAuthProgress {
+    Starting {
+        destinations: Vec<String>,
+        scopes: Vec<String>,
+    },
+    DeviceAuthorization {
+        verification_uri: String,
+        user_code: String,
+    },
+    WaitingForBrowser {
+        authorization_endpoint: String,
+        redirect_uri: String,
+    },
+    Canceled,
+    Expired,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorFieldView {
     pub name: String,
@@ -1255,6 +1296,8 @@ mod tests {
 
     fn a_method_setting(env: &[&str], credentials: &[&str]) -> ConnectorMethodView {
         ConnectorMethodView {
+            oauth: None,
+
             name: "token".into(),
             label: "token".into(),
             auth_label: Some("token".into()),

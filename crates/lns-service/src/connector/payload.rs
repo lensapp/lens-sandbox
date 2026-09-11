@@ -383,7 +383,7 @@ mod tests {
         // §4.1: `field` names which of the method's auth outputs supplies the value, so the key is not the variable.
         let drawing = method(serde_json::json!({
             "name": "oauth",
-            "auth": { "kind": "oauth_device" },
+            "auth": { "kind": "future_oauth_kind" },
             "credentials": [{
                 "envVar": "SOME_TOKEN",
                 "placeholder": "some-provider-LNSPLACEHOLDER00",

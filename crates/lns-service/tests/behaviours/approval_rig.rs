@@ -92,6 +92,17 @@ pub struct GrantingPort {
 }
 
 impl ConnectorPort for GrantingPort {
+    fn current_offers(&self) -> Option<Vec<lns_ipc::ConnectorView>> {
+        None
+    }
+    fn current_supply(
+        &self,
+    ) -> Option<
+        std::collections::BTreeMap<String, lns_service::approval_flow::protocol::GrantedPayload>,
+    > {
+        None
+    }
+
     fn connect(
         &self,
         _: &str,
@@ -205,6 +216,16 @@ impl ScriptedRounds {
 }
 
 impl ConnectRoundPort for ScriptedRounds {
+    fn poll_connect(
+        &self,
+        _: &str,
+    ) -> Result<lns_service::approval_flow::session::ConnectRound, String> {
+        Err("this scripted exchange does not poll".into())
+    }
+    fn open_connect_browser(&self, _: &str) -> Result<(), String> {
+        Err("this scripted exchange has no browser".into())
+    }
+
     fn begin_connect(&self, _: &str, _: &str, _: &str) -> Result<ConnectRound, String> {
         self.next()
     }

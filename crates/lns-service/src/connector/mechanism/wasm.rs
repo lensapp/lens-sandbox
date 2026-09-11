@@ -316,6 +316,8 @@ fn outcome_of(outcome: wit::Outcome) -> Result<Outcome> {
     }
     let spoken: usize = outcome.authority.iter().map(String::len).sum();
     Ok(Outcome {
+        oauth: None,
+
         values: outcome
             .values
             .into_iter()

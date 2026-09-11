@@ -98,6 +98,8 @@ fn view_of(
             .map(|method| {
                 let code = code_of(method);
                 ConnectorMethodView {
+                    oauth: oauth_disclosure(method),
+
                     name: method.name.clone(),
                     label: method.label().to_string(),
                     auth_label: method.auth.as_ref().map(|auth| auth.label().to_string()),
@@ -131,6 +133,36 @@ fn view_of(
 }
 
 /// The `auth` outputs a connect must supply, which is what [`super::payload`] later reads the values back under, so the ask and the read cannot drift apart (§4.1).
+fn oauth_disclosure(method: &lns_artifact::connector::Method) -> Option<lns_ipc::OAuthDisclosure> {
+    use lns_artifact::connector::oauth::{OAuth, Redirect};
+    let config = method.auth.as_ref()?.oauth()?.ok()?;
+    let (endpoint, callback) = match &config {
+        OAuth::Device {
+            device_authorization_endpoint,
+            ..
+        } => (device_authorization_endpoint.clone(), None),
+        OAuth::AuthorizationCode {
+            authorization_endpoint,
+            redirect,
+            ..
+        } => {
+            let Redirect::Loopback { path, port } = redirect;
+            (
+                authorization_endpoint.clone(),
+                Some(format!(
+                    "http://127.0.0.1:{}{path}",
+                    port.map_or_else(|| "<ephemeral>".into(), |p| p.to_string())
+                )),
+            )
+        }
+    };
+    Some(lns_ipc::OAuthDisclosure {
+        destinations: vec![endpoint, config.token_endpoint().into()],
+        scopes: config.scopes().to_vec(),
+        callback,
+    })
+}
+
 fn asked_of(method: &lns_artifact::connector::Method) -> Vec<String> {
     method
         .credentials
@@ -1068,6 +1100,9 @@ mod tests {
                     "some-provider",
                     label,
                     Connection {
+                        oauth: None,
+                        generation: 0,
+
                         method: "token".to_string(),
                         authority: Authority::default(),
                         values: Default::default(),
@@ -1100,6 +1135,9 @@ mod tests {
                 "some-provider",
                 "work",
                 Connection {
+                    oauth: None,
+                    generation: 0,
+
                     method: "token".to_string(),
                     authority: Authority::of(["repo:read"]),
                     values: Default::default(),
@@ -1181,6 +1219,9 @@ mod tests {
                     name,
                     label,
                     Connection {
+                        oauth: None,
+                        generation: 0,
+
                         method: method.to_string(),
                         authority: Authority::default(),
                         values,
@@ -1355,7 +1396,7 @@ mod tests {
             "name": "some-provider",
             "spec": {
                 "serves": ["api.some-provider.example"],
-                "methods": [{ "name": "future", "auth": { "kind": "oauth_device" } }],
+                "methods": [{ "name": "future", "auth": { "kind": "future_oauth_kind" } }],
             },
         })
         .to_string()

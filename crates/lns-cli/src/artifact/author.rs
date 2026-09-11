@@ -722,7 +722,7 @@ mod tests {
             "      credentials:\n        - envVar: STRIPE_KEY\n          placeholder: stripe_LNSPLACEHOLDER00000\n",
             "      filesets:\n        - guestPath: ~/.stripe\n          inline:\n            config.json: '{}'\n",
             "      env:\n        STRIPE_REGION: eu\n",
-            "    - name: sso\n      auth:\n        kind: oauth_device\n",
+            "    - name: sso\n      auth:\n        kind: future_oauth_kind\n",
             "    - name: open\n      egress:\n        http:\n          - match: api.stripe.com\n            verdict: allow\n",
         );
         let fs = fake("/work/lns.yaml", yaml);
@@ -742,7 +742,7 @@ mod tests {
             assert!(text.contains(expected), "missing {expected:?} in: {text}");
         }
         assert!(
-            text.contains("method:       sso (auth: oauth_device) — needs a newer lns"),
+            text.contains("method:       sso (auth: future_oauth_kind) — needs a newer lns"),
             "a mechanism this version cannot run is listed and marked, because the document is valid and its other methods still work: {text}"
         );
         assert!(

@@ -11,15 +11,19 @@ use super::session::{Session, Sessions};
 use super::store::{Authority, Connection, ConnectorStore};
 
 /// One turn of a connect, and the connector it belongs to — read from the session that was resumed, never from the shape of a handle.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
     pub connector: String,
     pub connecting: Connecting,
 }
 
 /// What one turn of a connect produced.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Connecting {
+    Pending {
+        session: String,
+        progress: lns_ipc::OAuthProgress,
+    },
     Asks {
         session: String,
         message: String,
@@ -35,6 +39,7 @@ impl Connecting {
     /// What a caller who cannot be asked again gets: a mechanism still asking has nowhere to ask, so it is a failure rather than a wait.
     pub fn finished(self) -> Result<super::handler::Connected> {
         match self {
+            Self::Pending { .. } => bail!("native OAuth requires interactive authorization"),
             Self::Connected(connected) => Ok(connected),
             Self::Failed(reason) => bail!("{reason}"),
             Self::Asks { fields, .. } => bail!(
@@ -72,6 +77,29 @@ impl Driver<'_> {
             );
         }
         let prepared = prepare(store, mechanisms, name, &definition, method)?;
+        if let Some(native) = prepared.mechanism.native() {
+            let pending = native.start(&prepared.host, now_millis)?;
+            let progress = pending.progress.clone();
+            let (session, replaced) = sessions.operations().open(
+                super::operations::Work {
+                    session: Session {
+                        connector: name.into(),
+                        digest: installed.digest,
+                        method: method.name.clone(),
+                        label: label.into(),
+                        state: Vec::new(),
+                        expires_at_millis: now_millis.saturating_add(900_000),
+                    },
+                    previous: store.connections_of(name)?.remove(label),
+                },
+                pending,
+                now_millis,
+            )?;
+            for old in replaced {
+                native.cancel(&old.session.state);
+            }
+            return Ok(Connecting::Pending { session, progress });
+        }
         let step = prepared.mechanism.connect(&prepared.host, now_millis)?;
         settle(
             store,
@@ -135,6 +163,16 @@ impl Driver<'_> {
         label: &str,
         values: Answers,
     ) -> Result<Connecting> {
+        let installed = super::handler::installed_entry(&self.store, name)?;
+        let definition = lns_artifact::connector::parse(&installed.document)?;
+        if super::handler::offerable_method(&definition, method)?
+            .auth
+            .as_ref()
+            .and_then(lns_artifact::connector::Auth::oauth)
+            .is_some()
+        {
+            return Ok(Connecting::Failed("native OAuth requires an interactive client; connect from a terminal or approval card".into()));
+        }
         let mut turn = self.begin(name, method, label)?;
         for _ in 0..MAX_ROUNDS_WITHOUT_A_PERSON {
             let Connecting::Asks {
@@ -173,7 +211,158 @@ impl Driver<'_> {
 
     /// The same, for a person who walked away from a round rather than a caller who ran out of them (§3.2.6).
     pub fn abandon_handle(&self, handle: &str) {
+        if let Some(work) = self.sessions.operations().cancel(handle) {
+            self.cleanup_native(&work);
+        }
         self.sessions.take(handle, self.now_millis);
+    }
+
+    pub fn cancel_connector(&self, name: &str, label: Option<&str>) {
+        for work in self.sessions.operations().cancel_connector(name, label) {
+            self.cleanup_native(&work);
+        }
+    }
+
+    pub fn sweep_native(&self) {
+        for work in self.sessions.operations().sweep(self.now_millis) {
+            self.cleanup_native(&work);
+        }
+    }
+
+    pub fn native_status(&self, handle: &str) -> Result<Turn> {
+        let (connector, status) = self
+            .sessions
+            .operations()
+            .status(handle)
+            .ok_or_else(|| anyhow::anyhow!("that OAuth operation is no longer open"))?;
+        let connecting = match status {
+            super::operations::Status::Pending(progress) => Connecting::Pending {
+                session: handle.into(),
+                progress,
+            },
+            super::operations::Status::Completed(done) => Connecting::Connected(done),
+            super::operations::Status::Failed(why) => Connecting::Failed(why),
+        };
+        Ok(Turn {
+            connector,
+            connecting,
+        })
+    }
+
+    fn native_prepared(
+        &self,
+        work: &super::operations::Work,
+    ) -> Result<super::mechanism::traits::Prepared> {
+        let installed = super::handler::installed_entry(&self.store, &work.session.connector)?;
+        if installed.digest != work.session.digest {
+            bail!("the connector changed during authorization; connect again");
+        }
+        let definition = lns_artifact::connector::parse(&installed.document)?;
+        let method = super::handler::offerable_method(&definition, &work.session.method)?;
+        prepare(
+            &self.store,
+            self.mechanisms,
+            &work.session.connector,
+            &definition,
+            method,
+        )
+    }
+
+    fn cleanup_native(&self, work: &super::operations::Work) {
+        self.mechanisms.cancel_native(&work.session.state);
+    }
+
+    pub fn open_native_browser(&self, handle: &str) -> Result<()> {
+        let work = self
+            .sessions
+            .operations()
+            .inspect(handle)
+            .ok_or_else(|| anyhow::anyhow!("that OAuth operation is no longer open"))?;
+        if work.session.expires_at_millis <= self.now_millis {
+            bail!("OAuth authorization expired");
+        }
+        let prepared = self.native_prepared(&work)?;
+        prepared
+            .mechanism
+            .native()
+            .ok_or_else(|| anyhow::anyhow!("this operation has no native browser"))?
+            .open_browser(&work.session.state)
+    }
+
+    pub fn advance_native(&self, handle: &str, finished_at: impl FnOnce() -> u64) -> Result<()> {
+        use super::mechanism::oauth::{Advance, flow::FlowError};
+        use super::operations::Status;
+        let Some(work) = self.sessions.operations().claim(handle, self.now_millis) else {
+            return Ok(());
+        };
+        let prepared = self.native_prepared(&work);
+        let result = prepared
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+            .and_then(|prepared| {
+                prepared
+                    .mechanism
+                    .native()
+                    .ok_or_else(|| anyhow::anyhow!("this operation is no longer native OAuth"))?
+                    .advance(&prepared.host, &work.session.state, self.now_millis)
+            });
+        let now = finished_at();
+        match result {
+            Ok(Advance::Pending(next)) => {
+                let state = next.state.clone();
+                if !self.sessions.operations().advance(handle, now, next) {
+                    self.mechanisms.cancel_native(&state);
+                }
+            }
+            Ok(Advance::Done(outcome)) => {
+                self.cleanup_native(&work);
+                self.sessions
+                    .operations()
+                    .complete(handle, now, || self.save_native(&work, outcome));
+            }
+            Err(error) => {
+                self.cleanup_native(&work);
+                self.sessions.operations().complete(handle, now, || {
+                    Ok(
+                        if matches!(error.downcast_ref::<FlowError>(), Some(FlowError::Expired)) {
+                            Status::Pending(lns_ipc::OAuthProgress::Expired)
+                        } else {
+                            Status::Failed(format!("{error:#}"))
+                        },
+                    )
+                });
+            }
+        }
+        Ok(())
+    }
+    fn save_native(
+        &self,
+        work: &super::operations::Work,
+        outcome: Outcome,
+    ) -> Result<super::operations::Status> {
+        use super::operations::Status;
+        let Some(recorded) = self.store.record_if_current(
+            &work.session.connector,
+            &work.session.label,
+            &work.session.digest,
+            work.previous.as_ref(),
+            Connection {
+                method: work.session.method.clone(),
+                values: outcome.values,
+                authority: Authority::of(outcome.authority),
+                oauth: outcome.oauth,
+                expires_at_millis: outcome.expires_at_millis,
+                generation: 0,
+            },
+        )?
+        else {
+            return Ok(Status::Pending(lns_ipc::OAuthProgress::Canceled));
+        };
+        recorded.stored?;
+        Ok(Status::Completed(super::handler::Connected {
+            connection: work.session.label.clone(),
+            invalidated: recorded.invalidated,
+        }))
     }
 }
 
@@ -248,6 +437,9 @@ fn settle(
                 name,
                 label,
                 Connection {
+                    oauth: outcome.oauth,
+                    generation: 0,
+
                     method: method.name.clone(),
                     authority: Authority::of(outcome.authority.iter().cloned()),
                     values,

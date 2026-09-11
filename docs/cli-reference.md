@@ -334,6 +334,19 @@ against your working directory. The digest a local install records is the one
 publishing that directory would produce, so a grant survives the publish, and
 naming the document records the same digest as naming its directory.
 
+Native `oauth_device` and `oauth_authorization_code` methods show the provider,
+authentication destinations, scopes, and callback configuration. Device sign-in
+shows a verification URL and user code; browser sign-in opens the configured
+loopback callback flow with PKCE. The service owns polling and completion, and
+the CLI waits automatically. Ctrl-C cancels. No Wasm component or client secret
+is required; public client registration remains provider setup work. See the
+[native OAuth templates](examples/oauth/).
+
+Disconnect removes local credentials and cancels pending authorization; it does
+not revoke access at the provider. Renewals never open a browser. Expired or
+invalid credentials are disarmed for running sandboxes, and a connection whose
+authority changes needs a new grant decision.
+
 `connect` needs a terminal by design: no flag answers it, so nothing pastes a
 secret on your behalf. `grant` needs a terminal or `--yes`: the flag runs on
 your machine as you, and you already hold the credential it grants, so typing it

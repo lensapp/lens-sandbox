@@ -593,6 +593,8 @@ fn a_debug_of_a_step_cannot_print_the_values_or_the_state_it_carries() {
     );
 
     let done = Step::Done(Outcome {
+        oauth: None,
+
         values: Answers::from([("access_token".to_string(), "sk-live-real".to_string())]),
         authority: std::collections::BTreeSet::from(["repo:read".to_string()]),
         expires_at_millis: Some(1_000),

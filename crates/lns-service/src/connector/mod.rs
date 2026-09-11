@@ -9,6 +9,7 @@ pub mod handler;
 pub mod layer;
 pub mod mechanism;
 pub mod offer;
+pub mod operations;
 pub mod payload;
 pub mod real;
 pub mod refresh;

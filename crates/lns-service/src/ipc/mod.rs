@@ -425,6 +425,9 @@ fn connector_call(request: &Request) -> Option<crate::connector::real::Call> {
             method: method.clone(),
             connection: connection.clone(),
         },
+        Request::ConnectStatus { session } => Call::Status(session.clone()),
+        Request::CancelConnect { session } => Call::Cancel(session.clone()),
+        Request::OpenConnectBrowser { session } => Call::OpenBrowser(session.clone()),
         Request::AnswerConnect { session, values } => Call::Answer {
             session: session.clone(),
             values: values.0.clone(),
@@ -543,6 +546,9 @@ pub async fn handle_request(request: &Request, started_at: Instant) -> Response 
         | Request::UninstallConnector { .. }
         | Request::ListConnectors
         | Request::BeginConnect { .. }
+        | Request::ConnectStatus { .. }
+        | Request::CancelConnect { .. }
+        | Request::OpenConnectBrowser { .. }
         | Request::AnswerConnect { .. }
         | Request::DisconnectConnector { .. }
         | Request::GrantConnector { .. }
@@ -1273,6 +1279,20 @@ pub(super) fn build_session_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_oauth_actions_keep_their_operation_handle_and_distinct_intent() {
+        use crate::connector::real::Call;
+        assert!(
+            matches!(connector_call(&Request::ConnectStatus{session:"operation".into()}),Some(Call::Status(session)) if session=="operation")
+        );
+        assert!(
+            matches!(connector_call(&Request::CancelConnect{session:"operation".into()}),Some(Call::Cancel(session)) if session=="operation")
+        );
+        assert!(
+            matches!(connector_call(&Request::OpenConnectBrowser{session:"operation".into()}),Some(Call::OpenBrowser(session)) if session=="operation")
+        );
+    }
 
     #[test]
     fn peer_with_the_services_own_uid_is_authorized() {

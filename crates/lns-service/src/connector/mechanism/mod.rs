@@ -6,6 +6,7 @@
 //! answer the same shapes.
 
 pub mod host;
+pub mod oauth;
 pub mod real;
 pub mod selection;
 pub(crate) mod text;
@@ -31,6 +32,7 @@ pub type Answers = BTreeMap<String, String>;
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct Outcome {
     pub values: Answers,
+    pub oauth: Option<oauth::token::OAuthState>,
     pub authority: BTreeSet<String>,
     pub expires_at_millis: Option<u64>,
 }
@@ -139,7 +141,7 @@ impl Bounds {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     pub method: String,
     pub url: String,
@@ -147,11 +149,29 @@ pub struct HttpRequest {
     pub body: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("payload", &"<redacted>")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for HttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpResponse")
+            .field("status", &self.status)
+            .field("payload", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

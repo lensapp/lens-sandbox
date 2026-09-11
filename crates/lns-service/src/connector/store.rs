@@ -64,6 +64,10 @@ pub struct Recorded {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Connection {
     pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<super::mechanism::oauth::token::OAuthState>,
+    #[serde(default)]
+    pub generation: u64,
     #[serde(default)]
     pub authority: Authority,
     #[serde(default)]
@@ -76,8 +80,12 @@ pub struct Connection {
 impl Connection {
     /// Whether the values have run out. A connection that has is held rather than armed, so the next request raises the connect prompt instead of carrying a value the destination will reject (§4.1).
     pub fn has_run_out(&self, now_millis: u64) -> bool {
-        self.expires_at_millis
-            .is_some_and(|expiry| expiry <= now_millis)
+        self.oauth
+            .as_ref()
+            .is_some_and(|state| state.reconnect_required)
+            || self
+                .expires_at_millis
+                .is_some_and(|expiry| expiry <= now_millis)
     }
 }
 
@@ -293,6 +301,7 @@ fn names_connection_with_other_authority(
 
 /// Held across every load-mutate-save. Process-wide rather than per store, because each entry point opens a store of its own over the same three files, so a lock one instance owned would serialize nothing.
 static WRITE: Mutex<()> = Mutex::new(());
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 pub struct ConnectorStore<'a> {
@@ -380,9 +389,11 @@ impl<'a> ConnectorStore<'a> {
     }
 
     pub fn connections_of(&self, name: &str) -> io::Result<BTreeMap<String, Connection>> {
-        Ok(self
-            .values
-            .load()?
+        let held = self.values.load()?;
+        if let Some(highest) = held.values().map(|c| c.generation).max() {
+            GENERATION.fetch_max(highest, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(held
             .into_iter()
             .filter_map(|(key, connection)| match splits(&key) {
                 Some((keyed, label)) if keyed == name => Some((label.to_string(), connection)),
@@ -401,6 +412,15 @@ impl<'a> ConnectorStore<'a> {
         connection: Connection,
     ) -> io::Result<Recorded> {
         let _guard = self.lock();
+        self.record_locked(name, label, connection)
+    }
+
+    fn record_locked(
+        &self,
+        name: &str,
+        label: &str,
+        mut connection: Connection,
+    ) -> io::Result<Recorded> {
         let mut grants = self.grants.load()?;
         let invalidated = grants_invalidated_by(&grants, name, label, &connection.authority);
         if !invalidated.is_empty() {
@@ -412,6 +432,20 @@ impl<'a> ConnectorStore<'a> {
 
         // The grants are already dropped, so the caller is told which even where the values behind them will not store.
         let stored = self.values.load().and_then(|mut values| {
+            let highest = values
+                .values()
+                .map(|held| held.generation)
+                .max()
+                .unwrap_or_default();
+            GENERATION.fetch_max(highest, std::sync::atomic::Ordering::SeqCst);
+            connection.generation = GENERATION
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |value| value.checked_add(1),
+                )
+                .map_err(|_| io::Error::other("connection generations exhausted"))?
+                + 1;
             values.insert(connection_key(name, label), connection);
             self.values.save(&values)
         });
@@ -419,6 +453,27 @@ impl<'a> ConnectorStore<'a> {
             invalidated,
             stored,
         })
+    }
+
+    pub fn record_if_current(
+        &self,
+        name: &str,
+        label: &str,
+        digest: &str,
+        previous: Option<&Connection>,
+        connection: Connection,
+    ) -> io::Result<Option<Recorded>> {
+        let _guard = self.lock();
+        if !self
+            .installed
+            .list()?
+            .iter()
+            .any(|entry| entry.name == name && entry.digest == digest)
+            || self.connections_of(name)?.get(label) != previous
+        {
+            return Ok(None);
+        }
+        self.record_locked(name, label, connection).map(Some)
     }
 
     /// Drops one connection, or every connection of a connector when `label` is absent. The connector stays installed and grants naming it stay (§3.3 `disconnect`).
@@ -757,6 +812,47 @@ mod tests {
     }
 
     #[test]
+    fn oauth_refresh_cannot_recreate_a_disconnected_connection() {
+        let rig = Rig::new();
+        let store = rig.store();
+        store
+            .install(
+                "sha256:abc",
+                &packing("some-provider", "./seed"),
+                &[layer_of(&[("config.json", b"{}".to_vec())])],
+                &[],
+            )
+            .unwrap();
+        let previous = connection(Authority::default());
+        store
+            .record_authentication("some-provider", "work", previous)
+            .unwrap()
+            .stored
+            .unwrap();
+        let previous = store
+            .connections_of("some-provider")
+            .unwrap()
+            .remove("work")
+            .unwrap();
+        store
+            .drop_connections("some-provider", Some("work"))
+            .unwrap();
+        assert!(
+            store
+                .record_if_current(
+                    "some-provider",
+                    "work",
+                    "sha256:abc",
+                    Some(&previous),
+                    previous.clone()
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.connections_of("some-provider").unwrap().is_empty());
+    }
+
+    #[test]
     fn installing_keeps_the_packed_fileset_that_came_with_the_document() {
         let rig = Rig::new();
         let layer = layer_of(&[("config.json", b"{}".to_vec())]);
@@ -1056,6 +1152,9 @@ mod tests {
 
     fn connection(authority: Authority) -> Connection {
         Connection {
+            oauth: None,
+            generation: 0,
+
             method: "token".to_string(),
             authority,
             values: [("SOME_TOKEN".to_string(), "real-secret".to_string())].into(),

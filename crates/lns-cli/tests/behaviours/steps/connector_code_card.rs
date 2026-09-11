@@ -13,6 +13,8 @@ fn a_connector_whose_method_is_a_code_method(world: &mut BehaviourWorld, method:
         digest: DIGEST.to_string(),
         serves: vec!["api.some-provider.example".to_string()],
         methods: vec![lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: method.clone(),
             label: method.clone(),
             auth_label: Some("code".to_string()),

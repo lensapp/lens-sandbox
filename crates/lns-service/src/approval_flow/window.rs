@@ -15,6 +15,7 @@ pub struct DecisionDelivery {
 /// What the user chose on a card: a wire decision, an answer about the connector that serves the destination, or a closed card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
+    OpenConnectBrowser,
     Decide(Decision),
     /// Connect this run to the offered connector by the named method (§3.2.4).
     Grant {
@@ -171,7 +172,10 @@ impl WindowState {
         self.keep_and_deliver(id, RequestAction::BeginConnect { method, label })
     }
 
-    /// Keeps the card: the mechanism may answer with another round.
+    pub fn open_connect_browser(&self, id: &str) -> bool {
+        self.keep_and_deliver(id, RequestAction::OpenConnectBrowser)
+    }
+
     pub fn answer_connect(&self, id: &str, values: lns_ipc::SecretValues) -> bool {
         self.keep_and_deliver(id, RequestAction::AnswerConnect { values })
     }
@@ -445,6 +449,13 @@ mod tests {
                 method: "sign-in".into(),
                 label: "work".into(),
             }
+        );
+        assert_eq!(s.pending_count(), 1);
+
+        assert!(s.open_connect_browser("r1"));
+        assert_eq!(
+            rx.try_recv().unwrap().action,
+            RequestAction::OpenConnectBrowser
         );
         assert_eq!(s.pending_count(), 1);
 

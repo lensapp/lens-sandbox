@@ -455,6 +455,10 @@ impl eframe::App for TrayApp {
                 self.window_state.begin_connect(&id, method, label);
                 ui.ctx().request_repaint();
             }
+            Some(CardAction::OpenConnectBrowser { id }) => {
+                self.window_state.open_connect_browser(&id);
+                ui.ctx().request_repaint();
+            }
             Some(CardAction::AnswerConnect { id, values }) => {
                 self.window_state.answer_connect(&id, values);
                 ui.ctx().request_repaint();
@@ -474,6 +478,9 @@ const BTN_GAP: f32 = 12.0;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CardAction {
+    OpenConnectBrowser {
+        id: String,
+    },
     /// Dismiss every card at once (the pile's close-all header button), denying or cancelling each held request.
     CloseAll,
     Decide {
@@ -1313,7 +1320,10 @@ fn render_connector_card(
                     match &stage {
                         ConnectStage::Asking(ask) => {
                             render_round(ui, ask, draft);
-                            ready.set(true);
+                            ready.set(!matches!(
+                                ask.oauth,
+                                Some(lns_ipc::OAuthProgress::Starting { .. })
+                            ));
                         }
                         ConnectStage::Working => ready.set(false),
                         ConnectStage::Idle { .. } => ready.set(ready_to_grant(method, draft)),
@@ -1332,13 +1342,22 @@ fn render_connector_card(
                     && ready
                 {
                     chosen = Some(match stage {
+                        ConnectStage::Asking(ask) if ask.oauth.is_some() => {
+                            ConnectorChoice::OpenBrowser
+                        }
                         ConnectStage::Asking(_) => ConnectorChoice::Answer,
                         ConnectStage::Idle { begins: true } => ConnectorChoice::Begin,
                         _ => ConnectorChoice::Grant,
                     });
                 }
-                if deny_button(&mut cols[1], "Never here").clicked() {
-                    chosen = Some(ConnectorChoice::Decline);
+                let native = matches!(&stage, ConnectStage::Asking(ask) if ask.oauth.is_some());
+                if deny_button(&mut cols[1], if native { "Cancel" } else { "Never here" }).clicked()
+                {
+                    chosen = Some(if native {
+                        ConnectorChoice::Cancel
+                    } else {
+                        ConnectorChoice::Decline
+                    });
                 }
             });
             chosen
@@ -1362,6 +1381,8 @@ fn render_connector_card(
             id: id.clone(),
             values: lns_ipc::SecretValues(std::mem::take(&mut draft.answers)),
         },
+        ConnectorChoice::OpenBrowser => CardAction::OpenConnectBrowser { id },
+        ConnectorChoice::Cancel => CardAction::DismissNetwork { id },
         ConnectorChoice::Decline => CardAction::Decline { id },
     });
     (action, out.response)
@@ -1371,12 +1392,17 @@ fn render_connector_card(
 fn latched_at(choice: &ConnectorChoice, seq: u64) -> Option<u64> {
     match choice {
         ConnectorChoice::Begin | ConnectorChoice::Answer => Some(seq),
-        ConnectorChoice::Grant | ConnectorChoice::Decline => None,
+        ConnectorChoice::Grant
+        | ConnectorChoice::Decline
+        | ConnectorChoice::OpenBrowser
+        | ConnectorChoice::Cancel => None,
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum ConnectorChoice {
+    OpenBrowser,
+    Cancel,
     Grant,
     /// Open the sign-in, because a `code` method decides what to ask for and the card learns it only by asking (§3.2.6).
     Begin,
@@ -1406,7 +1432,8 @@ fn connect_stage<'a>(
     match &prompt.connect {
         Some(ask) => ConnectStage::Asking(ask),
         None => ConnectStage::Idle {
-            begins: draft.connecting && method.is_some_and(|method| method.carries_code),
+            begins: draft.connecting
+                && method.is_some_and(|method| method.carries_code || method.oauth.is_some()),
         },
     }
 }
@@ -1416,6 +1443,37 @@ fn render_round(ui: &mut egui::Ui, ask: &ConnectAsk, draft: &mut OfferDraft) {
     use egui::RichText;
 
     ui.add_space(8.0);
+    if let Some(progress) = &ask.oauth {
+        match progress {
+            lns_ipc::OAuthProgress::Starting { .. } => {
+                ui.label("Preparing OAuth authorization…");
+            }
+            lns_ipc::OAuthProgress::DeviceAuthorization {
+                verification_uri,
+                user_code,
+            } => {
+                ui.label(format!("Open {verification_uri}"));
+                ui.label(format!("Code: {user_code}"));
+                if ui.button("Copy code").clicked() {
+                    ui.ctx().copy_text(user_code.clone());
+                }
+                ui.label("Waiting for authorization…");
+            }
+            lns_ipc::OAuthProgress::WaitingForBrowser {
+                authorization_endpoint,
+                redirect_uri,
+            } => {
+                ui.label(format!("Sign in at {authorization_endpoint}"));
+                ui.label(format!("Waiting for callback at {redirect_uri}"));
+            }
+            lns_ipc::OAuthProgress::Canceled => {
+                ui.label("Authorization canceled");
+            }
+            lns_ipc::OAuthProgress::Expired => {
+                ui.label("Authorization expired");
+            }
+        }
+    }
     for line in attribution(ask) {
         ui.label(
             RichText::new(line)
@@ -1472,6 +1530,12 @@ fn plain_input(ui: &mut egui::Ui, value: &mut String, hint: &str) -> egui::Respo
 fn primary_label(stage: &ConnectStage<'_>) -> &'static str {
     match stage {
         ConnectStage::Working => "Working…",
+        ConnectStage::Asking(ask)
+            if matches!(ask.oauth, Some(lns_ipc::OAuthProgress::Starting { .. })) =>
+        {
+            "Preparing…"
+        }
+        ConnectStage::Asking(ask) if ask.oauth.is_some() => "Open browser",
         ConnectStage::Asking(_) => "Continue",
         ConnectStage::Idle { begins: true } => "Sign in",
         ConnectStage::Idle { begins: false } => "Connect",
@@ -1614,7 +1678,7 @@ fn render_new_connection(
             .margin(egui::Margin::symmetric(10, 9))
             .desired_width(f32::INFINITY),
     );
-    if method.carries_code {
+    if method.carries_code || method.oauth.is_some() {
         // A mechanism decides what to ask and how often, so there is nothing to draw until the first round comes back (§3.2.6).
         return;
     }
@@ -1627,7 +1691,7 @@ fn render_new_connection(
 }
 
 /// What a surface that grants in one press says instead of a form it cannot drive. A run is offered the connections this machine held when it started, so one made now reaches it at its next start.
-pub(crate) const SIGN_IN_ELSEWHERE: &str = "This method signs in through its own code, which decides what to ask for round by round. Sign in on the approval card, or run `lns connector connect` at a terminal, then grant it here.";
+pub(crate) const SIGN_IN_ELSEWHERE: &str = "Sign in on the approval card, or run `lns connector connect` at a terminal, then grant the connection here.";
 
 /// Suggests a name nothing already holds, because reusing one silently replaces the connection under it — counting them is not enough, since disconnecting one leaves its successor's name taken.
 fn begin_connecting(
@@ -1671,6 +1735,16 @@ fn disclosure_lines(
     .filter(|(_, items)| !items.is_empty())
     .map(|(label, items)| format!("{label}: {}", items.join(", ")))
     .collect();
+    if let Some(oauth) = &method.oauth {
+        lines.push(format!(
+            "OAuth destinations: {}",
+            oauth.destinations.join(", ")
+        ));
+        lines.push(format!("Requested scopes: {}", oauth.scopes.join(" ")));
+        if let Some(callback) = &oauth.callback {
+            lines.push(format!("Registered callback: {callback}"));
+        }
+    }
     if method.carries_code {
         let reaches = if method.hosts.is_empty() {
             lns_ipc::NO_HOSTS_DISCLOSURE.to_string()
@@ -1763,7 +1837,7 @@ pub(crate) fn ready_to_grant(method: &lns_ipc::ConnectorMethodView, draft: &Offe
     if !draft.connecting {
         return draft.connection.is_some();
     }
-    if method.carries_code {
+    if method.carries_code || method.oauth.is_some() {
         // The press opens the exchange rather than granting, so the name is all the card needs before it can begin.
         return !draft.label.trim().is_empty();
     }
@@ -2236,6 +2310,8 @@ mod tests {
                     digest: "sha256:abc".into(),
                     serves: vec!["api.some-provider.example".into()],
                     methods: vec![lns_ipc::ConnectorMethodView {
+                        oauth: None,
+
                         name: method.into(),
                         label: method.into(),
                         auth_label: (!credentials.is_empty()).then(|| "token".to_string()),
@@ -2589,6 +2665,8 @@ mod tests {
             ..OfferDraft::default()
         };
         let method = lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: "token".into(),
             label: "token".into(),
             auth_label: Some("token".into()),
@@ -2622,6 +2700,8 @@ mod tests {
     fn the_card_names_every_variable_applying_the_method_sets() {
         // §3.2.4: the card is labelled with what applying it will do, and a variable a credential fills is a variable the method sets.
         let method = lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: "token".into(),
             label: "token".into(),
             auth_label: Some("token".into()),
@@ -2656,6 +2736,8 @@ mod tests {
 
     fn carrying_code(hosts: &[&str], runs_programs: bool) -> lns_ipc::ConnectorMethodView {
         lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: "sign-in".into(),
             label: "sign-in".into(),
             auth_label: Some("sign-in".into()),
@@ -2718,6 +2800,7 @@ mod tests {
         from_code: bool,
     ) -> ConnectAsk {
         ConnectAsk {
+            oauth: None,
             connector: "some-provider".into(),
             method: "sign-in".into(),
             message: message.into(),
@@ -2909,6 +2992,8 @@ mod tests {
 
     fn opening(overrides: Option<Vec<String>>) -> lns_ipc::ConnectorMethodView {
         lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: "token".into(),
             label: "token".into(),
             auth_label: Some("token".into()),
@@ -2946,6 +3031,8 @@ mod tests {
     fn a_new_connection_is_named_something_not_already_taken() {
         // §7.1: a colliding label silently replaces the connection already under it, which is the one outcome a second connection must not produce.
         let method = lns_ipc::ConnectorMethodView {
+            oauth: None,
+
             name: "token".into(),
             label: "token".into(),
             auth_label: Some("token".into()),

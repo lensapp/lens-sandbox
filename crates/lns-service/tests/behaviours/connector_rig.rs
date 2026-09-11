@@ -136,6 +136,10 @@ impl Counted {
 }
 
 impl lns_service::connector::mechanism::traits::Mechanisms for Counted {
+    fn cancel_native(&self, state: &[u8]) {
+        self.inner.cancel_native(state);
+    }
+
     fn for_method(
         &self,
         connector: &str,

@@ -14,6 +14,8 @@ mod declared_rig;
 mod forward_rig;
 #[path = "behaviours/image_rig.rs"]
 mod image_rig;
+#[path = "behaviours/oauth_rig.rs"]
+mod oauth_rig;
 #[path = "behaviours/policy_rig.rs"]
 mod policy_rig;
 #[path = "behaviours/runner.rs"]

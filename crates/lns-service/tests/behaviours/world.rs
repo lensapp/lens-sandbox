@@ -17,6 +17,7 @@ use lns_service::forward::ForwardGuard;
 
 #[derive(Debug, Default, World)]
 pub struct BehaviourWorld {
+    pub oauth: Option<crate::oauth_rig::OAuthRig>,
     pub started_at: Option<Instant>,
     pub response: Option<Response>,
     pub approval: Option<ApprovalRig>,
