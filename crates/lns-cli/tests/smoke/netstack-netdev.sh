@@ -13,6 +13,12 @@
 #   5. A host listener that logs every accept sees none of them. A failed
 #      connect alone does not prove nothing was reached.
 #
+# A refused destination shows up in the guest as `HTTP/1.1 502 Bad Gateway`
+# with an empty body: the in-guest transparent proxy answers for an upstream
+# connect that the netstack reset. curl exits 0 on that 502, so every probe
+# below judges the answer by its body — the witness serves `REACHED!` and the
+# gateway must serve nothing at all — never by curl's exit status.
+#
 # Like `interactive-shell.exp`, it writes its own sandbox definition
 # into a temp project first. The negative checks need a definition
 # whose egress is `match: "*"`, because that is the shape in which a
@@ -112,25 +118,45 @@ trap 'kill "$WITNESS_PID" 2>/dev/null; rm -rf "$PROJECT"' EXIT
 sleep 1
 
 printf '[test]  nothing on the guest subnet answers but the resolver\n'
+PROBES=$(cat <<EOF
+probe() {
+  out=\$(curl -sS --max-time 5 -o - -w '\nSTATUS=%{http_code}' "\$2" 2>/dev/null || true)
+  body=\$(printf '%s' "\${out%STATUS=*}" | tr -d '\r\n')
+  printf '%s-STATUS %s\n' "\$1" "\${out##*STATUS=}"
+  printf '%s-BODY [%s]\n' "\$1" "\$body"
+  printf '%s' "\$body" | grep -q REACHED && printf '%s-ANSWERED\n' "\$1"
+  return 0
+}
+probe GATEWAY http://192.168.127.1/
+probe HOST-NAT http://192.168.127.254:${WITNESS_PORT}/
+probe LOOPBACK http://127.0.0.1:${WITNESS_PORT}/
+echo done
+EOF
+)
+
 if ! REFUSED=$("$LNS" run --rm --yes --quiet --name "${RUN_NAME}-refused" \
-  --entrypoint /bin/sh -f "$PROJECT/lns.yaml" -- \
-  -c "curl -sS --max-time 5 http://192.168.127.1/ && echo GATEWAY-ANSWERED; curl -sS --max-time 5 http://192.168.127.254:${WITNESS_PORT}/ && echo HOST-LOOPBACK-ANSWERED; curl -sS --max-time 5 http://127.0.0.1:${WITNESS_PORT}/ && echo LOOPBACK-ANSWERED; echo done"); then
+  --entrypoint /bin/sh -f "$PROJECT/lns.yaml" -- -c "$PROBES"); then
   fail "the refusal run did not complete. Output: ${REFUSED}"
 fi
 
-case "$REFUSED" in
-  *GATEWAY-ANSWERED*) fail "the gateway answered an HTTP request; there must be no control API on it." ;;
-  *) pass "http://192.168.127.1/ is refused" ;;
-esac
+status_of() {
+  printf '%s\n' "$REFUSED" | sed -n "s/^$1-STATUS //p"
+}
+
+GATEWAY_BODY=$(printf '%s\n' "$REFUSED" | sed -n 's/^GATEWAY-BODY \[\(.*\)\]$/\1/p')
+if [ -n "$GATEWAY_BODY" ]; then
+  fail "the gateway served a body on TCP; there must be no control API on it: [${GATEWAY_BODY}]"
+fi
+pass "http://192.168.127.1/ served nothing on TCP; the guest proxy answered $(status_of GATEWAY)"
 
 case "$REFUSED" in
-  *HOST-LOOPBACK-ANSWERED*) fail "192.168.127.254 answered; there must be no NAT entry to the host's loopback." ;;
-  *) pass "http://192.168.127.254/ is refused" ;;
+  *HOST-NAT-ANSWERED*) fail "192.168.127.254 answered; there must be no NAT entry to the host's loopback." ;;
+  *) pass "http://192.168.127.254:${WITNESS_PORT}/ is refused; the guest proxy answered $(status_of HOST-NAT)" ;;
 esac
 
 case "$REFUSED" in
   *LOOPBACK-ANSWERED*) fail "127.0.0.1 answered; the guest must not reach the host's loopback." ;;
-  *) pass "http://127.0.0.1/ is refused" ;;
+  *) pass "http://127.0.0.1:${WITNESS_PORT}/ is refused; the guest proxy answered $(status_of LOOPBACK)" ;;
 esac
 
 if [ -s "$WITNESS_LOG" ] && grep -q accepted "$WITNESS_LOG"; then
