@@ -11,6 +11,11 @@ import time
 service_binary, client_binary = (str(Path(path).resolve()) for path in sys.argv[1:])
 with tempfile.TemporaryDirectory(prefix="lns-ui-", dir="/tmp") as directory:
     root = Path(directory)
+    connector = root / "connector.yaml"
+    connector.write_text(json.dumps({
+        "apiVersion": "lns.run/v1", "kind": "connector", "name": "issues",
+        "spec": {"description": "Work with projects and issues.", "serves": ["api.issues.example"], "methods": [{"name": "public"}]},
+    }))
     run = "aa010000000000000000000000000000"
     entry = hashlib.sha256(b"d\x01quiet_river\x01example.com\x01false").hexdigest()[:16]
     run_dir = root / "runs" / run
@@ -38,7 +43,7 @@ with tempfile.TemporaryDirectory(prefix="lns-ui-", dir="/tmp") as directory:
                 assert service.poll() is None, "service exited before binding"
                 assert time.monotonic() < deadline, "service startup timed out"
                 time.sleep(0.05)
-            client = subprocess.run([client_binary, address, entry], capture_output=True, text=True, timeout=30)
+            client = subprocess.run([client_binary, address, entry, str(connector)], capture_output=True, text=True, timeout=30)
             if client.returncode != 0:
                 errors = [line for line in client.stderr.splitlines() if "Fatal error" in line or "Error raised" in line or "SMOKE FAILURE STAGE:" in line]
                 detail = " | ".join(errors or client.stderr.splitlines()[:8])

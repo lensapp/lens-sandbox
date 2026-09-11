@@ -304,6 +304,7 @@ impl ApprovalRig {
         self.session.set_connector_port(self.granting.clone());
         self.session.set_connect_round_port(self.rounds.clone());
         self.session.hold_for_offers(vec![ConnectorView {
+            description: None,
             name: name.to_string(),
             digest: "sha256:test".into(),
             serves: vec![host.to_string()],

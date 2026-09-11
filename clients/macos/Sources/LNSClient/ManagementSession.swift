@@ -46,6 +46,7 @@ public final class ManagementSession {
 
     public init(service: any ServiceClient) { self.service = service }
     public func serviceConnected() { connected = true; onChange?() }
+    public func dismissMessage() { message = nil; onChange?() }
     public func refresh() async {
         let current = generation
         let task: Task<[ConnectorOffer], Error>

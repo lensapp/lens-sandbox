@@ -28,7 +28,7 @@ struct ClientSmoke {
                 FileHandle.standardError.write(Data("SMOKE FAILURE STAGE: \(stage)\n".utf8))
             }
         }
-        try require(CommandLine.arguments.count == 3, "usage: LNSClientSmoke <socket> <entry-id>")
+        try require(CommandLine.arguments.count == 4, "usage: LNSClientSmoke <socket> <entry-id> <connector-path>")
         let client = ServiceConnection(path: CommandLine.arguments[1])
         let id = CommandLine.arguments[2]
         var updates = try client.replies(to: .watchDashboard).makeAsyncIterator()
@@ -65,6 +65,15 @@ struct ClientSmoke {
         guard case .offer(nil) = try await client.send(.inspectOffer(id: "gone")) else {
             throw ServiceError(message: "missing connector offer was not explicit")
         }
+        stage = "connector description"
+        guard case .completed = try await client.manage(.install(CommandLine.arguments[3])) else {
+            throw ServiceError(message: "connector installation did not complete")
+        }
+        guard case let .connectors(connectors) = try await client.manage(.listConnectors) else {
+            throw ServiceError(message: "connector inventory missing")
+        }
+        try require(connectors.first { $0.name == "issues" }?.description == "Work with projects and issues.",
+                    "authored connector description did not reach the Swift client")
         stage = "initial approval subscription"
         var live = try client.replies(to: .watchApprovals).makeAsyncIterator()
         guard let bytes = try await live.next(), case let .snapshot(approvals) = try ServiceReply.decode(bytes) else {
@@ -80,6 +89,6 @@ struct ClientSmoke {
         stage = "approval subscription shutdown"
         try require(try await live.next() == nil, "shutdown did not close approval subscription")
         stage = "complete"
-        print("PASS: Swift client and real service agree on audit, history, actions, notifications, and shutdown")
+        print("PASS: Swift client and real service agree on audit, history, actions, connector descriptions, notifications, and shutdown")
     }
 }

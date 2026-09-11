@@ -26,6 +26,7 @@ struct DashboardView: View {
             }
             .frame(minWidth: 540, minHeight: 400)
             .background(LNSTheme.canvas)
+            .overlay(alignment: .bottomTrailing) { actionNotice }
             .navigationTitle("LNS")
             .toolbar {
                 ToolbarItem {
@@ -123,9 +124,6 @@ struct DashboardView: View {
         if let message = model.notice { notice(message) }
         if model.page == .sandboxes || model.page == .connectors {
             if let message = model.management.error { notice(message) }
-            if let message = model.management.message {
-                Text(message).font(.callout).frame(maxWidth: .infinity, alignment: .leading).padding(10)
-            }
         }
         if let message = live.notice { notice(message) }
         if !live.connected {
@@ -145,6 +143,30 @@ struct DashboardView: View {
         ForEach(Array(live.snapshot.notices.enumerated()), id: \.offset) { _, message in notice(message) }
         if !live.snapshot.notices.isEmpty {
             Button("Clear notices", action: live.dismissNotices).disabled(!live.connected).padding(.bottom, 8)
+        }
+    }
+
+    @ViewBuilder private var actionNotice: some View {
+        if let message = model.management.message {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 20)).foregroundStyle(LNSTheme.success)
+                Text(message).font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(LNSTheme.heading)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                Button(action: model.management.dismissMessage) {
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain).foregroundStyle(LNSTheme.muted)
+                .accessibilityLabel("Dismiss notification").help("Dismiss notification")
+            }
+            .padding(16)
+            .background(LNSTheme.raised, in: RoundedRectangle(cornerRadius: 8))
+            .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(LNSTheme.success.opacity(0.5), lineWidth: 1) }
+            .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
+            .frame(maxWidth: 420, alignment: .trailing).padding(24)
+            .accessibilityElement(children: .contain).accessibilityLabel("Action completed")
         }
     }
 

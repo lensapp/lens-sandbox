@@ -2363,6 +2363,7 @@ mod tests {
                 treatment: Treatment::Inspected,
                 run: Some("my-agent".into()),
                 offer: Some(lns_ipc::ConnectorView {
+                    description: None,
                     name: "some-provider".into(),
                     digest: "sha256:abc".into(),
                     serves: vec!["api.some-provider.example".into()],
@@ -3199,6 +3200,7 @@ mod tests {
 
     fn holding(labels: &[&str]) -> lns_ipc::ConnectorView {
         lns_ipc::ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: Vec::new(),
