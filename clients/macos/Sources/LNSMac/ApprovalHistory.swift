@@ -8,6 +8,8 @@ struct ApprovalHistory: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            LNSPageHeading(title: "Approvals", subtitle: model.sandboxName)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(24)
             HStack {
                 Menu {
                     Button("All answers") { model.filters.answers = []; model.clearHistory() }
@@ -23,15 +25,15 @@ struct ApprovalHistory: View {
                     }
                 } label: { Label(model.filters.answers.isEmpty ? "All answers" : "\(model.filters.answers.count) answers", systemImage: "line.3.horizontal.decrease.circle") }
                 Spacer()
-                Text("\(model.waitingCount) waiting").font(.caption).foregroundStyle(.secondary)
+                LNSStatus(title: "\(model.waitingCount) waiting", color: model.waitingCount > 0 ? LNSTheme.warning : LNSTheme.muted)
             }
-            .padding(12)
+            .padding(.horizontal, 24).padding(.bottom, 16)
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     if model.history.isEmpty {
                         Text(model.connected ? "Nothing has been asked matching these filters." : "Waiting for the service…")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(LNSTheme.muted)
                     }
                     groups(model.waiting)
                     if !model.archived.isEmpty {
@@ -43,7 +45,7 @@ struct ApprovalHistory: View {
                         }
                     }
                 }
-                .padding(16)
+                .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -57,7 +59,7 @@ struct ApprovalHistory: View {
         }
         return ForEach(names, id: \.self) { name in
             VStack(alignment: .leading, spacing: 8) {
-                Text(name).font(.headline)
+                Text(name).font(.headline).foregroundStyle(LNSTheme.heading)
                 ForEach(grouped[name] ?? []) { approval in
                     HistoryRow(approval: approval, model: model)
                 }
@@ -81,7 +83,7 @@ struct HistoryRow: View {
                     Text(approval.entry.subject).lineLimit(2)
                     if approval.raw { Image(systemName: "eye.slash").help("LNS cannot inspect this traffic.") }
                     Spacer()
-                    Text(approval.entry.answer).foregroundStyle(answerColor)
+                    LNSStatus(title: approval.entry.answer, color: answerColor)
                 }
                 .contentShape(Rectangle())
             }
@@ -93,8 +95,8 @@ struct HistoryRow: View {
                 expansion
             }
         }
-        .padding(12)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+        .padding(16)
+        .lnsPanel()
         .disabled(!model.connected || model.busy.contains(approval.id))
         .confirmationDialog("Remove this entry from the list? Its policy decision will remain in effect.", isPresented: $confirmingRemoval, titleVisibility: .visible) {
             Button("Remove from list", role: .destructive) { model.perform(.removeHistory(id: approval.id), for: approval.id) }
@@ -103,19 +105,19 @@ struct HistoryRow: View {
 
     private var answerColor: Color {
         switch approval.entry.answer {
-        case "undecided", "withdrawn": return .orange
-        case "always allow", "granted": return .green
-        case "always deny", "declined": return .red
-        default: return .secondary
+        case "undecided", "withdrawn": return LNSTheme.warning
+        case "always allow", "granted": return LNSTheme.success
+        case "always deny", "declined": return LNSTheme.critical
+        default: return LNSTheme.muted
         }
     }
 
     @ViewBuilder private var expansion: some View {
         if let action = approval.entry.action { Text(action).font(.system(.callout, design: .monospaced)).textSelection(.enabled) }
-        if approval.raw { Label("LNS cannot inspect this traffic.", systemImage: "eye.slash").foregroundStyle(.orange) }
+        if approval.raw { Label("LNS cannot inspect this traffic.", systemImage: "eye.slash").foregroundStyle(LNSTheme.warning) }
         if approval.grantable {
             if model.offerLoading { ProgressView("Loading current connector offer…").controlSize(.small) }
-            if let error = model.offerError { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
+            if let error = model.offerError { Text(error).foregroundStyle(LNSTheme.warning).textSelection(.enabled) }
             if let offer = model.offer {
                 ConnectorGrant(offer: offer, showsDecline: false) { action in
                     if case let .grant(method, connection) = action {

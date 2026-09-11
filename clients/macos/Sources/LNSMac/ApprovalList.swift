@@ -8,6 +8,7 @@ struct ApprovalList: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                LNSPageHeading(title: "Live Requests", subtitle: "Decide what your sandboxes can access.")
                 if model.connected {
                     HStack {
                         if !model.snapshot.approvals.isEmpty {
@@ -20,7 +21,7 @@ struct ApprovalList: View {
                 }
                 if let error = model.connectionNotice {
                     Label(error, systemImage: "wifi.exclamationmark")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(LNSTheme.muted)
                     Text("Start the service with lns service start.")
                         .font(.callout)
                     Button(model.startingService ? "Starting Service…" : "Start Service", action: model.startService)
@@ -36,17 +37,17 @@ struct ApprovalList: View {
                 }
                 if model.connected && model.snapshot.approvals.isEmpty {
                     Label("No requests waiting for approval", systemImage: "checkmark.shield")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(LNSTheme.muted)
                 }
                 ForEach(model.snapshot.approvals) { approval in
                     ApprovalCard(approval: approval) { action in model.respond(to: approval, with: action) }
                         .disabled(!model.connected || approval.submitting || model.busy.contains(approval.id))
-                    Divider()
                 }
             }
-            .padding(20)
+            .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .lnsAppearance()
     }
 }
 
@@ -56,16 +57,16 @@ struct ApprovalCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(approval.run ?? "Sandbox").font(.subheadline).foregroundStyle(.secondary)
-            Text(approval.host).font(.title2).textSelection(.enabled)
+            Text(approval.run ?? "Sandbox").font(.subheadline).foregroundStyle(LNSTheme.muted)
+            Text(approval.host).font(.system(size: 18, weight: .semibold)).foregroundStyle(LNSTheme.heading).textSelection(.enabled)
             Text(approval.action).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
             if approval.raw {
                 Label("LNS cannot inspect this traffic.", systemImage: "eye.slash")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(LNSTheme.warning)
             }
             if !approval.waiting {
                 Text("The request stopped waiting. Connecting still applies to its next attempt.")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(LNSTheme.muted)
             }
             if let offer = approval.offer {
                 ConnectorGrant(offer: offer, respond: respond)
@@ -84,6 +85,7 @@ struct ApprovalCard: View {
                 .help("Fail this held request without recording a decision.")
         }
         .buttonStyle(.bordered)
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading).lnsPanel()
         .accessibilityElement(children: .contain)
     }
 }
@@ -130,7 +132,7 @@ struct ConnectorGrant: View {
             if let overrides = method.overrides {
                 disclosureLine("Overrides deny rules", overrides)
             } else {
-                Text("Deny-rule overrides could not be checked.").foregroundStyle(.orange)
+                Text("Deny-rule overrides could not be checked.").foregroundStyle(LNSTheme.warning)
             }
             if let help = method.help { Text(help) }
         }
@@ -158,7 +160,7 @@ struct ConnectorGrant: View {
                         set: { values[field] = $0 }
                     ))
                 }
-                Text("Credentials stay outside the workload.").font(.caption).foregroundStyle(.secondary)
+                Text("Credentials stay outside the workload.").font(.caption).foregroundStyle(LNSTheme.muted)
             }
         }
     }

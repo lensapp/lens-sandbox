@@ -9,7 +9,7 @@ struct LNSApp: App {
 
     var body: some Scene {
         Window("LNS", id: "dashboard") {
-            DashboardView(model: delegate.model.dashboard, live: delegate.model)
+            DashboardView(model: delegate.model.dashboard, live: delegate.model, mark: (try? delegate.icons.get())?.menuBar)
         }
         .defaultSize(width: 1100, height: 740)
         .windowResizability(.contentMinSize)

@@ -13,21 +13,19 @@ struct SandboxCreateForm: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("New Sandbox").font(.title2.weight(.semibold))
-            Text("Start a fresh sandbox from a definition. It keeps running when you close the window.")
-                .foregroundStyle(.secondary)
+            LNSPageHeading(title: "New Sandbox", subtitle: "Start from a definition. It keeps running when you close the window.")
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     fields.disabled(busy)
                     if attempted, let error = model.creation?.error {
                         Label(error, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange).textSelection(.enabled)
+                            .foregroundStyle(LNSTheme.warning).textSelection(.enabled)
                     }
                     if attempted, let output = model.creation?.output, !output.isEmpty {
                         Text("Launch details").font(.headline)
                         Text(output).font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                            .padding(12).lnsPanel()
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -43,6 +41,7 @@ struct SandboxCreateForm: View {
             }
         }
         .padding(24).frame(width: 580, height: 620)
+        .lnsAppearance()
         .interactiveDismissDisabled(busy)
         .sheet(isPresented: $registryLogin) { RegistryLoginForm(model: model) }
     }
@@ -61,15 +60,15 @@ struct SandboxCreateForm: View {
             }
             TextField("Sandbox name (optional)", text: $draft.name).textFieldStyle(.roundedBorder)
             if let validationError {
-                Text(validationError).font(.caption).foregroundStyle(.orange)
+                Text(validationError).font(.caption).foregroundStyle(LNSTheme.warning)
             }
             Text("The definition supplies the workload, resources, and network policy.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(LNSTheme.muted)
             Button("Sign In to a Registry…") { registryLogin = true }
                 .disabled(!model.registries.connected || model.registries.busy)
             Toggle("Allow this definition’s setup and declared host access", isOn: $draft.allowSetup)
             Text("Accepts declared tool installers, setup scripts, file mounts, and host access. Leave this off to see any required consent in the launch details before trying again.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(LNSTheme.muted)
         }
     }
 

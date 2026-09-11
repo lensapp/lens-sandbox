@@ -6,11 +6,12 @@ import LNSClient
 struct DashboardView: View {
     @ObservedObject var model: DashboardModel
     @ObservedObject var live: AppModel
+    var mark: NSImage?
 
     var body: some View {
         NavigationSplitView {
             sidebar
-                .navigationSplitViewColumnWidth(min: 190, ideal: 230, max: 320)
+                .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 320)
         } detail: {
             VStack(spacing: 0) {
                 notices
@@ -23,8 +24,8 @@ struct DashboardView: View {
                 }
             }
             .frame(minWidth: 540, minHeight: 400)
-            .navigationTitle(model.page.rawValue)
-            .navigationSubtitle(model.sandboxName)
+            .background(LNSTheme.canvas)
+            .navigationTitle("LNS")
             .toolbar {
                 ToolbarItem {
                     Button {
@@ -38,6 +39,7 @@ struct DashboardView: View {
                 }
             }
         }
+        .lnsAppearance()
         .task { await model.watch() }
         .sheet(item: $model.managementSheet) { sheet in
             ManagementForm(model: model, sheet: sheet).id(sheet.id)
@@ -48,59 +50,89 @@ struct DashboardView: View {
     }
 
     private var sidebar: some View {
-        List {
-            Section {
-                ForEach(DashboardPage.allCases) { page in
-                    Button {
-                        model.page = page
-                    } label: {
-                        HStack {
-                            Label(page.rawValue, systemImage: page.symbol)
-                            Spacer()
-                            if page == .approvals, model.waitingCount > 0 {
-                                Text("\(model.waitingCount)").font(.caption.monospacedDigit())
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                if let mark {
+                    Image(nsImage: mark).resizable().renderingMode(.template)
+                        .scaledToFit().frame(width: 32, height: 32).accessibilityHidden(true)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("LNS").font(.system(size: 19, weight: .semibold)).tracking(1)
+                    Text("Your local sandboxes").font(.caption).foregroundStyle(LNSTheme.muted)
+                }
+            }
+            .foregroundStyle(LNSTheme.heading).padding(24)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    navigationGroup("WORKSPACE", pages: [.sandboxes, .connectors, .registries])
+                    navigationGroup("ACTIVITY", pages: [.audit, .approvals])
+                    if model.page == .audit || model.page == .approvals {
+                        VStack(alignment: .leading, spacing: 4) {
+                            sectionLabel("SANDBOXES")
+                            sandboxButton(id: nil, name: "All sandboxes", image: "", status: "")
+                            ForEach(model.data.sandboxes) { sandbox in
+                                sandboxButton(id: sandbox.id, name: sandbox.name, image: sandbox.image, status: sandbox.status)
                             }
-                            if model.page == page { Image(systemName: "checkmark").accessibilityLabel("Selected") }
                         }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityValue(model.page == page ? "Selected" : "")
-                }
-            }
-            if model.page == .audit || model.page == .approvals {
-                Section("Sandboxes") {
-                    sandboxButton(id: nil, name: "All sandboxes", image: "", status: "")
-                    ForEach(model.data.sandboxes) { sandbox in
-                        sandboxButton(id: sandbox.id, name: sandbox.name, image: sandbox.image, status: sandbox.status)
                     }
                 }
+                .padding(.horizontal, 12).padding(.vertical, 24)
+            }
+            Divider()
+            HStack(spacing: 8) {
+                Circle().fill(model.connected ? LNSTheme.success : LNSTheme.warning).frame(width: 6, height: 6)
+                Text(live.startingService ? "Starting service…" : model.connected ? "Service connected" : "Service disconnected")
+                    .font(.caption).foregroundStyle(LNSTheme.muted)
+            }.padding(20)
+        }
+        .background(LNSTheme.surface)
+    }
+
+    private func navigationGroup(_ title: String, pages: [DashboardPage]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            sectionLabel(title)
+            ForEach(pages) { page in
+                Button { model.page = page } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: page.symbol).frame(width: 18)
+                            .foregroundStyle(model.page == page ? LNSTheme.accent : LNSTheme.muted)
+                        Text(page.rawValue)
+                        Spacer()
+                        if page == .approvals, model.waitingCount > 0 {
+                            Text("\(model.waitingCount)").font(.caption.monospacedDigit())
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(LNSTheme.accent.opacity(0.2), in: RoundedRectangle(cornerRadius: 4))
+                        }
+                    }
+                }
+                .buttonStyle(LNSNavigationStyle(selected: model.page == page))
+                .accessibilityValue(model.page == page ? "Selected" : "")
             }
         }
-        .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom) {
-            Label(live.startingService ? "Starting service…" : model.connected ? "Connected to service" : "Service disconnected",
-                  systemImage: model.connected ? "checkmark.circle" : "wifi.exclamationmark")
-                .font(.caption).foregroundStyle(.secondary).padding(12)
-        }
+    }
+
+    private func sectionLabel(_ title: String) -> some View {
+        Text(title).font(.system(size: 10, weight: .semibold)).tracking(1)
+            .foregroundStyle(LNSTheme.muted).padding(.horizontal, 12).padding(.bottom, 6)
     }
 
     private func sandboxButton(id: String?, name: String, image: String, status: String) -> some View {
         Button { model.selectSandbox(id) } label: {
             HStack(alignment: .top) {
                 Image(systemName: id == nil ? "square.stack.3d.up" : "shippingbox")
-                    .foregroundStyle(status == "running" ? Color.green : Color.secondary)
+                    .foregroundStyle(status == "running" ? LNSTheme.success : LNSTheme.muted)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(name).lineLimit(1)
-                    if !image.isEmpty { Text(image).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
-                    if !status.isEmpty { Text(status).font(.caption2).foregroundStyle(.secondary) }
+                    if !image.isEmpty { Text(image).font(.caption).foregroundStyle(LNSTheme.muted).lineLimit(1) }
+                    if !status.isEmpty { Text(status).font(.caption2).foregroundStyle(LNSTheme.muted) }
                 }
                 Spacer()
                 if model.filters.sandbox == id { Image(systemName: "checkmark").accessibilityLabel("Selected") }
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(LNSNavigationStyle(selected: model.filters.sandbox == id))
         .accessibilityElement(children: .combine)
         .accessibilityValue(model.filters.sandbox == id ? "Selected" : "")
         .help(id ?? "Every sandbox's audit and approval history")
@@ -138,9 +170,9 @@ struct DashboardView: View {
 
     private func notice(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle")
-            .font(.callout).foregroundStyle(.orange)
+            .font(.callout).foregroundStyle(LNSTheme.warning)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10).textSelection(.enabled)
+            .padding(12).background(LNSTheme.warning.opacity(0.08)).textSelection(.enabled)
     }
 }
 
@@ -152,6 +184,8 @@ struct AuditTimeline: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            LNSPageHeading(title: "Audit", subtitle: model.sandboxName)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(24)
             HStack {
                 Button { searchFocused = true } label: { Label("Search audit", systemImage: "magnifyingglass") }
                     .labelStyle(.iconOnly).buttonStyle(.borderless).keyboardShortcut("f")
@@ -172,9 +206,9 @@ struct AuditTimeline: View {
                 } label: { Label(model.filters.kinds.isEmpty ? "All event kinds" : "\(model.filters.kinds.count) kinds", systemImage: "line.3.horizontal.decrease.circle") }
                 .disabled(!model.filters.search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Spacer()
-                Text("\(model.events.count) events").font(.caption).foregroundStyle(.secondary)
+                Text("\(model.events.count) events").font(.caption).foregroundStyle(LNSTheme.muted)
             }
-            .padding(12)
+            .padding(.horizontal, 24).padding(.bottom, 16)
             Divider()
             HSplitView {
                 Table(model.events, selection: $model.selectedEvent) {
@@ -183,10 +217,11 @@ struct AuditTimeline: View {
                     TableColumn("Event", value: \.detail)
                 }
                 .accessibilityLabel("Audit events")
+                .scrollContentBackground(.hidden)
                 .overlay {
                     if model.events.isEmpty {
                         Text(model.connected ? "No matching audit events." : "Waiting for the service…")
-                            .foregroundStyle(.secondary).allowsHitTesting(false)
+                            .foregroundStyle(LNSTheme.muted).allowsHitTesting(false)
                     }
                 }
                 .frame(minWidth: 420)
@@ -225,9 +260,9 @@ struct AuditDetail: View {
                 Divider()
                 detail("Raw event", event.raw, monospaced: true)
             }
-            .padding(16)
+            .padding(24)
         }
-        .background(.background)
+        .background(LNSTheme.surface)
         .onExitCommand(perform: close)
     }
 
@@ -246,7 +281,7 @@ struct AuditDetail: View {
     private func detail(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(label).font(.caption).foregroundStyle(.secondary)
+                Text(label).font(.caption).foregroundStyle(LNSTheme.muted)
                 Spacer()
                 Button {
                     NSPasteboard.general.clearContents()
