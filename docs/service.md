@@ -172,7 +172,7 @@ One guest holds no more of the host than this:
 | Concurrent DNS connections over TCP | 64 |
 | Queries per DNS connection | 64 |
 | TCP connect timeout | 10 s |
-| TCP buffer per direction per flow | 256 KiB |
+| TCP buffer per direction per flow | 64 KiB |
 | UDP flow idle timeout | 60 s |
 | DNS connection idle timeout | 10 s |
 | DNS answer write timeout | 5 s |
@@ -182,6 +182,10 @@ One guest holds no more of the host than this:
 Anything over a limit is dropped and counted, and the count is written to the
 developer trace stream (`lns run --debug`). A guest that outruns the stack
 loses frames, as it would on a busy wire.
+
+One admitted TCP flow holds about 256 to 330 KB of buffers, so a guest at the
+1024-flow bound holds about 256 to 330 MB, plus the flows it closed in the
+last ten seconds, which the stack keeps in TIME-WAIT with their buffers.
 
 ### Where the network variables are set
 

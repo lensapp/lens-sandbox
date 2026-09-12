@@ -32,8 +32,8 @@ pub const MTU: usize = 1500;
 /// The MTU, 14 for the ethernet header, 4 for a VLAN tag we never send but must not truncate either.
 pub const MAX_FRAME: usize = MTU + 14 + 4;
 
-/// One TCP window per direction per flow. 256 KiB carries a gigabit path at 2 ms without stalling on the window.
-const TCP_WINDOW_BYTES: u32 = 256 * 1024;
+/// One TCP window per direction per flow: 64 KiB covers the guest-to-host hop, whose round trip is well under a millisecond, and the host's own socket covers the path beyond it on buffers it tunes itself.
+const TCP_WINDOW_BYTES: u32 = 64 * 1024;
 
 /// At most this many TCP flows are carried for one guest at a time.
 pub const MAX_TCP_FLOWS: usize = 1024;
@@ -1332,6 +1332,7 @@ mod tests {
     struct GuestDevice {
         inbound: Receiver<Vec<u8>>,
         outbound: Sender<Vec<u8>>,
+        seen: Vec<Vec<u8>>,
     }
 
     struct GuestRx(Vec<u8>);
@@ -1365,6 +1366,7 @@ mod tests {
 
         fn receive(&mut self, _now: Instant) -> Option<(GuestRx, GuestTx<'_>)> {
             let frame = self.inbound.try_recv().ok()?;
+            self.seen.push(frame.clone());
             Some((GuestRx(frame), GuestTx(&self.outbound)))
         }
 
@@ -1421,6 +1423,7 @@ mod tests {
             let mut device = GuestDevice {
                 inbound: from_stack,
                 outbound: to_stack,
+                seen: Vec::new(),
             };
             let mut config =
                 smoltcp::iface::Config::new(HardwareAddress::Ethernet(EthernetAddress(GUEST_MAC)));
@@ -1637,6 +1640,39 @@ mod tests {
             }
             reached
         }
+    }
+
+    fn tcp_of(frame: &[u8]) -> Option<TcpHeader> {
+        let (_, payload) = etherparse::Ethernet2Header::from_slice(frame).ok()?;
+        let (ip, rest) = Ipv4Header::from_slice(payload).ok()?;
+        if ip.protocol != IpNumber::TCP {
+            return None;
+        }
+        Some(TcpHeader::from_slice(rest).ok()?.0)
+    }
+
+    /// What the stack offers the guest: the scale it asks for in its SYN-ACK, applied to the window it advertises once the connection is up.
+    fn window_offered(frames: &[Vec<u8>]) -> u32 {
+        let segments: Vec<TcpHeader> = frames.iter().filter_map(|frame| tcp_of(frame)).collect();
+        let shift = segments
+            .iter()
+            .find(|tcp| tcp.syn && tcp.ack)
+            .and_then(|syn_ack| {
+                syn_ack
+                    .options_iterator()
+                    .flatten()
+                    .find_map(|option| match option {
+                        etherparse::TcpOptionElement::WindowScale(shift) => Some(shift),
+                        _ => None,
+                    })
+            })
+            .expect("the stack answers a SYN with a window scale of its own");
+        let advertised = segments
+            .iter()
+            .rev()
+            .find(|tcp| !tcp.syn)
+            .expect("the stack advertises a window once the connection is up");
+        u32::from(advertised.window_size) << shift
     }
 
     fn config(boundary: Boundary) -> Config {
@@ -2982,6 +3018,33 @@ mod tests {
         assert!(
             allowance.tcp_flow().is_some(),
             "a flow that ended gives its place back"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_window_the_stack_offers_the_guest_is_the_one_this_link_is_sized_for() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"pong").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut guest = FakeGuest::on(Boundary::Permissive);
+        guest.lease().await;
+
+        let flow = guest.open(address, 7100);
+        assert!(
+            guest
+                .wait_until(flow, PATIENCE, |socket| socket.can_recv())
+                .await,
+            "the host's bytes reach the guest over the carried flow"
+        );
+
+        assert_eq!(
+            window_offered(&guest.device.seen),
+            64 * 1024,
+            "the window covers the guest-to-host hop; the host's own socket covers the path beyond it"
         );
     }
 
