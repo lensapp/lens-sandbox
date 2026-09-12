@@ -82,6 +82,10 @@ pub fn run_env_event(cx: &OcsfCtx, env: &Map<String, Value>) -> Map<String, Valu
     into_object(lns_ocsf::run_env(&cx.ctx(), env))
 }
 
+pub fn network_backend_event(cx: &OcsfCtx, backend: &str, detail: &str) -> Map<String, Value> {
+    into_object(lns_ocsf::network_backend(&cx.ctx(), backend, detail))
+}
+
 pub fn workload_launch_event(cx: &OcsfCtx, image: &str) -> Map<String, Value> {
     into_object(lns_ocsf::workload_launch(&cx.ctx(), image))
 }

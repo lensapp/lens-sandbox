@@ -7,7 +7,7 @@ use crate::command::{CommandSpec, RunCtx, RunFuture, subcommand};
 #[derive(clap::Args)]
 pub struct AuditArgs {
     #[arg(
-        help = "Sandbox to scope to: a run id or a unique run-id prefix. Omit for every sandbox."
+        help = "Sandbox to scope to: a run id, a run name, or a unique run-id prefix. Omit for every sandbox."
     )]
     pub sandbox: Option<String>,
     #[arg(long, value_enum, help = "Only show events of this kind.")]

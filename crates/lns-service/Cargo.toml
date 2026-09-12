@@ -72,6 +72,28 @@ toml       = "0.8"
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 zerocopy   = { version = "0.8", features = ["derive"] }
 libc       = "0.2"
+
+# The guest network: our own layer 2 (etherparse), smoltcp's TCP/UDP behind
+# netstack-smoltcp, and hickory-proto for the gateway resolver's wire format.
+etherparse = "0.16.0"
+netstack-smoltcp = "0.2.4"
+# smoltcp's own wire parsers decide at ingress what netstack-smoltcp will
+# accept, so nothing the library refuses reaches it. The same crate is the
+# fake guest in the netdev tests: an ethernet Device over a channel, a DHCPv4
+# client socket and a TCP socket. The version is the one netstack-smoltcp
+# already resolves to.
+smoltcp = { version = "0.12.0", default-features = false, features = [
+    "std",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-dhcpv4",
+    "socket-dhcpv4",
+    "socket-tcp",
+    "socket-udp",
+] }
+hickory-proto = "0.26.1"
+tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
+
 tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
 anstyle = "1"
@@ -101,6 +123,7 @@ objc2-virtualization  = { version = "0.3", features = [
     "VZVirtioConsoleDeviceSerialPortConfiguration",
     "VZSerialPortAttachment",
     "VZFileHandleSerialPortAttachment",
+    "VZFileHandleNetworkDeviceAttachment",
     "VZEntropyDeviceConfiguration",
     "VZVirtioEntropyDeviceConfiguration",
     "VZNetworkDeviceConfiguration",

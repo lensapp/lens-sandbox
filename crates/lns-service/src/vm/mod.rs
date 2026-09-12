@@ -6,6 +6,7 @@ mod cloud_hypervisor;
 mod connect;
 #[cfg(target_os = "macos")]
 pub mod diag_console;
+pub mod netdev;
 pub mod session_client;
 mod transport;
 #[cfg(target_os = "macos")]
@@ -35,6 +36,8 @@ pub struct VmSpec {
     pub connector_tx: Option<tokio::sync::oneshot::Sender<std::sync::Arc<dyn GuestTransport>>>,
     #[cfg(target_os = "macos")]
     pub console_fd: std::os::fd::RawFd,
+    #[cfg(target_os = "macos")]
+    pub net: netdev::NetAttachment,
     pub debug: bool,
     pub exec: ExecSpec,
 }
@@ -358,9 +361,21 @@ pub fn detect_backend() -> Box<dyn VmmBackend> {
 }
 
 pub async fn boot(spec: VmSpec, backend: Option<Box<dyn VmmBackend>>) -> Result<()> {
+    boot_with_attachments(spec, backend, Box::new(())).await
+}
+
+/// What a run holds for as long as its guest: the blocking closure owns it, so an aborted caller cannot take it from a VMM that still runs.
+pub async fn boot_with_attachments(
+    spec: VmSpec,
+    backend: Option<Box<dyn VmmBackend>>,
+    attachments: Box<dyn std::any::Any + Send>,
+) -> Result<()> {
     let backend = backend.unwrap_or_else(detect_backend);
     log::debug!("starting microVM via {} backend", backend.name());
-    let handle = tokio::task::spawn_blocking(move || backend.run(spec));
+    let handle = tokio::task::spawn_blocking(move || {
+        let _attachments = attachments;
+        backend.run(spec)
+    });
     handle.await??;
     Ok(())
 }
@@ -368,6 +383,7 @@ pub async fn boot(spec: VmSpec, backend: Option<Box<dyn VmmBackend>>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn base64_encode_output_has_no_whitespace() {
@@ -998,8 +1014,70 @@ mod tests {
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,
+            #[cfg(target_os = "macos")]
+            net: netdev::NetAttachment::Nat,
             debug: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
+        }
+    }
+
+    struct BlockingBackend {
+        started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+    impl VmmBackend for BlockingBackend {
+        fn run(&self, _spec: VmSpec) -> Result<()> {
+            let started = self.started.lock().unwrap().take().unwrap();
+            let release = self.release.lock().unwrap().take().unwrap();
+            let _ = started.send(());
+            let _ = release.recv();
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "blocking"
+        }
+    }
+
+    struct TellsWhenDropped(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for TellsWhenDropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_guest_attachments_outlive_a_boot_task_that_is_aborted() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let backend = Box::new(BlockingBackend {
+            started: std::sync::Mutex::new(Some(started_tx)),
+            release: std::sync::Mutex::new(Some(release_rx)),
+        }) as Box<dyn VmmBackend>;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let attachments = Box::new(TellsWhenDropped(Arc::clone(&dropped)));
+
+        let booting = tokio::spawn(async move {
+            boot_with_attachments(dummy_vmspec(), Some(backend), attachments).await
+        });
+        started_rx.await.expect("the VMM runs");
+        booting.abort();
+        assert!(
+            booting.await.unwrap_err().is_cancelled(),
+            "the task that awaited the VMM is gone"
+        );
+
+        assert!(
+            !dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the VMM still runs, so the guest's network must still be served"
+        );
+        release_tx.send(()).expect("the VMM is still waiting");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !dropped.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the attachments are dropped once the VMM has stopped"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
     }
 

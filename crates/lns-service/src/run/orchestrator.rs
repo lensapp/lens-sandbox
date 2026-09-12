@@ -515,6 +515,22 @@ async fn orchestrate(
         vm::diag_console::spawn(run_dir.join("console.log"), args.debug)?
     };
 
+    // Before the VM, so a link that cannot be served refuses the run rather than booting a guest with no network.
+    #[cfg(target_os = "macos")]
+    let netdev = vm::netdev::real::start(|k| std::env::var_os(k))?;
+    #[cfg(target_os = "macos")]
+    {
+        let label = netdev.backend.label();
+        log::info!("Network", "{label} ({})", netdev.detail);
+        crate::audit::record_net_backend(
+            &run_id,
+            &microvm,
+            label,
+            &netdev.detail,
+            &crate::clock::RealClock,
+        )?;
+    }
+
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
 
@@ -543,6 +559,8 @@ async fn orchestrate(
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
+        #[cfg(target_os = "macos")]
+        net: netdev.attachment(),
         debug: args.debug,
         exec,
     };
@@ -610,10 +628,13 @@ async fn orchestrate(
     let frame_tx_for_session = frame_tx.clone();
     log::progress("Booting", "microVM", 0, 0);
     let boot_start = std::time::Instant::now();
-    let mut vm_task = tokio::spawn(async move {
-        let _volume_leases = volume_leases;
-        vm::boot(spec, None).await
-    });
+    // The guest's network and its volume leases belong to the VMM, not to this task: an abort here must not take them from a guest that still runs.
+    #[cfg(target_os = "macos")]
+    let held = Box::new((volume_leases, netdev));
+    #[cfg(not(target_os = "macos"))]
+    let held = Box::new(volume_leases);
+    let mut vm_task =
+        tokio::spawn(async move { vm::boot_with_attachments(spec, None, held).await });
 
     let connector = tokio::select! {
         biased;
