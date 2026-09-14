@@ -123,12 +123,7 @@ pub fn real_dir_entries(dir: &Path) -> io::Result<Vec<DirEntry>> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        let name = entry.file_name().into_string().map_err(|name| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("non-utf8 file name {name:?}"),
-            )
-        })?;
+        let name = utf8_file_name(entry.file_name())?;
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             return Err(io::Error::new(
@@ -145,6 +140,15 @@ pub fn real_dir_entries(dir: &Path) -> io::Result<Vec<DirEntry>> {
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(entries)
+}
+
+fn utf8_file_name(name: std::ffi::OsString) -> io::Result<String> {
+    name.into_string().map_err(|name| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("non-utf8 file name {name:?}"),
+        )
+    })
 }
 
 /// Derive a directory listing from a flat path-keyed map, so every in-memory fake shares one implementation.
@@ -443,12 +447,9 @@ mod tests {
 
     #[test]
     fn a_non_utf8_file_name_is_refused_rather_than_lossily_packed() {
-        // A packed entry's path is a tar header string, so a lossy conversion would write a different file than the author has.
         use std::os::unix::ffi::OsStrExt;
-        let dir = tempfile::tempdir().expect("tempdir");
         let name = OsStr::from_bytes(&[0xff, 0xfe]);
-        fs::write(dir.path().join(name), b"x").unwrap();
-        let err = real_dir_entries(dir.path()).expect_err("a non-utf8 name must be refused");
+        let err = utf8_file_name(name.to_os_string()).expect_err("a non-utf8 name must be refused");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("non-utf8"), "{err}");
     }
