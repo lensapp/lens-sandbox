@@ -25,6 +25,22 @@ pub trait Mechanisms: Send + Sync {
     ) -> Result<Prepared>;
 }
 
+pub struct BrowserSession {
+    pub handle: String,
+    pub redirect_uri: String,
+    pub state: String,
+}
+
+pub trait Browser: Send + Sync {
+    fn prepare(
+        &self,
+        connector: &str,
+        within: std::time::Duration,
+    ) -> Result<BrowserSession, CallError>;
+    fn open(&self, connector: &str, handle: &str, url: &str) -> Result<(), CallError>;
+    fn poll(&self, connector: &str, handle: &str) -> Result<Option<String>, CallError>;
+}
+
 /// One mechanism, ready to call, and the host it calls through.
 pub struct Prepared {
     pub mechanism: Box<dyn Mechanism>,

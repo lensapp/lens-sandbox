@@ -201,7 +201,8 @@ shell-tests:
 components:
 	@scripts/components.sh \
 		crates/lns-service/tests/fixtures/mechanism/build.sh \
-		connectors/github/mechanism/build.sh
+		connectors/github/mechanism/build.sh \
+		connectors/linear/mechanism/build.sh
 
 # ── Coverage ──────────────────────────────────────────────────────────
 # Two phases:

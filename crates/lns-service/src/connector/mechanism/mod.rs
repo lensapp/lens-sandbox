@@ -5,6 +5,7 @@
 //! spelling of `wit/connector.wit`, so a native adapter and a component adapter
 //! answer the same shapes.
 
+mod browser;
 pub mod host;
 pub mod real;
 pub mod selection;

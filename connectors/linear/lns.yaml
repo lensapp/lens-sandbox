@@ -1,0 +1,40 @@
+apiVersion: lns.run/v1
+kind: connector
+name: linear
+spec:
+  serves:
+    - api.linear.app
+    - mcp.linear.app
+  methods:
+    - name: sign-in
+      label: Sign in to Linear
+      auth:
+        kind: code
+        label: Linear OAuth
+        help: Sign in through Linear's MCP authorization service. The connector verifies read access to both MCP and the direct API before saving a connection.
+        component: ./sign-in.wasm
+        outputs:
+          - access_token
+          - refresh_token
+          - client_id
+        hosts:
+          - mcp.linear.app
+          - api.linear.app
+        limits:
+          callSeconds: 30
+          sessionSeconds: 900
+      egress:
+        http:
+          - match: api.linear.app
+            verdict: allow
+          - match: mcp.linear.app
+            verdict: allow
+      credentials:
+        - envVar: LINEAR_ACCESS_TOKEN
+          placeholder: linear_lnsPLACEHOLDER000000000000000
+          field: access_token
+          injections:
+            - kind: bearer_header
+              domain: api.linear.app
+            - kind: bearer_header
+              domain: mcp.linear.app

@@ -1073,3 +1073,74 @@ mod the_shipped_github_connector {
         }
     }
 }
+
+fn browser_fixture() -> (Runtime, Component) {
+    let runtime = Runtime::new().expect("runtime");
+    let component = runtime
+        .compile(include_bytes!("../../../../tests/fixtures/fetching.wasm"))
+        .expect("component");
+    (runtime, component)
+}
+
+#[test]
+fn background_calls_cannot_prepare_open_or_poll_browser_authorization() {
+    use bindings::lns::connector::browser::Host as BrowserHost;
+    let (_runtime, component) = browser_fixture();
+    let parts = Parts::new();
+    let host = parts.host(reaching(&["auth.some-provider.example"]));
+    let (mut store, _) = component.instance(&host, false).expect("instance");
+    let data = store.data_mut();
+    assert!(
+        matches!(data.prepare(), Err(wit::CallError::Refused(why)) if why.contains("only available while connecting"))
+    );
+    assert!(
+        matches!(data.open("handle".into(), "https://auth.some-provider.example".into()), Err(wit::CallError::Refused(why)) if why.contains("only available while connecting"))
+    );
+    assert!(
+        matches!(data.poll("handle".into()), Err(wit::CallError::Refused(why)) if why.contains("only available while connecting"))
+    );
+    assert!(parts.recorder.taken().reached.is_empty());
+}
+
+#[test]
+fn interactive_calls_report_when_browser_authorization_is_unavailable() {
+    use bindings::lns::connector::browser::Host as BrowserHost;
+    let (_runtime, component) = browser_fixture();
+    let parts = Parts::new();
+    let host = parts.host(reaching(&["auth.some-provider.example"]));
+    let (mut store, _) = component.instance(&host, true).expect("instance");
+    let data = store.data_mut();
+    assert!(
+        matches!(data.prepare(), Err(wit::CallError::Refused(why)) if why.contains("unavailable"))
+    );
+    assert!(
+        matches!(data.open("handle".into(), "https://auth.some-provider.example".into()), Err(wit::CallError::Refused(why)) if why.contains("unavailable"))
+    );
+    assert!(
+        matches!(data.poll("handle".into()), Err(wit::CallError::Refused(why)) if why.contains("unavailable"))
+    );
+}
+
+#[test]
+fn browser_navigation_cannot_escape_a_methods_declared_tls_hosts() {
+    let parts = Parts::new();
+    let host = parts.host(reaching(&["auth.some-provider.example:443"]));
+    for url in [
+        "http://auth.some-provider.example",
+        "https://other.example",
+        "https://auth.some-provider.example:8443",
+    ] {
+        assert!(
+            matches!(host.open_browser("handle", url), Err(CallError::Refused(why)) if why.contains("HTTPS on a declared host"))
+        );
+    }
+    assert!(host.open_browser("handle", "not a URL").is_err());
+    assert!(
+        parts
+            .recorder
+            .taken()
+            .reached
+            .iter()
+            .all(|(_, refused)| *refused)
+    );
+}

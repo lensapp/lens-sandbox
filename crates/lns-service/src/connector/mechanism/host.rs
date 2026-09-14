@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use super::traits::{Entropy, Exec, Http, Recorder};
+use super::traits::{Browser, BrowserSession, Entropy, Exec, Http, Recorder};
 use super::{Bounds, CallError, ExecOutput, HttpRequest, HttpResponse};
 
 /// The most entropy one call may draw. A component needs a PKCE verifier or a state parameter, not a keystream.
@@ -24,6 +24,7 @@ pub struct Host {
     exec: Arc<dyn Exec>,
     entropy: Arc<dyn Entropy>,
     recorder: Arc<dyn Recorder>,
+    browser: Option<Arc<dyn Browser>>,
     /// What this call has written down so far. Shared across the clone a runtime takes per call, and reset when that call begins.
     written: Arc<AtomicU32>,
 }
@@ -44,6 +45,7 @@ impl Host {
             exec,
             entropy,
             recorder,
+            browser: None,
             written: Arc::new(AtomicU32::new(0)),
         }
     }
@@ -55,6 +57,41 @@ impl Host {
 
     pub fn bounds(&self) -> &Bounds {
         &self.bounds
+    }
+
+    pub fn with_browser(mut self, browser: Arc<dyn Browser>) -> Self {
+        self.browser = Some(browser);
+        self
+    }
+
+    fn browser(&self) -> Result<&dyn Browser, CallError> {
+        self.browser
+            .as_deref()
+            .ok_or_else(|| CallError::Refused("browser authorization is unavailable".into()))
+    }
+
+    pub fn prepare_browser(&self) -> Result<BrowserSession, CallError> {
+        self.browser()?.prepare(
+            &self.connector,
+            std::time::Duration::from_secs(u64::from(self.bounds.session_seconds)),
+        )
+    }
+
+    pub fn open_browser(&self, handle: &str, url: &str) -> Result<(), CallError> {
+        let target = Target::of(url).map_err(CallError::Refused)?;
+        let allowed = target.is_tls() && self.bounds.allows(&target.host, target.port);
+        self.reached(&target.host, !allowed);
+        if !allowed {
+            return Err(CallError::Refused(
+                "browser authorization must use HTTPS on a declared host".into(),
+            ));
+        }
+        self.browser()?
+            .open(&self.connector, handle, target.sending.as_str())
+    }
+
+    pub fn poll_browser(&self, handle: &str) -> Result<Option<String>, CallError> {
+        self.browser()?.poll(&self.connector, handle)
     }
 
     /// Reach one host the method declared, over TLS. Anything else is refused before the request is built, so nothing leaves the machine (§3.2.6).

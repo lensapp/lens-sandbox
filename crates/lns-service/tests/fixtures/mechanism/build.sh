@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 # Set, never appended to: an inherited RUSTFLAGS is host state, and these
 # bytes must carry none — without the remap a dependency embeds this
 # machine's registry path.
-export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+export RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$(rustc --print sysroot)=/rust-toolchain"
 check=${1:-}
 stale=""
 for name in fetching running asking hanging expiring trapping prying hoarding showing shouting forging labelling straying granting failing picking hurrying refusing keeping clinging boasting sprawling swarming; do

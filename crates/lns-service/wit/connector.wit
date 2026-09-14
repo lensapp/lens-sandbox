@@ -82,6 +82,20 @@ interface entropy {
     bytes: func(count: u32) -> list<u8>;
 }
 
+interface browser {
+    use types.{call-error};
+
+    record session {
+        handle: string,
+        redirect-uri: string,
+        state: string,
+    }
+
+    prepare: func() -> result<session, call-error>;
+    open: func(handle: string, url: string) -> result<_, call-error>;
+    poll: func(handle: string) -> result<option<string>, call-error>;
+}
+
 /// What a mechanism implements. An interface rather than four bare functions, so
 /// a component's export symbols cannot collide with the names its own libc uses.
 interface adapter {
@@ -101,6 +115,7 @@ world mechanism {
     import http;
     import exec;
     import entropy;
+    import browser;
 
     export adapter;
 }

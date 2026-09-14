@@ -79,8 +79,8 @@ You can also sign in without running that command. Start a run that reaches
 and answer the rounds on the card; the last one connects and grants in the same
 press.
 
-The connect runs in rounds, because lns lends the component no listener and no
-clock:
+The device-code connect runs in rounds; each continue checks whether you have
+authorized it:
 
 1. It asks for the Client ID — and, for `oauth-sign-in`, for the scopes the token
    should carry. The questions are the connector author's, and lns says so before

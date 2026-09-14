@@ -18,6 +18,7 @@ pub struct RealMechanisms {
     exec: Arc<dyn Exec>,
     entropy: Arc<dyn Entropy>,
     recorder: Arc<dyn Recorder>,
+    browser: Arc<RealBrowser>,
 }
 
 impl RealMechanisms {
@@ -43,6 +44,7 @@ impl RealMechanisms {
             exec,
             entropy,
             recorder,
+            browser: Arc::new(RealBrowser::default()),
         })
     }
 
@@ -69,6 +71,7 @@ impl RealMechanisms {
             Arc::clone(&self.entropy),
             Arc::clone(&self.recorder),
         )
+        .with_browser(self.browser.clone())
     }
 }
 
@@ -346,4 +349,185 @@ mod tests {
 
         assert!(matches!(refused, CallError::Failed(_)), "{refused:?}");
     }
+}
+
+#[derive(Default)]
+struct RealBrowser {
+    flows: Arc<std::sync::Mutex<super::browser::Flows<tokio::net::TcpListener>>>,
+}
+
+impl RealBrowser {
+    fn lock(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, super::browser::Flows<tokio::net::TcpListener>>, CallError>
+    {
+        self.flows
+            .lock()
+            .map_err(|_| CallError::Failed("browser authorization state is unavailable".into()))
+    }
+}
+
+impl super::traits::Browser for RealBrowser {
+    fn prepare(
+        &self,
+        connector: &str,
+        within: std::time::Duration,
+    ) -> Result<super::traits::BrowserSession, CallError> {
+        let mut flows = self.lock()?;
+        let now = now_millis();
+        flows.capacity(connector, now)?;
+        let listener =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|_| {
+                CallError::Failed("could not listen for browser authorization on loopback".into())
+            })?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| CallError::Failed("could not prepare browser callback listener".into()))?;
+        let port = listener
+            .local_addr()
+            .map_err(|_| CallError::Failed("could not read browser callback address".into()))?
+            .port();
+        let listener = tokio::net::TcpListener::from_std(listener)
+            .map_err(|_| CallError::Failed("could not start browser callback listener".into()))?;
+        let session = super::traits::BrowserSession {
+            handle: uuid::Uuid::new_v4().to_string(),
+            redirect_uri: format!("http://127.0.0.1:{port}/callback"),
+            state: uuid::Uuid::new_v4().to_string(),
+        };
+        let within = within.min(std::time::Duration::from_secs(900));
+        flows.insert(
+            connector,
+            &session,
+            listener,
+            now.saturating_add(within.as_millis() as u64),
+        );
+        let retained = self.flows.clone();
+        let expiring = session.handle.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(within).await;
+            if let Ok(mut flows) = retained.lock() {
+                flows.remove(&expiring);
+            }
+        });
+        Ok(session)
+    }
+
+    fn open(&self, connector: &str, handle: &str, url: &str) -> Result<(), CallError> {
+        let (listener, state, remaining) =
+            self.lock()?.open(connector, handle, url, now_millis())?;
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let child = tokio::process::Command::new(opener)
+            .kill_on_drop(true)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(child) => child,
+            Err(_) => {
+                self.lock()?.remove(handle);
+                return Err(CallError::Failed(
+                    "could not open the browser for authorization".into(),
+                ));
+            }
+        };
+        let handle = handle.to_string();
+        let retained = self.flows.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(std::time::Duration::from_millis(remaining), async {
+                let status = child.wait().await.map_err(|_| {
+                    CallError::Failed("could not wait for the browser opener".into())
+                })?;
+                if !status.success() {
+                    return Err(CallError::Failed("the browser could not be opened".into()));
+                }
+                receive_browser_code(listener, &state).await
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(CallError::Failed(
+                    "browser authorization expired; connect again".into(),
+                ))
+            });
+            if let Ok(mut flows) = retained.lock() {
+                flows.complete(&handle, result);
+            }
+        });
+        Ok(())
+    }
+
+    fn poll(&self, connector: &str, handle: &str) -> Result<Option<String>, CallError> {
+        self.lock()?.poll(connector, handle, now_millis())
+    }
+}
+
+async fn receive_browser_code(
+    listener: tokio::net::TcpListener,
+    state: &str,
+) -> Result<String, CallError> {
+    loop {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .map_err(|_| CallError::Failed("browser callback listener failed".into()))?;
+        let attempt = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_browser_callback(&mut stream, state),
+        )
+        .await;
+        match attempt {
+            Ok(Ok(super::browser::Callback::Code(code))) => return Ok(code),
+            Ok(Ok(super::browser::Callback::Denied)) => {
+                return Err(CallError::Failed(
+                    "browser authorization was declined".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn read_browser_callback(
+    stream: &mut tokio::net::TcpStream,
+    state: &str,
+) -> std::io::Result<super::browser::Callback> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 1024];
+    while !bytes.ends_with(b"\r\n\r\n") && bytes.len() < 4096 {
+        let count = stream.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    let callback = if bytes.len() <= 4096 && bytes.ends_with(b"\r\n\r\n") {
+        std::str::from_utf8(&bytes)
+            .map(|request| super::browser::callback(request, state))
+            .unwrap_or(super::browser::Callback::Ignore)
+    } else {
+        super::browser::Callback::Ignore
+    };
+    let (status, message) = match callback {
+        super::browser::Callback::Code(_) => (
+            "200 OK",
+            "Authorization received. Return to LNS and continue connecting.",
+        ),
+        super::browser::Callback::Denied => ("200 OK", "Authorization declined. Return to LNS."),
+        super::browser::Callback::Ignore => (
+            "400 Bad Request",
+            "This request does not match an open LNS authorization.",
+        ),
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message}",
+        message.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(callback)
 }

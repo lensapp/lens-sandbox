@@ -17,6 +17,7 @@ use lns_service::forward::ForwardGuard;
 
 #[derive(Debug, Default, World)]
 pub struct BehaviourWorld {
+    pub linear_auth: Option<crate::steps::connector_mcp_auth::LinearRig>,
     pub started_at: Option<Instant>,
     pub response: Option<Response>,
     pub approval: Option<ApprovalRig>,

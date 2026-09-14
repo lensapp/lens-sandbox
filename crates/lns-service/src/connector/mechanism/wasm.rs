@@ -42,6 +42,7 @@ const MAX_FIELD_NAME_BYTES: usize = 128;
 const FUEL_PER_SECOND: u64 = 500_000_000;
 
 struct Data {
+    interactive: bool,
     host: Host,
     wasi: WasiCtx,
     table: ResourceTable,
@@ -142,12 +143,17 @@ pub struct Component {
 }
 
 impl Component {
-    fn instance(&self, host: &Host) -> Result<(Store<Data>, bindings::Mechanism)> {
+    fn instance(
+        &self,
+        host: &Host,
+        interactive: bool,
+    ) -> Result<(Store<Data>, bindings::Mechanism)> {
         host.begins_a_call();
         let seconds = host.bounds().call_seconds;
         let mut store = Store::new(
             &self.engine,
             Data {
+                interactive,
                 host: host.clone(),
                 // No preopens, no environment, no arguments, no sockets: what a component is not given, it cannot reach.
                 wasi: WasiCtxBuilder::new().build(),
@@ -191,7 +197,7 @@ fn stopped(error: wasmtime::Error, seconds: u32) -> anyhow::Error {
 
 impl Mechanism for Component {
     fn connect(&self, host: &Host, now_millis: u64) -> Result<Step> {
-        let (mut store, instance) = self.instance(host)?;
+        let (mut store, instance) = self.instance(host, true)?;
         let step = instance
             .lns_connector_adapter()
             .call_connect(&mut store, now_millis)
@@ -206,7 +212,7 @@ impl Mechanism for Component {
         answers: &Answers,
         now_millis: u64,
     ) -> Result<Step> {
-        let (mut store, instance) = self.instance(host)?;
+        let (mut store, instance) = self.instance(host, true)?;
         let step = instance
             .lns_connector_adapter()
             .call_resume(&mut store, state, &answers_of(answers), now_millis)
@@ -215,7 +221,7 @@ impl Mechanism for Component {
     }
 
     fn refresh(&self, host: &Host, values: &Answers, now_millis: u64) -> Result<Outcome> {
-        let (mut store, instance) = self.instance(host)?;
+        let (mut store, instance) = self.instance(host, false)?;
         instance
             .lns_connector_adapter()
             .call_refresh(&mut store, &answers_of(values), now_millis)
@@ -225,7 +231,7 @@ impl Mechanism for Component {
     }
 
     fn revoke(&self, host: &Host, values: &Answers, now_millis: u64) -> Result<()> {
-        let (mut store, instance) = self.instance(host)?;
+        let (mut store, instance) = self.instance(host, false)?;
         instance
             .lns_connector_adapter()
             .call_revoke(&mut store, &answers_of(values), now_millis)
@@ -383,6 +389,42 @@ impl bindings::lns::connector::exec::Host for Data {
 impl bindings::lns::connector::entropy::Host for Data {
     fn bytes(&mut self, count: u32) -> Vec<u8> {
         self.host.bytes(count)
+    }
+}
+
+impl Data {
+    fn browser_interaction(&self) -> Result<(), wit::CallError> {
+        if self.interactive {
+            Ok(())
+        } else {
+            Err(wit::CallError::Refused(
+                "browser authorization is only available while connecting".into(),
+            ))
+        }
+    }
+}
+
+impl bindings::lns::connector::browser::Host for Data {
+    fn prepare(&mut self) -> Result<bindings::lns::connector::browser::Session, wit::CallError> {
+        self.browser_interaction()?;
+        self.host
+            .prepare_browser()
+            .map(|session| bindings::lns::connector::browser::Session {
+                handle: session.handle,
+                redirect_uri: session.redirect_uri,
+                state: session.state,
+            })
+            .map_err(call_error)
+    }
+
+    fn open(&mut self, handle: String, url: String) -> Result<(), wit::CallError> {
+        self.browser_interaction()?;
+        self.host.open_browser(&handle, &url).map_err(call_error)
+    }
+
+    fn poll(&mut self, handle: String) -> Result<Option<String>, wit::CallError> {
+        self.browser_interaction()?;
+        self.host.poll_browser(&handle).map_err(call_error)
     }
 }
 
