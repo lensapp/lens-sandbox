@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/lensapp/lens-sandbox/compare/lns-install-v0.6.0...lns-install-v0.7.0) (2026-09-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* OCSF audit records now carry `metadata.product.name` and `cloud.provider` of `lns` instead of `lens-sandbox`. A consumer that filters on either value must be updated.
+
+### Features
+
+* LNS is the product name ([2c32a79](https://github.com/lensapp/lens-sandbox/commit/2c32a7918c72115135f3357fd63f66dfa69039a9))
+
 ## [0.6.0](https://github.com/lensapp/lens-sandbox/compare/lns-install-v0.5.0...lns-install-v0.6.0) (2026-06-29)
 
 

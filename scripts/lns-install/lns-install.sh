@@ -16,7 +16,7 @@ BINARY_NAME="lns"
 SERVICE_BINARY_NAME="lns-service"
 MANIFEST_NAME="lns-latest.json"
 
-LNS_INSTALL_VERSION="0.6.0" # x-release-please-version
+LNS_INSTALL_VERSION="0.7.0" # x-release-please-version
 
 # Sent on every CDN request to correlate install volume and detect stale curl|sh pipelines.
 USER_AGENT="lns-install/${LNS_INSTALL_VERSION} (os=$(uname -s); arch=$(uname -m); kernel=$(uname -s)/$(uname -r); shell=$(basename "${SHELL:-unknown}"); method=install-script)"
