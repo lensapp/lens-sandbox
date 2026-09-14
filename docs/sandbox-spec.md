@@ -1906,10 +1906,21 @@ to the hosts the method declares; random bytes, one bounded draw at a time, beca
 a mechanism that cannot draw a PKCE verifier or a state parameter cannot implement
 the flows this kind exists for, and a component with no clock and no filesystem has
 nowhere else to draw unpredictable ones; and, where the method declared `exec`,
-host execution. It is lent no listener of its own, so a flow whose redirect leg
-needs one is expressed as a device code instead — the `message` of an ask is what
-makes that expressible. The moment a call is made is a parameter lns passes on
-every call, which is why a component needs no clock to be told the time.
+host execution. During `connect` and `resume` only, it may also request a browser
+authorization callback managed by lns. The component receives an opaque handle,
+a loopback redirect URI, and a random state value; it may open an HTTPS
+authorization URL on a declared host, carrying that exact redirect URI and state,
+and poll for the resulting authorization code. lns owns the listener, binds it
+only to `127.0.0.1` on an ephemeral port, accepts a single matching callback, and
+never gives the component a socket or arbitrary inbound request content. A denial
+is a failed authorization; an unrelated or malformed callback cannot complete it.
+The handle belongs to the connector that requested it and expires within
+`sessionSeconds`; pending callbacks are bounded in count and request size.
+Browser navigation after the initial authorization URL belongs to the user's
+browser and is not subject to the component's HTTP host bounds. `refresh` and
+`revoke` cannot prepare, open, or poll browser authorization. A device flow may
+still use a message-only ask. The moment a call is made is a parameter lns passes
+on every call, which is why a component needs no clock to be told the time.
 
 **What lns enforces**, on every call and never trusted from the component: the
 declared `hosts` and TLS for outbound calls; no filesystem, no environment, and no
