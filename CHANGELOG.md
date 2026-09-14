@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.26.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.25.0...lns-v0.26.0) (2026-09-14)
+
+
+### Features
+
+* a connect is an exchange, and a code method can be connected ([953da25](https://github.com/lensapp/lens-sandbox/commit/953da25b3afe5b01bdad36f512089b236cf78daa))
+* **actions:** lns-login, lns-logout, and lns-push composite actions ([#402](https://github.com/lensapp/lens-sandbox/issues/402)) ([4896fda](https://github.com/lensapp/lens-sandbox/commit/4896fdac1678abd7f14e6a3c9e7868f21ea3dd5b))
+* **actions:** release component, CI job, and setup-lns action ([74a5f30](https://github.com/lensapp/lens-sandbox/commit/74a5f30f47ab75e0f510cec0fcdde59a18afe968))
+* **approval:** a run keeps every card, and `lns approval` answers it ([3cd442a](https://github.com/lensapp/lens-sandbox/commit/3cd442af1359d3b41ca2ad70a301024f846e8854))
+* **artifact:** a code method declares what it produces ([1e750ab](https://github.com/lensapp/lens-sandbox/commit/1e750ab192a3371015f53691319a248cd8528204))
+* **cli:** a renewal nobody watched is reachable by the kind that names it ([ba75afe](https://github.com/lensapp/lens-sandbox/commit/ba75afe4ef8c348e7cb797c91124f6a027b1cd84))
+* **cli:** add JSON artifact push output ([aae90c1](https://github.com/lensapp/lens-sandbox/commit/aae90c1a194231bcb1c0e72d716d37bb341dee66))
+* **connector:** add native public-client OAuth flows ([3ab2ae1](https://github.com/lensapp/lens-sandbox/commit/3ab2ae1b3faba0293bc54b6f7587b6bd650e8b2e))
+* **connector:** let users choose OAuth permission presets ([de8ad86](https://github.com/lensapp/lens-sandbox/commit/de8ad86e1939cdf55000764391d84bcaa63e6489))
+* **connectors:** a connector that ships its own sign-in, and runs ([bafdc1b](https://github.com/lensapp/lens-sandbox/commit/bafdc1b8cf3dd76b3d8758c24cbbd976662b857f))
+* **connectors:** github's other kind of app gets its own method ([01c9393](https://github.com/lensapp/lens-sandbox/commit/01c93936d38deed6421d48c94fc2395a87ea67c2))
+* **service:** a code method's mechanism runs as a component ([fcca5fd](https://github.com/lensapp/lens-sandbox/commit/fcca5fd2d6124804a5dfc14d16dbbbd2bf104d92))
+* **service:** a connector row is listed at the raise, and grants there ([38a12bd](https://github.com/lensapp/lens-sandbox/commit/38a12bd0610b1ceed35b2ba604a380229e1b9851))
+* **service:** a sign-in the card could not ask for is asked on it ([a91d922](https://github.com/lensapp/lens-sandbox/commit/a91d9223b304bc2c9ea9eba121958a4a24ca3f1f))
+* **service:** a value whose lifetime lns knows disarms when it ends ([98dedf6](https://github.com/lensapp/lens-sandbox/commit/98dedf60faec2aa14327c25a67c1735eec414204))
+* **service:** an Approvals view answers a card you closed ([02b1366](https://github.com/lensapp/lens-sandbox/commit/02b136613590f403d83da2b4fb096188b5e0d03f))
+* **service:** rm takes any entry, and changes no rule ([ea632db](https://github.com/lensapp/lens-sandbox/commit/ea632db6568b0ce1bb4cda398686b7045cb63109))
+* **service:** the Approvals list is gathered under the sandbox it asks for ([43943b1](https://github.com/lensapp/lens-sandbox/commit/43943b1742c06f217fc27de7b4ef1ecfa94444d8))
+* **service:** the approvals view is a live list and an archive ([5f4fb82](https://github.com/lensapp/lens-sandbox/commit/5f4fb828e3b090250b05c7fb38da2c764fee9394))
+* **service:** the Approvals view is a table you open a row of ([9b154b4](https://github.com/lensapp/lens-sandbox/commit/9b154b4572ebd8f93c3576e13a06feb93ee66e09))
+* **service:** the Approvals view removes, filters, and shows the answer ([dda4b0b](https://github.com/lensapp/lens-sandbox/commit/dda4b0b18ed30b0d6b54f9abdda9dab551178ca8))
+* support registry auth without service ([fcba151](https://github.com/lensapp/lens-sandbox/commit/fcba1512a6ec2eaad56c0d98fba3c3a5c2955343))
+
+
+### Bug Fixes
+
+* **actions:** escape workflow-command data before add-mask ([f501d97](https://github.com/lensapp/lens-sandbox/commit/f501d97df2a32a928ae3524582314a192155e1fb))
+* **actions:** exclude CODEOWNERS from the root release package ([ca0d90d](https://github.com/lensapp/lens-sandbox/commit/ca0d90de8f4140fd5fd4525f2a70b0b133a60305))
+* **actions:** fail lns-push when tags receive different manifests ([9d45b17](https://github.com/lensapp/lens-sandbox/commit/9d45b17a9b05df93f899ebcc5843064a3c1a916b))
+* **actions:** isolate tests and retain safe publication state ([63e249e](https://github.com/lensapp/lens-sandbox/commit/63e249ee8477359d7f1032d374eb787e4e0d7702))
+* **actions:** read lns-push's tags and switches through one tested script ([5e2a474](https://github.com/lensapp/lens-sandbox/commit/5e2a474f6f8f85d86fdb82e90d0c428965c04b94))
+* **actions:** require every lns-push tag to name one repository ([6da23fa](https://github.com/lensapp/lens-sandbox/commit/6da23faff3a273872da4133dc9cdbd0711e2cd61))
+* **actions:** validate lns-push's push input as a boolean ([e2d67c5](https://github.com/lensapp/lens-sandbox/commit/e2d67c5ac5a0bba4733bee2e8ceaabf0372dd7c4))
+* **ci:** a component carries no trace of the machine that built it ([1611aaf](https://github.com/lensapp/lens-sandbox/commit/1611aaf665c2f90093e61446589f3db38f241046))
+* **ci:** publish to staging from a main-only job, and exercise the actions against the newest release first ([f032d63](https://github.com/lensapp/lens-sandbox/commit/f032d63ef04a2648164e09961a8606c605a756ab))
+* **cli:** a question a component wrote reaches the user as the connector's ([2ff5efd](https://github.com/lensapp/lens-sandbox/commit/2ff5efd30ff083ac1839245abd49a2481fefd50e))
+* **connector:** recover OAuth sign-in and bound store polling ([62ab4dc](https://github.com/lensapp/lens-sandbox/commit/62ab4dc496bb3c0125e6a25e94b96741610dff5c))
+* **coverage:** a struct-literal field that computes nothing is not a line ([abc2692](https://github.com/lensapp/lens-sandbox/commit/abc26921ce3297895c7770cbaab1ab9852c9ecda))
+* **coverage:** an operator that can dispatch to an impl keeps its line ([6be2ec4](https://github.com/lensapp/lens-sandbox/commit/6be2ec46e266073d1b678f87c2d5f6fc61c89747))
+* **service:** a bound holds against the host a request reaches ([6da2bc2](https://github.com/lensapp/lens-sandbox/commit/6da2bc2f044aeaaeba6965e51fd929f971160ff0))
+* **service:** a card raised while the answer travels leaves it ([f33670d](https://github.com/lensapp/lens-sandbox/commit/f33670d214cbce4e8c78550ac665e83b58849d10))
+* **service:** a connect that did not produce what it declared stores nothing ([e6bf631](https://github.com/lensapp/lens-sandbox/commit/e6bf63162c4135e0e0d1ae962e50a51be3fb1766))
+* **service:** a connector nobody answered waits with the destinations ([3f46193](https://github.com/lensapp/lens-sandbox/commit/3f46193c579266075ba8e7ba9ea1279368d142be))
+* **service:** a notice raised off the card names the sandbox the list does ([673dc26](https://github.com/lensapp/lens-sandbox/commit/673dc265d3fc71c6a1735b67da3d54b5c791c7bd))
+* **service:** a run's write lock goes when the last store holding it does ([9e3746e](https://github.com/lensapp/lens-sandbox/commit/9e3746ebd480d2166b3daf0f2856389ee21d961a))
+* **service:** a verdict that writes no rule leaves the answer the entry has ([0e307d2](https://github.com/lensapp/lens-sandbox/commit/0e307d2d510f7448305767dc08e221baf7e892b1))
+* **service:** every list scrolls, and each keeps its own place ([6b86964](https://github.com/lensapp/lens-sandbox/commit/6b8696484e6baba01046cd7187f9837404891474))
+* **service:** one lock per run's approvals, not one per store ([100b9e7](https://github.com/lensapp/lens-sandbox/commit/100b9e74822d4d847ca848dae68d6cc2858d289f))
+* **service:** run components on a runtime without known escapes ([e9ea041](https://github.com/lensapp/lens-sandbox/commit/e9ea041f688517f1700852c815913c25e2343861))
+* **service:** search belongs to the view it searches ([e6ddbb2](https://github.com/lensapp/lens-sandbox/commit/e6ddbb214f6375e54ca92b16a6f27a0692a771a6))
+* **service:** the approvals a surface lists are the runs on disk ([3f01471](https://github.com/lensapp/lens-sandbox/commit/3f01471e8af9675a6bb721b808db2f8c6e8193d7))
+* **service:** what a component names is rendered and bounded before it is written down ([ee4fbd6](https://github.com/lensapp/lens-sandbox/commit/ee4fbd6facbf1348469ce5cc32d13bcd0a53f214))
+* **service:** what a component says and asks for is bounded in full ([9fe61c6](https://github.com/lensapp/lens-sandbox/commit/9fe61c60228925172f822478ac7c61da04a56e80))
+* **service:** what a component says it was granted is rendered too ([6194802](https://github.com/lensapp/lens-sandbox/commit/6194802c2cd951544a4536ca0fba33238f19f58f))
+* support connector artifact kinds ([e4ad357](https://github.com/lensapp/lens-sandbox/commit/e4ad3579abfdc746f098f2c133643fa00ef8c911))
+
 ## [0.25.0](https://github.com/lensapp/lens-sandbox/compare/lns-v0.24.0...lns-v0.25.0) (2026-09-04)
 
 
