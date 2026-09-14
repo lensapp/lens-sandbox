@@ -1,4 +1,4 @@
-# lns-actions 0.1.0 # x-release-please-version
+# lns-actions 0.2.0 # x-release-please-version
 name: lns login
 description: >-
   Stores a hub credential for `lns artifact push` and `lns run`. Calls

@@ -1,4 +1,4 @@
-# lns-actions 0.1.0 # x-release-please-version
+# lns-actions 0.2.0 # x-release-please-version
 name: Set up lns
 description: >-
   Installs the lns CLI from this repository's releases: downloads the tarball

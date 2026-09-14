@@ -1,4 +1,4 @@
-# lns-actions 0.1.0 # x-release-please-version
+# lns-actions 0.2.0 # x-release-please-version
 name: lns logout
 description: >-
   Removes one registry's stored credential. Calls `lns logout`, and edits
