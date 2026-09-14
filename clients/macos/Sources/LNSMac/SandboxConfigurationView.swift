@@ -32,7 +32,6 @@ struct SandboxConfigurationView: View {
                 LNSPageHeading(title: sandbox.name, subtitle: "Configuration and decisions for this sandbox.")
                 Spacer()
                 Button("Save Definition…") { model.saveDefinition(sandbox) }.disabled(!model.connected || model.saving.busy)
-                Button("Refresh") { Task { await model.refreshConfiguration() } }.disabled(!model.connected || model.configuration.loading)
             }
             if let value = model.configuration.configuration {
                 ScrollView { ConfigurationContents(configuration: value, live: true, events: model.data.events, run: sandbox.id).frame(maxWidth: .infinity, alignment: .leading) }

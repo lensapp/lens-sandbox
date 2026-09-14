@@ -118,7 +118,7 @@ public final class RegistrySession {
                 }
             }
             try Task.checkCancellation()
-            throw ServiceError(message: "Sign-in ended without confirmation. Refresh the account list before trying again.")
+            throw ServiceError(message: "Sign-in ended without confirmation.")
         } catch {
             if current == generation { self.error = error is CancellationError ? "Sign-in canceled." : error.localizedDescription }
             return false

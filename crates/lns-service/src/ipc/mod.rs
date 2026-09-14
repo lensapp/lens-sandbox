@@ -705,6 +705,13 @@ async fn answered_whole(request: &Request) -> Option<Response> {
 }
 
 pub async fn handle_request(request: &Request, started_at: Instant) -> Response {
+    dashboard::notify_change(
+        dispatch_request(request, started_at).await,
+        crate::dashboard::live::note_write,
+    )
+}
+
+async fn dispatch_request(request: &Request, started_at: Instant) -> Response {
     if let Some(answered) = answered_whole(request).await {
         return answered;
     }

@@ -40,16 +40,6 @@ struct DashboardView: View {
                 .keyboardShortcut("s", modifiers: [.command, .control])
                 .help(sidebarVisible ? "Hide sidebar" : "Show sidebar")
             }
-            ToolbarItem {
-                Button {
-                    Task { await model.refresh() }
-                } label: { Label("Refresh", systemImage: "arrow.clockwise") }
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(model.loading)
-            }
-            ToolbarItem {
-                if model.loading { ProgressView().controlSize(.small) }
-            }
         }
         .task { await model.watch() }
         .sheet(item: $model.managementSheet) { sheet in

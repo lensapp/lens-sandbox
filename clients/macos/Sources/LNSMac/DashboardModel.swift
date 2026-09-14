@@ -39,7 +39,6 @@ final class DashboardModel: ObservableObject {
     @Published private(set) var offer: ConnectorOffer?
     @Published private(set) var offerLoading = false
     @Published private(set) var offerError: String?
-    @Published private(set) var loading = false
     @Published private(set) var busy: Set<String> = []
     @Published private(set) var connectionNotice: String?
     @Published var notice: String?
@@ -143,8 +142,6 @@ final class DashboardModel: ObservableObject {
     }
 
     private func reload() async throws {
-        loading = true
-        defer { loading = false }
         let snapshot = try await refreshes.refresh()
         try Task.checkCancellation()
         feed.receive(snapshot)

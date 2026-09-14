@@ -3,6 +3,23 @@ use crate::shutdown::Shutdown;
 use lns_ipc::{DashboardApproval, DashboardEvent, DashboardSandbox, Response};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+pub fn notify_change(response: Response, changed: impl FnOnce()) -> Response {
+    if matches!(
+        response,
+        Response::ConnectorInstalled { .. }
+            | Response::ConnectorUninstalled { .. }
+            | Response::ConnectorConnected { .. }
+            | Response::ConnectorDisconnected { .. }
+            | Response::ConnectorGranted { .. }
+            | Response::ConnectorForgotten { .. }
+            | Response::RegistryLoginStored
+            | Response::RegistryLoggedOut
+    ) {
+        changed();
+    }
+    response
+}
+
 pub trait ApprovalHost {
     fn offered(&self, id: &str) -> Option<lns_ipc::ConnectorView>;
     fn grant(&self, id: &str, method: &str, connection: ConnectionChoice) -> Granting;

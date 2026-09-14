@@ -79,7 +79,7 @@ public enum DashboardMessage: Decodable {
 }
 
 public struct DashboardRead {
-    static let incomplete = ServiceError(message: "The dashboard disconnected before its snapshot was complete. Reconnect or refresh to try again.")
+    static let incomplete = ServiceError(message: "The dashboard disconnected before its snapshot was complete.")
     private var pending = DashboardData()
     private var begun = false
     private var complete = false

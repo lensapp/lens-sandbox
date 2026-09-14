@@ -93,8 +93,8 @@ overrides, the form says they could not be checked.
 The card menu offers **Forget Sandbox Decision…**, which makes the sandbox ask
 again on its next start. Disconnecting removes a saved connection; uninstalling
 removes the connector and its connections. Both ask first and leave existing
-sandbox grants in place. Refresh with ⌘R after changing connectors in another
-client.
+sandbox grants in place. Connector and registry changes made in another client
+appear automatically through service notifications.
 
 Use **Navigate → Audit** (⌘1), **Approvals** (⌘2), or **Live Requests** (⌘3).
 **Sandboxes** (⌘4) and **Connectors** (⌘5) are also available from Navigate and the
@@ -110,13 +110,14 @@ template so macOS adapts its color to the current appearance.
 The Dock image is assigned at startup even when launching the app executable
 directly from a terminal. If an icon cannot load, the menu bar shows **LNS** and
 the app reports the missing or invalid asset.
-⌘F focuses search in Sandboxes, Connectors, and Audit; ⌘R refreshes the dashboard. Escape clears a focused
+⌘F focuses search in Sandboxes, Connectors, and Audit. Escape clears a focused
 search or closes focused event details. Standard macOS window controls and ⌘W
 close a window without stopping the service; the menu-bar interface stays open.
 ⌘Q quits only the interface. Stopping the service is a separate, confirmed
 action because it interrupts running sandboxes.
 
-The interface clears actionable data when disconnected. Overlapping refreshes
+Dashboard pages and open sandbox configurations update live without a refresh
+button. The interface clears actionable data when disconnected. Overlapping refreshes
 are coalesced into a fresh post-action read, and canceled reads cannot restore
 an old snapshot. A finite read that stops delivering complete frames times out;
 established subscriptions remain idle without polling.

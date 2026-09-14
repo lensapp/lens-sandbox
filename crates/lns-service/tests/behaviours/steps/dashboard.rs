@@ -9,6 +9,36 @@ use lns_service::ipc::dashboard::{Snapshot, snapshot_frames};
 pub struct DashboardRig {
     snapshot: Snapshot,
     frames: Vec<Response>,
+    notifications: usize,
+}
+
+#[when(expr = "another client receives {string} for a management action")]
+fn management_reply(world: &mut BehaviourWorld, kind: String) {
+    let response: Response = serde_json::from_value(serde_json::json!({
+        "type": kind,
+        "connector": {
+            "name": "example", "digest": "sha256:example", "serves": [],
+            "methods": [], "connections": []
+        },
+        "name": "example", "connection": "work", "invalidated": [],
+        "dropped_connections": 1, "dropped": 1, "method": "token",
+        "displaced": null, "unchanged": false, "reserved": false,
+        "had_decision": true, "connectors": [], "logins": [], "message": "refused"
+    }))
+    .unwrap();
+    let rig = world.dashboard.get_or_insert_with(DashboardRig::default);
+    let returned = lns_service::ipc::dashboard::notify_change(response.clone(), || {
+        rig.notifications += 1;
+    });
+    assert_eq!(
+        returned, response,
+        "notification must preserve the action result"
+    );
+}
+
+#[then(expr = "dashboard subscribers receive {int} management change notifications")]
+fn management_notifications(world: &mut BehaviourWorld, count: usize) {
+    assert_eq!(world.dashboard.as_ref().unwrap().notifications, count);
 }
 
 fn event(detail: String) -> DashboardEvent {
