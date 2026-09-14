@@ -1,34 +1,12 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use smoltcp::wire::{DhcpMessageType, DhcpPacket, DhcpRepr, EthernetAddress};
+
 use super::link::Mac;
 
 pub const SERVER_PORT: u16 = 67;
 pub const CLIENT_PORT: u16 = 68;
-
-const OP_REPLY: u8 = 2;
-const OP_REQUEST: u8 = 1;
-const HTYPE_ETHERNET: u8 = 1;
-const HLEN_ETHERNET: u8 = 6;
-const MAGIC: [u8; 4] = [99, 130, 83, 99];
-const FIXED_LEN: usize = 236;
-const BROADCAST_FLAG: u16 = 0x8000;
-
-const DISCOVER: u8 = 1;
-const OFFER: u8 = 2;
-const REQUEST: u8 = 3;
-const ACK: u8 = 5;
-const NAK: u8 = 6;
-
-const OPT_SUBNET_MASK: u8 = 1;
-const OPT_ROUTER: u8 = 3;
-const OPT_DNS: u8 = 6;
-const OPT_REQUESTED_IP: u8 = 50;
-const OPT_LEASE_TIME: u8 = 51;
-const OPT_MESSAGE_TYPE: u8 = 53;
-const OPT_SERVER_ID: u8 = 54;
-const OPT_END: u8 = 255;
-const OPT_PAD: u8 = 0;
 
 /// The one address this link hands out. There is no pool: one guest, one lease, for as long as the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,10 +20,10 @@ pub struct Lease {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Request {
     pub xid: u32,
-    pub flags: u16,
+    pub broadcast: bool,
     pub ciaddr: Ipv4Addr,
     pub chaddr: Mac,
-    pub kind: u8,
+    pub kind: DhcpMessageType,
     pub requested_ip: Option<Ipv4Addr>,
     pub server_id: Option<Ipv4Addr>,
 }
@@ -64,59 +42,17 @@ pub struct Reply {
 }
 
 pub fn parse(payload: &[u8]) -> Option<Request> {
-    if payload.len() < FIXED_LEN + MAGIC.len()
-        || payload[0] != OP_REQUEST
-        || payload[1] != HTYPE_ETHERNET
-        || payload[2] != HLEN_ETHERNET
-        || payload[FIXED_LEN..FIXED_LEN + MAGIC.len()] != MAGIC
-    {
-        return None;
-    }
-    let mut request = Request {
-        xid: u32::from_be_bytes(payload[4..8].try_into().ok()?),
-        flags: u16::from_be_bytes(payload[10..12].try_into().ok()?),
-        ciaddr: address(&payload[12..16])?,
-        chaddr: payload[28..34].try_into().ok()?,
-        kind: 0,
-        requested_ip: None,
-        server_id: None,
-    };
-    for (code, value) in options(&payload[FIXED_LEN + MAGIC.len()..]) {
-        match code {
-            OPT_MESSAGE_TYPE => request.kind = *value.first()?,
-            OPT_REQUESTED_IP => request.requested_ip = address(value),
-            OPT_SERVER_ID => request.server_id = address(value),
-            _ => {}
-        }
-    }
-    (request.kind != 0).then_some(request)
-}
-
-fn address(bytes: &[u8]) -> Option<Ipv4Addr> {
-    let octets: [u8; 4] = bytes.try_into().ok()?;
-    Some(Ipv4Addr::from(octets))
-}
-
-fn options(mut rest: &[u8]) -> Vec<(u8, &[u8])> {
-    let mut found = Vec::new();
-    while let Some((&code, tail)) = rest.split_first() {
-        match code {
-            OPT_END => break,
-            OPT_PAD => rest = tail,
-            _ => {
-                let Some((&len, tail)) = tail.split_first() else {
-                    break;
-                };
-                let len = usize::from(len);
-                if tail.len() < len {
-                    break;
-                }
-                found.push((code, &tail[..len]));
-                rest = &tail[len..];
-            }
-        }
-    }
-    found
+    let packet = DhcpPacket::new_checked(payload).ok()?;
+    let repr = DhcpRepr::parse(&packet).ok()?;
+    Some(Request {
+        xid: repr.transaction_id,
+        broadcast: repr.broadcast,
+        ciaddr: repr.client_ip,
+        chaddr: repr.client_hardware_address.0,
+        kind: repr.message_type,
+        requested_ip: repr.requested_ip,
+        server_id: repr.server_identifier,
+    })
 }
 
 /// The reply this link owes a DHCP message, or `None` when the message names another server or is not one we answer.
@@ -129,9 +65,9 @@ pub fn answer(lease: &Lease, payload: &[u8]) -> Option<Reply> {
         return None;
     }
     let kind = match request.kind {
-        DISCOVER => OFFER,
-        REQUEST if wants_another_address(&request, lease) => NAK,
-        REQUEST => ACK,
+        DhcpMessageType::Discover => DhcpMessageType::Offer,
+        DhcpMessageType::Request if wants_another_address(&request, lease) => DhcpMessageType::Nak,
+        DhcpMessageType::Request => DhcpMessageType::Ack,
         _ => return None,
     };
     Some(Reply {
@@ -145,8 +81,8 @@ fn wants_another_address(request: &Request, lease: &Lease) -> bool {
     !asked.is_unspecified() && asked != lease.guest
 }
 
-fn reply_to(request: &Request, lease: &Lease, kind: u8) -> ReplyTo {
-    if kind == NAK || request.flags & BROADCAST_FLAG != 0 {
+fn reply_to(request: &Request, lease: &Lease, kind: DhcpMessageType) -> ReplyTo {
+    if kind == DhcpMessageType::Nak || request.broadcast {
         return ReplyTo::Broadcast;
     }
     ReplyTo::Unicast {
@@ -159,37 +95,42 @@ fn reply_to(request: &Request, lease: &Lease, kind: u8) -> ReplyTo {
     }
 }
 
-fn build(lease: &Lease, request: &Request, kind: u8) -> Vec<u8> {
-    let mut out = vec![0u8; FIXED_LEN];
-    out[0] = OP_REPLY;
-    out[1] = HTYPE_ETHERNET;
-    out[2] = HLEN_ETHERNET;
-    out[4..8].copy_from_slice(&request.xid.to_be_bytes());
-    out[10..12].copy_from_slice(&request.flags.to_be_bytes());
-    out[12..16].copy_from_slice(&request.ciaddr.octets());
-    if kind != NAK {
-        out[16..20].copy_from_slice(&lease.guest.octets());
-        out[20..24].copy_from_slice(&lease.gateway.octets());
-    }
-    out[28..34].copy_from_slice(&request.chaddr);
-    out.extend_from_slice(&MAGIC);
-    push_option(&mut out, OPT_MESSAGE_TYPE, &[kind]);
-    push_option(&mut out, OPT_SERVER_ID, &lease.gateway.octets());
-    if kind != NAK {
-        push_option(&mut out, OPT_SUBNET_MASK, &lease.netmask.octets());
-        push_option(&mut out, OPT_ROUTER, &lease.gateway.octets());
-        push_option(&mut out, OPT_DNS, &lease.gateway.octets());
-        let seconds = u32::try_from(lease.duration.as_secs()).unwrap_or(u32::MAX);
-        push_option(&mut out, OPT_LEASE_TIME, &seconds.to_be_bytes());
-    }
-    out.push(OPT_END);
+fn build(lease: &Lease, request: &Request, kind: DhcpMessageType) -> Vec<u8> {
+    let leases = kind != DhcpMessageType::Nak;
+    let granted = |address| {
+        if leases {
+            address
+        } else {
+            Ipv4Addr::UNSPECIFIED
+        }
+    };
+    let repr = DhcpRepr {
+        message_type: kind,
+        transaction_id: request.xid,
+        secs: 0,
+        client_hardware_address: EthernetAddress(request.chaddr),
+        client_ip: request.ciaddr,
+        your_ip: granted(lease.guest),
+        server_ip: granted(lease.gateway),
+        relay_agent_ip: Ipv4Addr::UNSPECIFIED,
+        broadcast: request.broadcast,
+        server_identifier: Some(lease.gateway),
+        router: leases.then_some(lease.gateway),
+        subnet_mask: leases.then_some(lease.netmask),
+        dns_servers: leases.then(|| std::iter::once(lease.gateway).collect()),
+        lease_duration: leases.then(|| u32::try_from(lease.duration.as_secs()).unwrap_or(u32::MAX)),
+        requested_ip: None,
+        client_identifier: None,
+        parameter_request_list: None,
+        max_size: None,
+        renew_duration: None,
+        rebind_duration: None,
+        additional_options: &[],
+    };
+    let mut out = vec![0u8; repr.buffer_len()];
+    // `buffer_len` measures exactly these options, so the emit cannot run out of room.
+    let _ = repr.emit(&mut DhcpPacket::new_unchecked(&mut out));
     out
-}
-
-fn push_option(out: &mut Vec<u8>, code: u8, value: &[u8]) {
-    out.push(code);
-    out.push(value.len() as u8);
-    out.extend_from_slice(value);
 }
 
 #[cfg(test)]
@@ -197,6 +138,30 @@ mod tests {
     use super::*;
 
     const CLIENT: Mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+    const OP_REQUEST: u8 = 1;
+    const OP_REPLY: u8 = 2;
+    const HTYPE_ETHERNET: u8 = 1;
+    const HLEN_ETHERNET: u8 = 6;
+    const MAGIC: [u8; 4] = [99, 130, 83, 99];
+    const FIXED_LEN: usize = 236;
+    const BROADCAST_FLAG: u16 = 0x8000;
+
+    const DISCOVER: u8 = 1;
+    const OFFER: u8 = 2;
+    const REQUEST: u8 = 3;
+    const ACK: u8 = 5;
+    const NAK: u8 = 6;
+
+    const OPT_SUBNET_MASK: u8 = 1;
+    const OPT_ROUTER: u8 = 3;
+    const OPT_DNS: u8 = 6;
+    const OPT_REQUESTED_IP: u8 = 50;
+    const OPT_LEASE_TIME: u8 = 51;
+    const OPT_MESSAGE_TYPE: u8 = 53;
+    const OPT_SERVER_ID: u8 = 54;
+    const OPT_END: u8 = 255;
+    const OPT_PAD: u8 = 0;
 
     fn lease() -> Lease {
         Lease {
@@ -248,15 +213,23 @@ mod tests {
         }
     }
 
+    fn push_option(out: &mut Vec<u8>, code: u8, value: &[u8]) {
+        out.push(code);
+        out.push(value.len() as u8);
+        out.extend_from_slice(value);
+    }
+
     fn option(payload: &[u8], code: u8) -> Option<Vec<u8>> {
-        options(&payload[FIXED_LEN + MAGIC.len()..])
-            .into_iter()
-            .find(|(c, _)| *c == code)
-            .map(|(_, v)| v.to_vec())
+        let packet = DhcpPacket::new_checked(payload).expect("a reply is a dhcp packet");
+        let mut options = packet.options();
+        let found = options.find(|option| option.kind == code)?;
+        Some(found.data.to_vec())
     }
 
     fn yiaddr(payload: &[u8]) -> Ipv4Addr {
-        address(&payload[16..20]).unwrap()
+        DhcpPacket::new_checked(payload)
+            .expect("a reply is a dhcp packet")
+            .your_ip()
     }
 
     #[test]
@@ -299,6 +272,35 @@ mod tests {
             option(&reply.payload, OPT_LEASE_TIME),
             Some(86_400u32.to_be_bytes().to_vec())
         );
+    }
+
+    #[test]
+    fn an_offer_reads_back_through_the_library_that_wrote_it() {
+        let reply = answer(&lease(), &Message::of(DISCOVER).bytes()).unwrap();
+
+        let packet = DhcpPacket::new_checked(&reply.payload[..]).expect("an offer is a packet");
+        let offer = DhcpRepr::parse(&packet).expect("an offer is a dhcpv4 message");
+
+        assert_eq!(offer.message_type, DhcpMessageType::Offer);
+        assert_eq!(offer.transaction_id, 0xdead_beef);
+        assert_eq!(offer.secs, 0);
+        assert_eq!(offer.client_hardware_address, EthernetAddress(CLIENT));
+        assert_eq!(offer.client_ip, Ipv4Addr::UNSPECIFIED);
+        assert_eq!(offer.your_ip, Ipv4Addr::new(192, 168, 127, 2));
+        assert_eq!(offer.server_ip, Ipv4Addr::new(192, 168, 127, 1));
+        assert_eq!(offer.relay_agent_ip, Ipv4Addr::UNSPECIFIED);
+        assert!(offer.broadcast);
+        assert_eq!(
+            offer.server_identifier,
+            Some(Ipv4Addr::new(192, 168, 127, 1))
+        );
+        assert_eq!(offer.router, Some(Ipv4Addr::new(192, 168, 127, 1)));
+        assert_eq!(offer.subnet_mask, Some(Ipv4Addr::new(255, 255, 255, 0)));
+        assert_eq!(
+            offer.dns_servers.map(|servers| servers.to_vec()),
+            Some(vec![Ipv4Addr::new(192, 168, 127, 1)])
+        );
+        assert_eq!(offer.lease_duration, Some(86_400));
     }
 
     #[test]
@@ -410,6 +412,14 @@ mod tests {
     }
 
     #[test]
+    fn a_type_that_does_not_match_the_packet_opcode_is_not_read_as_a_request() {
+        let posing_as_a_server = Message::of(OFFER).bytes();
+
+        assert_eq!(parse(&posing_as_a_server), None);
+        assert_eq!(answer(&lease(), &posing_as_a_server), None);
+    }
+
+    #[test]
     fn bytes_that_are_not_a_dhcp_request_are_ignored() {
         assert_eq!(parse(&[]), None);
         assert_eq!(
@@ -456,7 +466,7 @@ mod tests {
         padded.push(192);
 
         let request = parse(&padded).expect("the padding does not hide the type");
-        assert_eq!(request.kind, DISCOVER);
+        assert_eq!(request.kind, DhcpMessageType::Discover);
         assert_eq!(request.requested_ip, None, "half an option is no option");
     }
 
@@ -465,7 +475,10 @@ mod tests {
         let mut truncated = Message::of(DISCOVER).bytes();
         truncated.pop();
         truncated.push(OPT_REQUESTED_IP);
-        assert_eq!(parse(&truncated).map(|r| r.kind), Some(DISCOVER));
+        assert_eq!(
+            parse(&truncated).map(|request| request.kind),
+            Some(DhcpMessageType::Discover)
+        );
     }
 
     #[test]
