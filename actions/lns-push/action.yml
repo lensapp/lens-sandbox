@@ -1,4 +1,4 @@
-# lns-actions 0.1.0 # x-release-please-version
+# lns-actions 0.2.0 # x-release-please-version
 name: lns push
 description: >-
   Validates an lns document, dry-runs the push into the job summary, and
