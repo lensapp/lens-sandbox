@@ -13,6 +13,7 @@ struct LNSApp: App {
         }
         .defaultSize(width: 1100, height: 740)
         .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified)
         .commands { DesktopCommands(model: delegate.model) }
         MenuBarExtra {
             MenuContent(model: delegate.model)

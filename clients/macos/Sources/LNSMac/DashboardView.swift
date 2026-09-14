@@ -8,12 +8,14 @@ struct DashboardView: View {
     @ObservedObject var live: AppModel
     var mark: NSImage?
     @Environment(\.openWindow) private var openWindow
+    @State private var sidebarVisible = true
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 320)
-        } detail: {
+        HSplitView {
+            if sidebarVisible {
+                sidebar
+                    .frame(minWidth: 210, idealWidth: 240, maxWidth: 320)
+            }
             VStack(spacing: 0) {
                 notices
                 switch model.page {
@@ -24,24 +26,31 @@ struct DashboardView: View {
                 case .approvals: ApprovalHistory(model: model, live: live)
                 }
             }
-            .frame(minWidth: 540, minHeight: 400)
+            .frame(minWidth: 540, maxWidth: .infinity, minHeight: 400, maxHeight: .infinity)
+            .layoutPriority(1)
             .background(LNSTheme.canvas)
             .overlay(alignment: .bottomTrailing) { actionNotice }
-            .navigationTitle("LNS")
-            .toolbar {
-                ToolbarItem {
-                    Button {
-                        Task { await model.refresh() }
-                    } label: { Label("Refresh", systemImage: "arrow.clockwise") }
-                    .keyboardShortcut("r", modifiers: .command)
-                    .disabled(model.loading)
-                }
-                ToolbarItem {
-                    if model.loading { ProgressView().controlSize(.small) }
-                }
-            }
         }
         .lnsAppearance()
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button { sidebarVisible.toggle() } label: {
+                    Label("Toggle Sidebar", systemImage: "sidebar.left")
+                }
+                .keyboardShortcut("s", modifiers: [.command, .control])
+                .help(sidebarVisible ? "Hide sidebar" : "Show sidebar")
+            }
+            ToolbarItem {
+                Button {
+                    Task { await model.refresh() }
+                } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(model.loading)
+            }
+            ToolbarItem {
+                if model.loading { ProgressView().controlSize(.small) }
+            }
+        }
         .task { await model.watch() }
         .sheet(item: $model.managementSheet) { sheet in
             ManagementForm(model: model, sheet: sheet).id(sheet.id)
