@@ -182,6 +182,9 @@ async fn run_provisioner(
         false,
     )?;
 
+    #[cfg(target_os = "macos")]
+    let netdev = vm::netdev::real::start(|k| std::env::var_os(k))?;
+
     let (connector_tx, connector_rx) =
         tokio::sync::oneshot::channel::<Arc<dyn vm::GuestTransport>>();
     let spec = vm::VmSpec {
@@ -210,11 +213,18 @@ async fn run_provisioner(
         connector_tx: Some(connector_tx),
         #[cfg(target_os = "macos")]
         console_fd,
+        #[cfg(target_os = "macos")]
+        net: netdev.attachment(),
         debug: false,
         exec,
     };
 
-    let mut vm_task = tokio::spawn(vm::boot(spec, None));
+    #[cfg(target_os = "macos")]
+    let held = Box::new(netdev);
+    #[cfg(not(target_os = "macos"))]
+    let held = Box::new(());
+    let mut vm_task =
+        tokio::spawn(async move { vm::boot_with_attachments(spec, None, held).await });
     let mut connector_rx = connector_rx;
     let connector = tokio::select! {
         biased;

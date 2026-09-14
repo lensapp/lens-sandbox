@@ -55,3 +55,8 @@ Feature: users discover the CLI surface
     And the output contains "SANDBOX"
     And the output contains "--kind"
     And the output contains "--format"
+
+  Scenario: lns audit --help says a run name scopes the timeline
+    When I run "lns audit --help"
+    Then the exit code is 0
+    And the output contains "a run id, a run name"

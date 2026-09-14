@@ -132,6 +132,8 @@ mod tests {
             connector_tx: None,
             #[cfg(target_os = "macos")]
             console_fd: -1,
+            #[cfg(target_os = "macos")]
+            net: crate::vm::netdev::NetAttachment::Nat,
         }
     }
 

@@ -54,6 +54,9 @@ pub fn run_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> RunFut
 }
 
 pub async fn launch_run(mut args: RunArgs, debug: bool) -> Result<i32> {
+    if let Some(warning) = crate::run::service_variable_warning(|k| std::env::var_os(k)) {
+        crate::log::warn!("{warning}");
+    }
     args.env = crate::run::env_file::merged_run_env(&args.env_file, &args.env)?;
     let config_path = crate::config::default_config_path()?;
     let defaults = crate::config::load_run_defaults(&config_path)?;

@@ -227,6 +227,28 @@ pub fn egress(
     ev.build()
 }
 
+pub fn network_backend(ctx: &Context, backend: &str, detail: &str) -> Value {
+    Event::new(
+        "network",
+        class::PROCESS_ACTIVITY,
+        category::SYSTEM,
+        activity::PROCESS_LAUNCH,
+        severity::INFORMATIONAL,
+        ctx,
+    )
+    .set(
+        "message",
+        format!("guest network served by {backend} ({detail})").into(),
+    )
+    .set("process", json!({"uid": ctx.run, "name": backend}))
+    .set("device", microvm_device(ctx))
+    .set("actor", lns_actor())
+    .note("lns_origin", "host".into())
+    .note("lns_network_backend", backend.into())
+    .note("lns_network_detail", detail.into())
+    .build()
+}
+
 pub fn workload_launch(ctx: &Context, image: &str) -> Value {
     Event::new(
         "launch",
@@ -772,6 +794,23 @@ mod tests {
         assert!(ev["unmapped"].get("lns_result").is_none());
         assert!(ev.get("disposition_id").is_none());
         assert_eq!(ev["unmapped"]["lns_reason"], "prefetch");
+    }
+
+    #[test]
+    fn network_backend_names_what_served_the_guest_link() {
+        let ev = network_backend(&ctx(), "netstack", "192.168.127.0/24");
+        assert_schema_valid(&ev);
+        assert_eq!(
+            ev["message"], "guest network served by netstack (192.168.127.0/24)",
+            "a reader has to see which backend carried the run's traffic"
+        );
+        assert_eq!(ev["unmapped"]["lns_kind"], "network");
+        assert_eq!(ev["unmapped"]["lns_network_backend"], "netstack");
+        assert_eq!(ev["unmapped"]["lns_network_detail"], "192.168.127.0/24");
+        assert_eq!(ev["unmapped"]["lns_origin"], "host");
+        assert_eq!(ev["process"]["name"], "netstack");
+        assert_eq!(ev["device"]["name"], "calm-finch");
+        assert_eq!(ev["actor"]["app_name"], "lns");
     }
 
     #[test]

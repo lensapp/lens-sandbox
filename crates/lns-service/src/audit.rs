@@ -250,6 +250,33 @@ pub fn record_run_launched(
     )
 }
 
+pub fn record_net_backend_at(
+    path: &Path,
+    cx: &crate::ocsf_audit::OcsfCtx,
+    backend: &str,
+    detail: &str,
+) -> Result<()> {
+    append_ocsf_at(
+        path,
+        crate::ocsf_audit::network_backend_event(cx, backend, detail),
+    )
+}
+
+pub fn record_net_backend(
+    run_id: &str,
+    microvm: &str,
+    backend: &str,
+    detail: &str,
+    clock: &dyn Clock,
+) -> Result<()> {
+    record_net_backend_at(
+        &audit_path(run_id)?,
+        &run_ctx(run_id, microvm, clock),
+        backend,
+        detail,
+    )
+}
+
 pub fn record_run_exited_at(
     path: &Path,
     cx: &crate::ocsf_audit::OcsfCtx,
@@ -834,6 +861,36 @@ mod tests {
         let content = std::fs::read_to_string(audit_path("aa123").unwrap()).unwrap();
         assert!(content.contains("\"lns_name\":\"prism-data\""), "{content}");
         assert!(content.contains("\"lns_target\":\"/data\""), "{content}");
+    }
+
+    #[test]
+    fn record_net_backend_writes_which_backend_served_the_guest_link() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("audit.jsonl");
+        record_net_backend_at(&path, &cx(), "netstack", "192.168.127.0/24").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("\"lns_network_backend\":\"netstack\""),
+            "the chain has to say what carried the run's packets: {content}"
+        );
+        assert!(
+            content.contains("\"lns_network_detail\":\"192.168.127.0/24\""),
+            "{content}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn record_net_backend_writes_under_the_runs_audit_log() {
+        let d = tempfile::tempdir().unwrap();
+        let _h = crate::test_env::EnvVarGuard::set("HOME", d.path());
+        record_net_backend("aa126", "calm-finch", "vmnet", "Apple NAT bridge", &CLOCK).unwrap();
+        let content = std::fs::read_to_string(audit_path("aa126").unwrap()).unwrap();
+        assert!(
+            content.contains("\"lns_network_backend\":\"vmnet\""),
+            "{content}"
+        );
     }
 
     #[test]

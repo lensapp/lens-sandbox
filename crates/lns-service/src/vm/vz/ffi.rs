@@ -14,17 +14,19 @@ use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{NSArray, NSError, NSFileHandle, NSString, NSURL};
 use objc2_virtualization::{
     VZDirectoryShare, VZDirectorySharingDeviceConfiguration, VZDiskImageStorageDeviceAttachment,
-    VZEntropyDeviceConfiguration, VZFileHandleSerialPortAttachment, VZGenericPlatformConfiguration,
-    VZLinuxBootLoader, VZMACAddress, VZNATNetworkDeviceAttachment, VZNetworkDeviceConfiguration,
-    VZSerialPortConfiguration, VZSharedDirectory, VZSingleDirectoryShare,
-    VZSocketDeviceConfiguration, VZStorageDeviceConfiguration, VZVirtioBlockDeviceConfiguration,
-    VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
-    VZVirtioFileSystemDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
-    VZVirtioSocketConnection, VZVirtioSocketDevice, VZVirtioSocketDeviceConfiguration,
-    VZVirtioSocketListener, VZVirtioSocketListenerDelegate, VZVirtualMachine,
-    VZVirtualMachineConfiguration, VZVirtualMachineDelegate,
+    VZEntropyDeviceConfiguration, VZFileHandleNetworkDeviceAttachment,
+    VZFileHandleSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
+    VZMACAddress, VZNATNetworkDeviceAttachment, VZNetworkDeviceAttachment,
+    VZNetworkDeviceConfiguration, VZSerialPortConfiguration, VZSharedDirectory,
+    VZSingleDirectoryShare, VZSocketDeviceConfiguration, VZStorageDeviceConfiguration,
+    VZVirtioBlockDeviceConfiguration, VZVirtioConsoleDeviceSerialPortConfiguration,
+    VZVirtioEntropyDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
+    VZVirtioNetworkDeviceConfiguration, VZVirtioSocketConnection, VZVirtioSocketDevice,
+    VZVirtioSocketDeviceConfiguration, VZVirtioSocketListener, VZVirtioSocketListenerDelegate,
+    VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineDelegate,
 };
 
+use crate::vm::netdev::NetAttachment;
 use crate::vm::{VmSpec, VmmBackend};
 
 #[derive(Clone, Copy)]
@@ -212,6 +214,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
     let vsock = spec.vsock;
     let connector_tx = spec.connector_tx;
     let console_fd = spec.console_fd;
+    let net = spec.net;
     let cpus = spec.cpus;
     let mem_mib = spec.memory_mib;
     let queue_for_vm = queue.clone();
@@ -229,6 +232,7 @@ fn run_vz(spec: VmSpec) -> Result<()> {
             binds: &binds,
             vsock: vsock.as_ref(),
             console_fd,
+            net,
             cmdline: &cmdline,
             cpus,
             mem_mib,
@@ -268,6 +272,7 @@ struct BuildInputs<'a> {
     binds: &'a [crate::vm::BindAttachment],
     vsock: Option<&'a crate::vm::VsockChannel>,
     console_fd: std::os::fd::RawFd,
+    net: NetAttachment,
     cmdline: &'a str,
     cpus: u8,
     mem_mib: usize,
@@ -363,6 +368,27 @@ fn build_and_start(
     }
 }
 
+/// Vz owns nothing but the descriptor here: the run's netdev guard holds the socket open and closes it, so the handle must not close it too.
+unsafe fn network_attachment(net: NetAttachment) -> Retained<VZNetworkDeviceAttachment> {
+    // SAFETY: both constructors take ownership of the +1 retained refs; the fd outlives the VM because the blocking closure that runs the VMM owns the netdev guard and drops it only after `backend.run` returns.
+    unsafe {
+        match net {
+            NetAttachment::Nat => Retained::cast_unchecked(VZNATNetworkDeviceAttachment::new()),
+            NetAttachment::DatagramFd(fd) => {
+                let handle = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
+                    NSFileHandle::alloc(),
+                    fd,
+                    false,
+                );
+                Retained::cast_unchecked(VZFileHandleNetworkDeviceAttachment::initWithFileHandle(
+                    VZFileHandleNetworkDeviceAttachment::alloc(),
+                    &handle,
+                ))
+            }
+        }
+    }
+}
+
 unsafe fn build_config(
     inputs: &BuildInputs<'_>,
 ) -> Result<Retained<VZVirtualMachineConfiguration>> {
@@ -395,9 +421,9 @@ unsafe fn build_config(
         let entropy_devices: Retained<NSArray<VZEntropyDeviceConfiguration>> =
             NSArray::from_retained_slice(&[Retained::cast_unchecked(entropy)]);
 
-        let nat = VZNATNetworkDeviceAttachment::new();
+        let attachment = network_attachment(inputs.net);
         let net = VZVirtioNetworkDeviceConfiguration::new();
-        net.setAttachment(Some(&nat));
+        net.setAttachment(Some(&attachment));
         net.setMACAddress(&VZMACAddress::randomLocallyAdministeredAddress());
         let networks: Retained<NSArray<VZNetworkDeviceConfiguration>> =
             NSArray::from_retained_slice(&[Retained::cast_unchecked(net)]);
