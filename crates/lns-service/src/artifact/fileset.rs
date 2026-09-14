@@ -1414,6 +1414,15 @@ mod tests {
     }
 
     impl crate::image::Registry for StreamingRegistry {
+        async fn pull_index(
+            &self,
+            _reference: &oci_client::Reference,
+        ) -> Result<Option<lns_artifact::image_index::HeldIndex>> {
+            Self::refuse(
+                "read an index: a packed layer is addressed by its own artifact's manifest",
+            )
+        }
+
         async fn pull_manifest_and_config(
             &self,
             _reference: &oci_client::Reference,
@@ -1478,6 +1487,7 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(registry.pull_index(&pinned_reference()).await.is_err());
         let descriptor = oci_client::manifest::OciDescriptor {
             digest: registry.packed().digest,
             ..Default::default()

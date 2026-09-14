@@ -222,6 +222,7 @@ mod tests {
 
     fn sample_args() -> lns_ipc::RunImageArgs {
         lns_ipc::RunImageArgs {
+            build_engine: lns_ipc::BuildEngine::default(),
             image: Some("registry.example.test/some-sandbox:1".into()),
             resolved_image: None,
             mixins: Vec::new(),

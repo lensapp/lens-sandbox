@@ -38,6 +38,26 @@ Feature: a prune lists what it would remove before asking
     And the command's stderr does not contain "reviewer"
     And the command's stderr shows "Would remove:" before "Continue? [y/N]"
 
+  Scenario: sandbox prune lists the built images the sweep would drop beside the sandboxes
+    Given the service reports one running sandbox and one that stopped
+    And the sweep would drop the built image "lns-build.local/scribe:latest"
+    And the user will answer "y" to the sandbox prompt
+    When the user runs sandbox command "prune"
+    Then the exit code is 0
+    And the command's stderr contains "scribe"
+    And the command's stderr contains "lns-build.local/scribe:latest"
+    And the command's stderr shows "Would remove:" before "Continue? [y/N]"
+    And the service received a PruneRuns request
+
+  Scenario: a sandbox prune with nothing stopped still asks when a built image is orphaned
+    Given the service reports one running sandbox and none stopped
+    And the sweep would drop the built image "lns-build.local/scribe:latest"
+    And the user will answer "y" to the sandbox prompt
+    When the user runs sandbox command "prune"
+    Then the exit code is 0
+    And the command's stderr contains "lns-build.local/scribe:latest"
+    And the service received a PruneRuns request
+
   Scenario: a sandbox prune with nothing stopped never asks
     Given the service reports one running sandbox and none stopped
     And sandbox input is a terminal

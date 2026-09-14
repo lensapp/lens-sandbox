@@ -40,7 +40,7 @@ impl MixinPlan {
 }
 
 /// Strip the release coordinate from a reference, so a tag or digest cannot leak into a repository derived from it.
-fn repository_of(reference: &str) -> &str {
+pub fn repository_of(reference: &str) -> &str {
     let without_digest = reference
         .split_once('@')
         .map_or(reference, |(head, _)| head);

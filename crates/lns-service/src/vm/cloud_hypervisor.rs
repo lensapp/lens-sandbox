@@ -127,6 +127,7 @@ mod tests {
             workload_uid: Some(65534),
             workload_gid: Some(65534),
             debug: false,
+            capture_upper: false,
             exec: ExecSpec::from_image_config(None, None, &["true".into()]),
             vsock: None,
             connector_tx: None,

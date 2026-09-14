@@ -59,6 +59,8 @@ tokio-tungstenite = { version = "0.26", default-features = false, features = ["h
 futures-util = "0.3"
 flate2     = "1"
 tar        = "0.4"
+# Read-only, journal-aware ext4: the host reads back what a stopped guest wrote into its overlay upper volume.
+ext4-view  = { version = "0.9", features = ["std"] }
 reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 sha2       = "0.10"
 rand       = "0.8"

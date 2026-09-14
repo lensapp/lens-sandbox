@@ -70,6 +70,11 @@ parse the human table:
 `lns volume ls`, `lns volume inspect`, `lns login --list`, `lns config list`,
 `lns config get`, `lns service status`.
 
+`lns push` takes it too, because what a push published is a record a script
+keeps. `--format json` prints one object and nothing else, so the push never
+prompts: a document that publishes local mixins needs `--yes`, and without it
+the push refuses and says so.
+
 `table` is the default everywhere, including the two `inspect` verbs — the table is
 a summary a reader scans, the JSON is the record. `lns artifact inspect` renders a
 document as its author wrote it and takes no `--format`. The `lns inspect` shortcut
@@ -208,7 +213,7 @@ itself — there is no `lns mixin push`.
 ```bash
 lns artifact init [--kind <sandbox|mixin>] [-f <FILE>]
 lns artifact validate [--kind <KIND>] [-f <FILE>]
-lns artifact push <REF> [--dry-run] [--yes] [-f <FILE>]
+lns artifact push <REF> [--dry-run] [--rebuild] [--yes] [-f <FILE>] [--format <table|json>]
 lns artifact pull <REF> [--yes]
 lns artifact tag <SOURCE> <TARGET>
 lns artifact ls [--kind <sandbox|mixin>] [--format <table|json>]
@@ -225,11 +230,11 @@ bare reference is qualified by `run.registry`, else the LNS hub (`hub.lns.run`).
 | ---------- | ------------ | ------- |
 | `init`     | `lns init`   | Scaffold a document in this directory. `--kind` chooses which — `sandbox` (the default) or `mixin`; the file is `./lns.yaml` unless `-f`/`--file` names another. Refuses to overwrite. |
 | `validate` | —            | Check the document named by `-f`, or `./lns.yaml`, offline — schema, cross-field, and secret checks — and list every problem, not just the first. It answers for whichever kind the file declares. Exits non-zero when the document is broken. `--kind <KIND>` also requires the document to be that kind. |
-| `push`     | `lns push`   | Build `./lns.yaml` and upload it to a registry as one artifact — a `kind: sandbox` document publishes as a sandbox, a `kind: mixin` one as a mixin — in one step. Each `spec.filesets` `path` directory is packed into a layer of that same artifact, in declaration order, so the files and the declaration that mounts them share one digest; a `README.md` beside the document is packed into a `text/markdown` layer (max 1 MiB) the registry UI renders; each fuzzy `spec.tools` version resolves against the tool's public version index and publishes as an exact pin. A `spec.mixins` entry that names a local path is published too: the document it names goes up first as its own artifact, beside `<REF>` and under that mixin's own `name`, tagged with its own digest, and the entry you uploaded is pinned to that digest — your own file keeps the path. Push lists those mixins and asks before it uploads anything; `--yes` accepts without prompting. `--dry-run` validates, packs, and builds all of it offline, prints the digests every artifact would publish under, and uploads nothing (declared tools are not resolved — it notes when a published digest may differ). `-f`/`--file` publishes another file instead. |
-| `pull`     | `lns pull`   | Inspect and fetch a published artifact and its base image into the local cache. A published **mixin** pulls too: it is config-only, so the pull caches its document and every mixin it names, which is what lets a digest-pinned graph resolve offline afterwards — the whole graph is recorded in the local store, so `lns artifact ls` lists it and `rm`/`prune` can reclaim it. If a **sandbox** declares tools, disclose them and ask before running their installers in a disposable provisioning guest — a mixin pull installs nothing, so it asks nothing; `--yes` accepts them non-interactively. The pull is bound to the inspected digest. |
+| `push`     | `lns push`   | Build `./lns.yaml` and upload it to a registry as one artifact — a `kind: sandbox` document publishes as a sandbox, a `kind: mixin` one as a mixin — in one step. Each `spec.filesets` `path` directory is packed into a layer of that same artifact, in declaration order, so the files and the declaration that mounts them share one digest; a `README.md` beside the document is packed into a `text/markdown` layer (max 1 MiB) the registry UI renders; each fuzzy `spec.tools` version resolves against the tool's public version index and publishes as an exact pin. A `spec.mixins` entry that names a local path is published too: the document it names goes up first as its own artifact, beside `<REF>` and under that mixin's own `name`, tagged with its own digest, and the entry you uploaded is pinned to that digest — your own file keeps the path. Push lists those mixins and asks before it uploads anything; `--yes` accepts without prompting. A `spec.image` that names a Containerfile is built first and the image it builds publishes into the same repository as the artifact, so one grant covers both; the published document names that image by digest and keeps the path you wrote in `spec.imageSource`, and the Containerfile with its context packs into a layer of the same artifact. The build runs on this host's architecture, so what the document names is an image index: your push adds this architecture's entry beside the ones other hosts already published (`index <repo>@sha256:… holds linux/amd64 sha256:…, linux/arm64 sha256:…`), and a push whose architecture the index already holds with the same digest publishes nothing and says so. An image over this machine's limit — 4 GiB unless `push.imageLimit` says otherwise — fails the push, naming the layer that grew it. `--rebuild` ignores the build cache for this push and runs every instruction again. `--format json` answers with one object instead of the lines — the reference, the artifact digest, every mixin it published, the README layer, the tools it pinned, and `image`, which is `null` unless `spec.image` names a Containerfile and otherwise holds the build `key`, this architecture's `digest` and the `index` the published document names. A dry run of a Containerfile this machine has not built carries the `key` with a `null` `digest`, which is not the same answer as no Containerfile at all. `--dry-run` validates, packs, and builds all of it, prints the digests every artifact would publish under, and uploads nothing (declared tools are not resolved — it notes when a published digest may differ); for a path-form `spec.image` it reads the base image's manifest off the registry, so that one is not offline, and it prints the image digest only where this machine has already built it, with which architectures the index holds and which one the push would add. `-f`/`--file` publishes another file instead. |
+| `pull`     | `lns pull`   | Inspect and fetch a published artifact and its base image into the local cache. Where that image is an index, the entry for this host's architecture is what lands; an index holding none is refused before anything boots, naming the architectures it does hold and the `lns push` from a host of this architecture that would add one. A published **mixin** pulls too: it is config-only, so the pull caches its document and every mixin it names, which is what lets a digest-pinned graph resolve offline afterwards — the whole graph is recorded in the local store, so `lns artifact ls` lists it and `rm`/`prune` can reclaim it. If a **sandbox** declares tools, disclose them and ask before running their installers in a disposable provisioning guest — a mixin pull installs nothing, so it asks nothing; `--yes` accepts them non-interactively. The pull is bound to the inspected digest. |
 | `tag`      | `lns tag`    | Re-reference a cached artifact under a new tag. A bare `<TARGET>` follows the qualified `<SOURCE>`'s registry, so a same-repo retag never becomes a cross-registry pair. |
 | `ls`       | —            | List what the local store holds — reference, kind, digest, size, and the sandbox holding each. `--kind` filters to `sandbox` (a pulled or built artifact) or `mixin` (a pulled mixin document). The base OCI images a sandbox runs on are cache-internal: they never list, and `prune` reclaims them silently once nothing needs them. Alias: `list`. |
-| `inspect`  | `lns inspect`| Render one artifact's resolved content. With no operand, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: that local document's effective form, offline — a `mixin` renders as one, not as a broken sandbox. For a cached reference: the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <guestPath>`), the credentials it declares and the domains each travels to (`credential: SOME_TOKEN -> api.vendor.example`), declared tools (`tool: node@22.11.0`), its `pre-start` scripts with the user each asks for and its body printed whole, the mixins it resolved into (`mixin: <ref>`), and any over-broad-policy flag; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin in first (repeatable), so a composition can be previewed without starting a run. Against a local document the flag takes a local path (`./obs`, `./obs/lns.yaml`, `../x/lns.yaml`): the mixin is read from this machine and merged after the document, in flag order, so the render stays offline. A published reference there is refused, because an offline render has nothing to resolve it against. The document's own `spec.mixins` merge the same way: a local path is read and merged (rooted at the document that declares it, before any flag); a published reference is listed as `mixin: <ref> (published; not merged, because this render is offline)` and the render continues. Every merged mixin is named by the absolute path of the document it resolved to. |
+| `inspect`  | `lns inspect`| Render one artifact's resolved content. With no operand, a path-shaped one (`.`, `lns.yaml`, `./dir`, `./lns.dev.yaml`), or `-f`/`--file`: that local document's effective form, offline — a `mixin` renders as one, not as a broken sandbox. For a cached reference: the artifact's kind and definition — a `sandbox`'s image, workdir, mounts, declared ports, filesets (`fileset: <source> -> <guestPath>`), the credentials it declares and the domains each travels to (`credential: SOME_TOKEN -> api.vendor.example`), declared tools (`tool: node@22.11.0`), its `pre-start` scripts with the user each asks for and its body printed whole, the mixins it resolved into (`mixin: <ref>`), any over-broad-policy flag, and — where the image was built from a Containerfile — an `image` line naming the path it was built from and one digest per architecture the published index holds (`image: built from ./image/Containerfile (4 lines, context 2 files), arm64 sha256:…, amd64 sha256:…`), every context file with its size, and the instructions themselves, printed last and without building or running anything; a `mixin`'s own blocks as its author wrote them, unresolved; or a plain `image`. `--mixin <REF>` resolves that mixin in first (repeatable), so a composition can be previewed without starting a run. Against a local document the flag takes a local path (`./obs`, `./obs/lns.yaml`, `../x/lns.yaml`): the mixin is read from this machine and merged after the document, in flag order, so the render stays offline. A published reference there is refused, because an offline render has nothing to resolve it against. The document's own `spec.mixins` merge the same way: a local path is read and merged (rooted at the document that declares it, before any flag); a published reference is listed as `mixin: <ref> (published; not merged, because this render is offline)` and the render continues. Every merged mixin is named by the absolute path of the document it resolved to. |
 | `rm`       | `lns rm`     | Remove one cached artifact and free its now-unreferenced layers. |
 | `prune`    | —            | Remove every cached artifact nothing holds and, when no sandbox is live, reclaim the provisioned tool cache. Lists what it would remove and asks first, unless `-f`/`--force`. |
 
@@ -257,6 +262,7 @@ lns sandbox ls [-a] [--format <table|json>]
 lns sandbox inspect <RUN> [--format <table|json>]
 lns sandbox rm <RUN> [-f]
 lns sandbox prune [-f]
+lns sandbox build [-f <FILE>] [--rebuild]
 ```
 
 A sandbox outlives its workload. When the workload exits — or you `lns stop` it —
@@ -276,7 +282,8 @@ workload does.
 | `ls`       | `lns ps`     | List running sandboxes with their state, `CREATED`, `STARTED`, CPU, and memory. `CREATED` is when the sandbox was made and never changes; `STARTED` is when it last booted, so `lns start` moves it. `-a`/`--all` includes the stopped ones; a stopped sandbox has no guest to sample, so its CPU and memory read `-`. Alias: `list`. |
 | `inspect`  | `lns inspect`| Print one sandbox's live state and launch configuration, including the same `CREATED` and `STARTED` times `lns ps` shows. `CPUS` and `MEM` report the size the sandbox booted with, for a running and for a stopped one, so a document that declares `resources` reads back what it resolved to and not the flag. `--format <table\|json>` chooses the shape: `table` summarises it, `json` carries the whole launch configuration and the resolved policy. |
 | `rm`       | `lns rm`     | Remove a sandbox: its record and its writable layer go together, the name frees up, and the artifact it held is released. What it granted and declined about a connector goes with it, so a new sandbox of that name is asked again. Refuses a running one; `-f`/`--force` stops it first. |
-| `prune`    | —            | Remove every stopped sandbox, writable layers included, and what each granted and declined. Lists them and asks first, unless `-f`/`--force`. |
+| `prune`    | —            | Remove every stopped sandbox, writable layers included, and what each granted and declined. It also drops every image a `lns sandbox build` produced that nothing names any more — no document on this machine, and no sandbox — and names each one it dropped. Lists the sandboxes and those images, and asks first, unless `-f`/`--force`. |
+| `build`    | —            | Build the Containerfile this document's `spec.image` names (`./lns.yaml` unless `-f`/`--file` names another), and print the key the build is addressed by. Nothing is published: the image stays on this machine. Each instruction is cached, so an unchanged document rebuilds nothing; `--rebuild` ignores the cache and runs every instruction again. The build runs under the document's own policy, so a document with `mixins` builds what its mixins resolve to. |
 
 ## `lns volume`
 
@@ -570,8 +577,52 @@ lns config list
 | `run.cpus`    | `--cpus`      | Number of vCPUs.                                           |
 | `run.mem`     | `--mem`       | RAM in MiB.                                                |
 | `run.registry`| `--registry`  | Default registry host for bare published-sandbox references (e.g. `ghcr.io`); unset means the LNS hub, `hub.lns.run`. |
+| `push.imageLimit` | —         | What `lns push` lets a built image weigh, in MiB. Unset means 4096. |
+| `build.engine` | —          | Which engine builds a Containerfile your `spec.image` names: `lns`, a build guest, which is the default; or `docker`, this machine's own Docker daemon over the Docker Engine API. |
+| `build.dockerSocket` | —    | The Unix socket the `docker` engine is reached at. Unset means `$DOCKER_HOST` when it names a `unix://` socket, else `/var/run/docker.sock`. `lns` reads `$DOCKER_HOST` from your own shell and sends the socket to the service, so a shell-started service and a tray-started one build the same way. |
 
-The settable defaults are `run.cpus`, `run.mem`, and `run.registry`. Environment
+**What `build.engine docker` changes.** The Containerfile and its context go to
+your Docker daemon, and the image it builds is imported into lns's own layer
+store, so `lns push`, the build cache and the image index work exactly as
+before. What changes is the gate: a `RUN` inside the daemon reaches whatever
+your host lets the daemon reach, your document's `egress` decides nothing there,
+no approval card is raised, and the document's `credentials` are not in force.
+lns says so wherever it names that image:
+
+```bash
+$ lns config set build.engine docker
+Set build.engine to docker in /home/you/.lns/config.yaml
+
+$ lns run .
+   Image  built from ./image/Containerfile, arm64, sha256:761743bb… — built outside the gate by the host Docker daemon
+
+$ lns push ghcr.io/team/agent:1.4.0
+key sha256:5f0b1a2c…
+built ./image/Containerfile as ghcr.io/team/agent@sha256:761743bb… (2 layers) — built outside the gate by the host Docker daemon
+index ghcr.io/team/agent@sha256:aa41f0c9… holds linux/arm64 sha256:761743bb…
+
+$ lns inspect ghcr.io/team/agent:1.4.0
+image: built from ./image/Containerfile (2 lines, context 2 files), arm64 sha256:761743bb… (arm64 was built outside the gate by the host Docker daemon)
+```
+
+The record travels with the image: it is an annotation on the entry inside the
+published image index, so a consumer verifying the digest the document pins
+verifies it too. A machine whose switch says `docker` and whose daemon does not
+answer refuses rather than building in a guest behind your back:
+
+```bash
+$ lns push ghcr.io/team/agent:1.4.0
+error: building ./image/Containerfile: this machine's build.engine is docker, and
+no Docker daemon answered at /var/run/docker.sock; start the daemon, point
+build.dockerSocket at the socket it listens on, or run `lns config set
+build.engine lns` to build in a guest instead: No such file or directory (os error 2)
+```
+
+The last clause is what the socket answered, so `Permission denied` and
+`Connection refused` read differently from a socket that is not there at all.
+
+The settable defaults are `run.cpus`, `run.mem`, `run.registry`,
+`push.imageLimit`, `build.engine`, and `build.dockerSocket`. Environment
 variables, volumes, and ports are properties of a sandbox, not persistent config —
 set them per run (`-e`, `-v`, `-p`) or in the sandbox definition's `spec`.
 

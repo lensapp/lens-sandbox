@@ -262,12 +262,19 @@ impl fmt::Display for MountError {
 
 impl std::error::Error for MountError {}
 
-pub fn overlay_options() -> String {
+/// A captured run keeps neither: `metacopy` leaves a copy-up with no data and `redirect_dir` leaves a
+/// path in an xattr, and the host reads the upper as an OCI layer through a reader that sees no xattr.
+pub fn overlay_options(capture_upper: bool) -> String {
+    let xattr_shortcuts = if capture_upper {
+        "redirect_dir=off,metacopy=off"
+    } else {
+        "redirect_dir=on,metacopy=on"
+    };
     format!(
         "lowerdir={COMPOSEFS_META}::{CONTENT},\
          upperdir={UPPER_MOUNTPOINT}/upper,\
          workdir={UPPER_MOUNTPOINT}/work,\
-         redirect_dir=on,metacopy=on"
+         {xattr_shortcuts}"
     )
 }
 
@@ -408,6 +415,26 @@ fn group_gid(newroot: &str, name: &str) -> Option<u32> {
 
 const FILESET_OWNED_MANIFEST: &str = "/.lens/fileset-owned";
 
+/// What this boot created in the rootfs, so a build's captured layer can drop exactly those paths instead of a whole prefix such as `/home`.
+pub const BOOT_WRITTEN_RECORD: &str = "/.lens/boot-written";
+
+/// Paths are in-root and absolute, the spelling a captured change set is keyed by once its leading slash is gone.
+fn record_boot_written(newroot: &str, paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    let record = format!("{newroot}{BOOT_WRITTEN_RECORD}");
+    let _ = std::fs::create_dir_all(format!("{newroot}/.lens"));
+    let mut written = std::fs::read_to_string(&record).unwrap_or_default();
+    for path in paths {
+        written.push_str(path);
+        written.push('\n');
+    }
+    if let Err(err) = std::fs::write(&record, written) {
+        eprintln!("lns-init: the boot-written record was not updated: {err}");
+    }
+}
+
 /// Where the service injects a run's declared tool trees; PID 1 stays dependency-free, so this is spelled here as well as in lns-service's tool cache.
 const TOOLS_ROOT: &str = "/.lens/tools";
 
@@ -510,6 +537,7 @@ fn seed_sandbox_user(newroot: &str, name: &str, uid: u32, gid: u32, sys: &dyn Sy
     match CString::new(home.as_str()) {
         Ok(home_c) => {
             if std::fs::create_dir_all(&home).is_ok() {
+                record_boot_written(newroot, &[format!("/home/{name}")]);
                 let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755));
                 if let Err(err) = sys.lchown(&home_c, uid, gid) {
                     eprintln!("lns-init: lchown({home:?}, {uid}, {gid}) failed: {err}");
@@ -889,6 +917,7 @@ fn mount_binds(
             clear_a_symlink_standing_at(sys, &target)?;
         }
         let made = made_by_mkdir_p(sys, &target, 0o755)?;
+        record_boot_written(newroot, &in_root(newroot, &made));
         hand_new_home_dirs_to_workload(sys, newroot, home, run_ids, &made);
         let flags = match bind.read_only {
             true => MountFlags::read_only().nosuid().nodev(),
@@ -1019,6 +1048,14 @@ fn place_one_entry(
             )
         }
     }
+}
+
+fn in_root(newroot: &str, made: &[String]) -> Vec<String> {
+    made.iter()
+        .filter_map(|path| path.strip_prefix(newroot))
+        .filter(|path| path.starts_with('/'))
+        .map(str::to_string)
+        .collect()
 }
 
 /// A mount point this boot created at or under the home belongs to the workload, or it can traverse the directory and write nothing beside what the mount put there.
@@ -1295,7 +1332,7 @@ fn mount_composefs_and_exec_broker_inner(
     do_mkdir(sys, &upper_upper, 0o755)?;
     do_mkdir(sys, &upper_work, 0o755)?;
 
-    let opts = overlay_options();
+    let opts = overlay_options(params.capture_upper);
     // The workload rootfs stays permissive: images legitimately ship and exec their own suid binaries.
     do_mount(
         sys,
@@ -1427,7 +1464,7 @@ mod tests {
 
     #[test]
     fn overlay_options_uses_data_only_lower_syntax() {
-        let opts = overlay_options();
+        let opts = overlay_options(false);
         assert!(
             opts.contains("/composefs-meta::/content"),
             "missing `::` data-only-lower syntax: {opts}"
@@ -1436,14 +1473,25 @@ mod tests {
 
     #[test]
     fn overlay_options_enables_redirect_dir_and_metacopy() {
-        let opts = overlay_options();
+        let opts = overlay_options(false);
         assert!(opts.contains("redirect_dir=on"));
         assert!(opts.contains("metacopy=on"));
     }
 
+    /// A metacopy copy-up holds a mode and no data, and a redirect holds a path in an xattr the host's
+    /// reader cannot see; a run whose upper becomes a layer trades both for whole copies.
+    #[test]
+    fn a_captured_run_mounts_the_overlay_without_metacopy_or_redirect_dir() {
+        let opts = overlay_options(true);
+        assert!(opts.contains("redirect_dir=off"), "{opts}");
+        assert!(opts.contains("metacopy=off"), "{opts}");
+        assert!(!opts.contains("=on"), "{opts}");
+        assert!(opts.contains("upperdir=/mnt/upper/upper"), "{opts}");
+    }
+
     #[test]
     fn overlay_options_carries_upper_and_work() {
-        let opts = overlay_options();
+        let opts = overlay_options(false);
         assert!(opts.contains("upperdir=/mnt/upper/upper"));
         assert!(opts.contains("workdir=/mnt/upper/work"));
     }
@@ -1459,6 +1507,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         assert!(validate_cmdline(&p).is_ok());
     }
@@ -1474,6 +1523,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("upper.dev"));
@@ -1490,6 +1540,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("content.tag"));
@@ -1506,6 +1557,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("composefs.descriptor.dev"));
@@ -1522,6 +1574,7 @@ mod tests {
             incomplete_volumes: vec![3],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("volume.3"), "{err}");
@@ -1538,6 +1591,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![1],
+            capture_upper: false,
         };
         let err = validate_cmdline(&p).unwrap_err();
         assert!(format!("{err}").contains("bind.1"), "{err}");
@@ -2177,6 +2231,7 @@ mod tests {
             incomplete_volumes: vec![],
             binds: vec![],
             incomplete_binds: vec![],
+            capture_upper: false,
         }
     }
 
@@ -2228,6 +2283,27 @@ mod tests {
             .unwrap();
         assert!(move_root < chroot, "move_mount(.,/) precedes chroot(.)");
         assert!(matches!(calls.last(), Some(Call::Fexecve(7))));
+    }
+
+    /// The key the host sets when it will read this run's upper as a layer must reach the overlay mount itself.
+    #[test]
+    fn the_capture_key_reaches_the_overlay_mount() {
+        let sys = FakeSyscalls::new();
+        let mut params = full_params();
+        params.capture_upper = true;
+        let _ =
+            mount_composefs_and_exec_broker_inner(&params, None, "/newroot", FULL_CMDLINE, &sys);
+
+        let overlay = sys
+            .calls()
+            .into_iter()
+            .find_map(|c| match c {
+                Call::Mount { fstype, data, .. } if fstype == "overlay" => data,
+                _ => None,
+            })
+            .expect("the overlay must be mounted");
+        assert!(overlay.contains("metacopy=off"), "{overlay}");
+        assert!(overlay.contains("redirect_dir=off"), "{overlay}");
     }
 
     #[test]
@@ -3023,6 +3099,65 @@ mod tests {
         assert!(
             group.starts_with("agent:x:1000:\n") && group.ends_with("\nroot:x:0:"),
             "the seeded group line must lead and the image's entries must survive: {group:?}"
+        );
+    }
+
+    #[test]
+    fn the_home_this_boot_seeded_is_recorded_so_a_build_can_drop_it_by_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        let sys = FakeSyscalls::new();
+
+        seed_sandbox_user(newroot, "agent", 1000, 1000, &sys);
+
+        assert_eq!(
+            std::fs::read_to_string(format!("{newroot}{BOOT_WRITTEN_RECORD}")).unwrap(),
+            "/home/agent\n"
+        );
+    }
+
+    #[test]
+    fn the_record_keeps_what_an_earlier_call_wrote_and_is_left_alone_by_a_call_that_made_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+
+        record_boot_written(newroot, &["/home/agent".to_string()]);
+        record_boot_written(newroot, &["/home/agent/.cache".to_string()]);
+        record_boot_written(newroot, &[]);
+
+        assert_eq!(
+            std::fs::read_to_string(format!("{newroot}{BOOT_WRITTEN_RECORD}")).unwrap(),
+            "/home/agent\n/home/agent/.cache\n"
+        );
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_written_is_reported_and_the_boot_goes_on() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let newroot = dir.path().to_str().unwrap();
+        std::fs::create_dir_all(format!("{newroot}{BOOT_WRITTEN_RECORD}")).unwrap();
+
+        record_boot_written(newroot, &["/home/agent".to_string()]);
+
+        assert!(
+            std::fs::metadata(format!("{newroot}{BOOT_WRITTEN_RECORD}"))
+                .unwrap()
+                .is_dir()
+        );
+    }
+
+    #[test]
+    fn only_the_directories_inside_the_new_root_are_recorded_as_this_boot_s() {
+        assert_eq!(
+            in_root(
+                "/newroot",
+                &[
+                    "/newroot/home/agent".to_string(),
+                    "/newroot".to_string(),
+                    "/elsewhere/home".to_string(),
+                ]
+            ),
+            vec!["/home/agent".to_string()]
         );
     }
 

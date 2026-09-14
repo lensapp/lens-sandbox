@@ -174,6 +174,22 @@ fn microvm_project(world: &mut E2eWorld) -> std::path::PathBuf {
             spec_tail.push_str(&format!("\n      owner: {owner}"));
         }
     }
+    if let Some(containerfile) = &world.project_containerfile {
+        let context = root.join(CONTAINERFILE_IMAGE_PATH);
+        std::fs::create_dir_all(&context).expect("create the build context");
+        std::fs::write(
+            context.join("Dockerfile"),
+            containerfile.replace("{base}", &pinned_microvm_image()),
+        )
+        .expect("write the project Containerfile");
+        for (path, content) in &world.project_context_files {
+            let file = context.join(path);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent).expect("create the context directory");
+            }
+            std::fs::write(file, content).expect("write the context file");
+        }
+    }
     let definition = format!(
         "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-microvm\nspec:\n  mixins:\n    - ./{PROJECT_MIXIN}\n  image: {}{spec_tail}\n",
         world
@@ -1693,6 +1709,9 @@ fn policy_deny_all(world: &mut E2eWorld) {
 /// The mixin every e2e project declares, since §8.5 makes a rule apply only where a document names it.
 const PROJECT_MIXIN: &str = "project-egress.yaml";
 
+/// Where a scenario's Containerfile and its context sit beside the project's `lns.yaml`.
+const CONTAINERFILE_IMAGE_PATH: &str = "./image";
+
 const SUPERBLOCK_OFFSET: u64 = 1024;
 
 fn volume_image_path(world: &E2eWorld, name: &str) -> Result<std::path::PathBuf, String> {
@@ -1791,5 +1810,477 @@ fn volume_released(world: &mut E2eWorld, name: String) -> Result<(), String> {
             ));
         }
         std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+/// Slice 3 of lensapp/lens-sandbox#393: the Containerfile the project's `spec.image` names, with
+/// `{base}` standing for the pinned base image every @microvm scenario boots.
+#[given("the project builds its image from this Containerfile")]
+fn project_builds_from_a_containerfile(world: &mut E2eWorld, step: &cucumber::gherkin::Step) {
+    let body = step
+        .docstring
+        .as_deref()
+        .expect("the Containerfile is this step's docstring");
+    world.project_containerfile = Some(format!("{}\n", body.trim()));
+    world.project_image = Some(CONTAINERFILE_IMAGE_PATH.to_string());
+}
+
+#[given(regex = r#"^the build context holds "([^"]+)" containing "([^"]*)"$"#)]
+fn build_context_holds(world: &mut E2eWorld, path: String, content: String) {
+    world
+        .project_context_files
+        .push((path, format!("{content}\n")));
+}
+
+#[given(regex = r#"^the document allows egress to "([^"]+)"$"#)]
+fn document_allows_egress_to(world: &mut E2eWorld, host: String) {
+    world.project_egress.push(host);
+}
+
+/// What the run summary owes an approver, and what the run's own directory says it booted from.
+#[then(regex = r#"^the run reports the image it built from "([^"]+)"$"#)]
+fn the_run_reports_the_built_image(world: &mut E2eWorld, label: String) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let combined = format!("{}\n{}", run.stdout, run.stderr);
+    let line = combined
+        .lines()
+        .find(|line| line.contains(&format!("built from {label}")))
+        .ok_or_else(|| format!("the run must say what it built from:\n{combined}"))?;
+    if !line.contains("sha256:") {
+        return Err(format!("the built image must be named by digest: {line}"));
+    }
+    let reference = built_reference_of_last_run(world)?;
+    if !reference.contains("@sha256:") {
+        return Err(format!(
+            "the run's own directory must name the image it booted by digest, got {reference:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn built_reference_of_last_run(world: &mut E2eWorld) -> Result<String, String> {
+    let home = world
+        .home
+        .as_ref()
+        .ok_or("the service must run in a home this scenario owns")?
+        .path()
+        .to_path_buf();
+    let run_id = last_run(world)?;
+    let run_dir = crate::specutil::run_dir_for_prefix(&home, &run_id).map_err(|e| {
+        format!(
+            "the run the CLI reported as {run_id:?} must have a directory: {e}\n--- service.log ---\n{}",
+            crate::steps::service::read_service_log(world),
+        )
+    })?;
+    let path = run_dir.join(lns_service::containerfile::real::BUILT_REFERENCE_FILE);
+    std::fs::read_to_string(&path)
+        .map(|reference| reference.trim().to_string())
+        .map_err(|e| {
+            format!(
+                "the build must name the image it produced in {}: {e}\n--- service.log ---\n{}",
+                path.display(),
+                crate::steps::service::read_service_log(world),
+            )
+        })
+}
+
+/// Slice 4 of lensapp/lens-sandbox#393: `lns sandbox build` builds and publishes nothing, so what
+/// it did is read off its own two lines and off the instructions the service booted a guest for.
+#[when("the user builds the sandbox definition")]
+fn build_definition(world: &mut E2eWorld) {
+    world.instructions_before_build = instructions_run(world);
+    run_lns_microvm_as(world, &["sandbox", "build"], Vec::new());
+    if let Some(key) = printed_key(world) {
+        world.build_keys.push(key);
+    }
+}
+
+#[when(regex = r#"^the build context file "([^"]+)" is changed to "([^"]*)"$"#)]
+fn context_file_is_changed(world: &mut E2eWorld, path: String, content: String) {
+    let content = format!("{content}\n");
+    match world
+        .project_context_files
+        .iter_mut()
+        .find(|(existing, _)| *existing == path)
+    {
+        Some(entry) => entry.1 = content,
+        None => world.project_context_files.push((path, content)),
+    }
+}
+
+#[then("the build reports the key it is remembered under")]
+fn the_build_reports_a_key(world: &mut E2eWorld) -> Result<(), String> {
+    match world.build_keys.last() {
+        Some(key) if key.len() == "sha256:".len() + 64 => Ok(()),
+        other => Err(format!("the build printed no usable key: {other:?}")),
+    }
+}
+
+#[then(regex = r#"^the build reports the image it produced from "([^"]+)"$"#)]
+fn the_build_reports_the_image(world: &mut E2eWorld, label: String) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with(&format!("built {label} as ")))
+        .ok_or_else(|| format!("the build must name what it built:\n{}", run.stdout))?;
+    match line.contains("@sha256:") {
+        true => Ok(()),
+        false => Err(format!("the built image must be named by digest: {line}")),
+    }
+}
+
+#[then("the build reports the same key as the build before it")]
+fn the_same_key(world: &mut E2eWorld) -> Result<(), String> {
+    match world.build_keys.as_slice() {
+        [.., before, now] if before == now => Ok(()),
+        keys => Err(format!("expected the last two keys to agree, got {keys:?}")),
+    }
+}
+
+#[then("the build reports a different key from the build before it")]
+fn a_different_key(world: &mut E2eWorld) -> Result<(), String> {
+    match world.build_keys.as_slice() {
+        [.., before, now] if before != now => Ok(()),
+        keys => Err(format!(
+            "expected the last two keys to differ, got {keys:?}"
+        )),
+    }
+}
+
+#[then(regex = r"^the service booted a guest for (\d+) instructions? of that build$")]
+fn instructions_of_that_build(world: &mut E2eWorld, expected: usize) -> Result<(), String> {
+    let ran = instructions_run(world) - world.instructions_before_build;
+    match ran == expected {
+        true => Ok(()),
+        false => Err(format!(
+            "expected {expected} instruction(s) to run, {ran} did\n--- service.log ---\n{}",
+            crate::steps::service::read_service_log(world),
+        )),
+    }
+}
+
+/// Every `RUN` the service reaches a guest for says so once, so counting the lines counts the steps no key answered.
+fn instructions_run(world: &E2eWorld) -> usize {
+    crate::steps::service::read_service_log(world)
+        .lines()
+        .filter(|line| line.contains("Running") && line.contains("instruction"))
+        .count()
+}
+
+fn printed_key(world: &E2eWorld) -> Option<String> {
+    world
+        .result
+        .as_ref()?
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("key ").map(|key| key.trim().to_string()))
+}
+
+/// Slice 5 of lensapp/lens-sandbox#393: what a push of a path-form `spec.image` publishes.
+#[when("the user pushes the sandbox definition to the local registry")]
+fn push_the_definition(world: &mut E2eWorld) {
+    let host = world
+        .registry
+        .as_ref()
+        .expect("Given a local registry before pushing to one")
+        .host();
+    let reference = format!("{host}/e2e-built-sandbox:1");
+    let project = microvm_project(world);
+    let publisher = tempfile::TempDir::new().expect("publisher project tempdir");
+    copy_tree(
+        &project.join(CONTAINERFILE_IMAGE_PATH),
+        &publisher.path().join(CONTAINERFILE_IMAGE_PATH),
+    );
+    std::fs::write(
+        publisher.path().join("lns.yaml"),
+        format!(
+            "apiVersion: lns.run/v1\nkind: sandbox\nname: e2e-microvm\nspec:\n  image: {CONTAINERFILE_IMAGE_PATH}\n"
+        ),
+    )
+    .expect("write the publisher lns.yaml");
+    let budget = world.run_budget.unwrap_or(MICROVM_RUN_TIMEOUT);
+    let result = run_cli_with_timeout_in_dir(
+        publisher.path(),
+        vec!["push".to_string(), "--yes".to_string(), reference.clone()],
+        socket_env(world),
+        budget,
+    );
+    world.result = Some(result);
+    world.pushed_ref = Some(reference);
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("create the publisher context directory");
+    for entry in std::fs::read_dir(from).expect("read the build context") {
+        let entry = entry.expect("a build context entry");
+        let target = to.join(entry.file_name());
+        match entry.file_type().expect("the entry's type").is_dir() {
+            true => copy_tree(&entry.path(), &target),
+            false => {
+                std::fs::copy(entry.path(), target).expect("copy a build context file");
+            }
+        }
+    }
+}
+
+/// The repository the artifact was pushed to, which §6 says the image publishes into as well.
+fn pushed_repository(world: &E2eWorld) -> Result<String, String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    Ok(reference
+        .rsplit_once(':')
+        .map(|(repository, _)| repository.to_string())
+        .unwrap_or(reference))
+}
+
+#[then("the image was published into the artifact's own repository")]
+fn the_image_landed_beside_the_artifact(world: &mut E2eWorld) -> Result<(), String> {
+    let repository = pushed_repository(world)?;
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("built ./image/Dockerfile as "))
+        .ok_or_else(|| format!("the push must name the image it published:\n{}", run.stdout))?;
+    match line.contains(&format!("{repository}@sha256:")) {
+        true => Ok(()),
+        false => Err(format!(
+            "§6: one grant covers both, so the image publishes into {repository}; got {line}"
+        )),
+    }
+}
+
+/// A second machine: the service that pushed is stopped and a home that has never built anything takes its place, so what the run finds came off the registry.
+#[when("the user pulls the pushed sandbox onto a machine that has never built it")]
+fn pull_onto_a_clean_machine(world: &mut E2eWorld) -> Result<(), String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    world.shutdown_service();
+    world.home = Some(tempfile::TempDir::new().expect("a home that has never built anything"));
+    world.service_dir = None;
+    world.service_socket = None;
+    crate::steps::service::start_service(world);
+    run_lns_microvm_as(world, &["pull"], vec![reference]);
+    Ok(())
+}
+
+#[when("the user inspects the pushed sandbox")]
+fn inspect_the_pushed_sandbox(world: &mut E2eWorld) -> Result<(), String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    run_lns_microvm_as(world, &["inspect"], vec![reference]);
+    Ok(())
+}
+
+/// §6.2: the document a push publishes names the index by digest, and the index publishes beside the artifact, so one grant covers both.
+#[then("the push names the image index it published in the artifact's own repository")]
+fn the_push_names_the_index_it_published(world: &mut E2eWorld) -> Result<(), String> {
+    let repository = pushed_repository(world)?;
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("index "))
+        .ok_or_else(|| format!("the push must name the index:\n{}", run.stdout))?;
+    match line.contains(&format!("{repository}@sha256:")) {
+        true => Ok(()),
+        false => Err(format!(
+            "a consumer must never receive a document it would have to build; got {line}"
+        )),
+    }
+}
+
+#[then("inspect prints the built digest for this host's architecture")]
+fn inspect_prints_this_hosts_digest(world: &mut E2eWorld) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("image: built from "))
+        .ok_or_else(|| {
+            format!(
+                "inspect must name what the image was built from:\n{}",
+                run.stdout
+            )
+        })?;
+    match line.contains(&format!("{} sha256:", host_architecture())) {
+        true => Ok(()),
+        false => Err(format!(
+            "§6.2: the line names one digest per architecture the index holds; got {line}"
+        )),
+    }
+}
+
+#[then("the inspect booted no guest")]
+fn the_inspect_booted_no_guest(world: &mut E2eWorld) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let combined = format!("{}\n{}", run.stdout, run.stderr);
+    match combined.contains("Booted") || combined.contains("Building") {
+        true => Err(format!(
+            "inspect reads the artifact and runs nothing:\n{combined}"
+        )),
+        false => Ok(()),
+    }
+}
+
+#[when(regex = r#"^the user runs the pushed sandbox with "([^"]*)"$"#)]
+fn run_the_pushed_sandbox(world: &mut E2eWorld, cmd_line: String) -> Result<(), String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    run_microvm_of(world, vec![reference], &cmd_line);
+    Ok(())
+}
+
+/// Slice 6 of lensapp/lens-sandbox#393: what this host builds for, spelled as an index entry does.
+fn host_architecture() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        _ => "amd64",
+    }
+}
+
+/// The architecture nobody here can build for, which is the one the scenario writes into the registry itself.
+fn other_architecture() -> &'static str {
+    match host_architecture() {
+        "arm64" => "amd64",
+        _ => "arm64",
+    }
+}
+
+/// The tag part of the reference this scenario pushed, which every image tag beside it derives from.
+fn pushed_tag(world: &E2eWorld) -> Result<String, String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    Ok(lns_artifact::image_index::tag_of(&reference).to_string())
+}
+
+/// What the index the published document names holds, read straight off the registry.
+fn published_index(world: &E2eWorld) -> Result<Vec<String>, String> {
+    let repository = pushed_repository(world)?;
+    let tag = lns_artifact::image_index::index_tag(&pushed_tag(world)?);
+    let name = repository
+        .split_once('/')
+        .map(|(_, name)| name.to_string())
+        .ok_or_else(|| format!("{repository} names no repository"))?;
+    let registry = world
+        .registry
+        .as_ref()
+        .ok_or("Given a local registry before reading its index")?;
+    let bytes = registry
+        .manifest_at(&name, &tag)
+        .ok_or_else(|| format!("the push published no index at {name}:{tag}"))?;
+    let entries = lns_artifact::image_index::parse(&bytes)
+        .map_err(|e| format!("the index at {name}:{tag} does not read back: {e:#}"))?;
+    Ok(lns_artifact::image_index::platforms(&entries))
+}
+
+#[then("the index holds only this host's architecture")]
+fn the_index_holds_only_this_host(world: &mut E2eWorld) -> Result<(), String> {
+    let held = published_index(world)?;
+    match held == vec![format!("linux/{}", host_architecture())] {
+        true => Ok(()),
+        false => Err(format!(
+            "the first push publishes an index over what it built and nothing else; got {held:?}"
+        )),
+    }
+}
+
+#[given("another architecture has pushed its image for the pushed sandbox")]
+fn another_architecture_has_pushed(world: &mut E2eWorld) -> Result<(), String> {
+    let repository = pushed_repository(world)?;
+    let name = repository
+        .split_once('/')
+        .map(|(_, name)| name.to_string())
+        .ok_or_else(|| format!("{repository} names no repository"))?;
+    let tag = lns_artifact::image_index::architecture_tag(
+        &pushed_tag(world)?,
+        lns_artifact::image_index::OS,
+        other_architecture(),
+    );
+    let registry = world
+        .registry
+        .as_ref()
+        .ok_or("Given a local registry before another host pushes to it")?;
+    registry.publish_architecture_image(&name, &tag, other_architecture());
+    Ok(())
+}
+
+#[then("the index holds this host's architecture and the other one")]
+fn the_index_holds_both(world: &mut E2eWorld) -> Result<(), String> {
+    let held = published_index(world)?;
+    let wanted = [
+        format!("linux/{}", host_architecture()),
+        format!("linux/{}", other_architecture()),
+    ];
+    match wanted.iter().all(|platform| held.contains(platform)) && held.len() == 2 {
+        true => Ok(()),
+        false => Err(format!(
+            "§6.2: a second architecture adds an entry rather than replacing the image; got {held:?}"
+        )),
+    }
+}
+
+#[then("inspect prints one built digest per architecture")]
+fn inspect_prints_one_digest_per_architecture(world: &mut E2eWorld) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let line = run
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("image: built from "))
+        .ok_or_else(|| {
+            format!(
+                "inspect must name what the image was built from:\n{}",
+                run.stdout
+            )
+        })?;
+    let named = [host_architecture(), other_architecture()]
+        .iter()
+        .all(|architecture| line.contains(&format!("{architecture} sha256:")));
+    match named {
+        true => Ok(()),
+        false => Err(format!(
+            "§6.2: an approver reads one digest per architecture the index holds; got {line}"
+        )),
+    }
+}
+
+#[then("the run booted this host's architecture")]
+fn the_run_booted_this_hosts_architecture(world: &mut E2eWorld) -> Result<(), String> {
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    let combined = format!("{}\n{}", run.stdout, run.stderr);
+    match combined.contains(&format!("linux/{}", host_architecture())) {
+        true => Ok(()),
+        false => Err(format!(
+            "the summary says which entry of the index booted:\n{combined}"
+        )),
+    }
+}
+
+/// The point of the slice for a kit: what a `pre-start` script used to install is in the image.
+#[then("the document that ran declared no pre-start script")]
+fn the_document_declared_no_script(world: &mut E2eWorld) -> Result<(), String> {
+    let reference = world
+        .pushed_ref
+        .clone()
+        .ok_or("nothing has been pushed in this scenario")?;
+    run_lns_microvm_as(world, &["inspect"], vec![reference]);
+    let run = world.result.as_ref().ok_or("no CLI run captured")?;
+    match run.stdout.lines().any(|line| line.starts_with("script:")) {
+        true => Err(format!(
+            "a built image is what a pre-start script was standing in for:\n{}",
+            run.stdout
+        )),
+        false => Ok(()),
     }
 }

@@ -111,6 +111,9 @@ impl Volume {
 pub struct SandboxSpec {
     #[serde(default)]
     pub image: String,
+    /// The Containerfile path the published image was built from; `lns push` writes it beside the digest, an author never does (§6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_source: Option<String>,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -310,6 +313,8 @@ fn parse_of_kind(config_json: &[u8], kind: spec::Kind) -> Result<Definition> {
     if kind != spec::Kind::Sandbox {
         refuse_the_blocks_that_describe_one_launch(&doc.spec, kind)?;
     }
+    crate::image::validate(&doc.spec.image)?;
+    crate::image::validate_source(&doc.spec.image, doc.spec.image_source.as_deref())?;
     lns_spec::credential::validate_all(
         &doc.spec.credentials,
         lns_spec::credential::Source::Document,
@@ -1433,6 +1438,38 @@ mod tests {
         let err = parse(&def_json(r#"{}"#)).unwrap_err();
         assert!(
             format!("{err:#}").contains("must carry an image"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_containerfile_path_that_leaves_the_document_refuses_the_whole_document() {
+        // Every load path parses, so an author hears about it at `validate` rather than at the build.
+        let err = parse(&def_json(r#"{"image":"../elsewhere"}"#)).unwrap_err();
+        assert!(format!("{err:#}").contains("spec.image"), "got: {err:#}");
+    }
+
+    #[test]
+    fn a_containerfile_path_beside_the_document_parses() {
+        let def = parse(&def_json(r#"{"image":"./image"}"#))
+            .expect("a path beside the document is a form spec.image takes");
+        assert_eq!(def.spec.image, "./image");
+    }
+
+    #[test]
+    fn a_published_document_carries_the_digest_it_built_to_and_the_path_it_was_built_from() {
+        let def = parse(&def_json(
+            r#"{"image":"ghcr.io/team/hermes@sha256:abc","imageSource":"./image"}"#,
+        ))
+        .expect("§6 writes exactly this pair, and every load path reads it back");
+        assert_eq!(def.spec.image_source.as_deref(), Some("./image"));
+    }
+
+    #[test]
+    fn a_document_that_says_both_build_this_and_built_from_that_refuses() {
+        let err = parse(&def_json(r#"{"image":"./image","imageSource":"./image"}"#)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("spec.imageSource"),
             "got: {err:#}"
         );
     }

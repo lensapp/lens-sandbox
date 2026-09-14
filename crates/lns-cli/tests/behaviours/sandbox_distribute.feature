@@ -321,6 +321,25 @@ Feature: distributing a sandbox
     And the output does not contain "Continue?"
     And nothing is pushed
 
+  Scenario: a --format json push refuses the mixins it cannot ask about
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the registry accepts the push
+    When the user runs artifact command "push --format json ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 1
+    And the output contains "--format json never prompts"
+    And the output contains "--yes"
+    And nothing is pushed
+
+  Scenario: a --format json push with --yes publishes the mixins and emits one object
+    Given an lns.yaml layering on the local mixin "./mixins/pg/"
+    And the local mixin at "./mixins/pg/" is named "postgres-tools"
+    And the registry accepts the push
+    When the user runs artifact command "push --format json --yes ghcr.io/team/hermes:1.4.0"
+    Then the exit code is 0
+    And the output does not contain "Continue?"
+    And exactly 2 artifact(s) were uploaded
+
   Scenario: an unpinned remote mixin still refuses the push
     Given an lns.yaml layering on the local mixin "ghcr.io/team/observability:2"
     When the user runs artifact command "push ghcr.io/team/hermes:1.4.0 --yes"

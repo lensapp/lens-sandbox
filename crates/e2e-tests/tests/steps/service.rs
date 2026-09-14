@@ -32,7 +32,7 @@ pub(crate) fn start_service_with(world: &mut E2eWorld, extra: &[(&str, &str)]) {
     );
 }
 
-fn read_service_log(world: &E2eWorld) -> String {
+pub(crate) fn read_service_log(world: &E2eWorld) -> String {
     let Some(socket) = &world.service_socket else {
         return "(no socket path on the world)".to_string();
     };
@@ -82,6 +82,17 @@ fn service_is_running_in_home(world: &mut E2eWorld) {
         "Given a clean lns cache home before starting the service in it"
     );
     start_service(world);
+}
+
+#[given(
+    regex = r#"^the LNS service is running in that home carrying "([^"=]+)=([^"]+)" in its own environment$"#
+)]
+fn service_is_running_in_home_carrying(world: &mut E2eWorld, name: String, value: String) {
+    assert!(
+        world.home.is_some(),
+        "Given a clean lns cache home before starting the service in it"
+    );
+    start_service_with(world, &[(name.as_str(), value.as_str())]);
 }
 
 #[given("the LNS service is running headless in that home")]

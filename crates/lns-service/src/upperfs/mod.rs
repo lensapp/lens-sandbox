@@ -9,6 +9,7 @@ mod plan;
 mod writer;
 
 mod real;
+pub use constants::FEATURE_INCOMPAT_RECOVER;
 pub use plan::Plan;
 pub use real::provision;
 pub use writer::{grow_ext4, write_ext4};

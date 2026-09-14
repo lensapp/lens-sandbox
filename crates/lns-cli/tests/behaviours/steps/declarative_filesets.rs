@@ -44,6 +44,9 @@ impl Fs for StepFs {
     fn is_symlink(&self, _path: &Path) -> bool {
         false
     }
+    fn size(&self, path: &Path) -> std::io::Result<u64> {
+        Fs::read_to_string(self, path).map(|held| held.len() as u64)
+    }
 }
 
 impl lns_artifact::walk::SnapshotFs for StepFs {
@@ -102,6 +105,8 @@ fn local_run_prepared(world: &mut BehaviourWorld) {
 )]
 fn pulled_view_with_fileset(world: &mut BehaviourWorld, path: String, mount: String) {
     world.pulled_view = Some(lns_ipc::SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -136,6 +141,8 @@ fn pulled_view_with_fileset(world: &mut BehaviourWorld, path: String, mount: Str
 )]
 fn pulled_view_with_inline_fileset(world: &mut BehaviourWorld, mount: String) {
     world.pulled_view = Some(lns_ipc::SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),
@@ -285,6 +292,8 @@ fn command_fails_naming(world: &mut BehaviourWorld, needle: String) -> Result<()
 )]
 fn pulled_view_with_host_path_fileset(world: &mut BehaviourWorld, source: String, mount: String) {
     world.pulled_view = Some(lns_ipc::SandboxView {
+        image_architectures: Vec::new(),
+        image_source: None,
         mixins: Vec::new(),
         pinned_mixins: Vec::new(),
         contributions: Vec::new(),

@@ -50,6 +50,7 @@ const COLLISION: &str =
 
 fn args_named(name: &str) -> RunImageArgs {
     RunImageArgs {
+        build_engine: lns_ipc::BuildEngine::default(),
         image: Some("registry.example.test/some-sandbox:1".into()),
         resolved_image: None,
         mixins: Vec::new(),

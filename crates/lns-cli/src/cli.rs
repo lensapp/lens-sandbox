@@ -82,6 +82,10 @@ pub struct RunArgs {
     #[arg(skip)]
     pub mem_config: Option<usize>,
 
+    /// This machine's `build.engine`, which decides where a path-form `spec.image` is built (`docs/sandbox-spec.md` §3.1.1).
+    #[arg(skip)]
+    pub build_engine: lns_ipc::BuildEngine,
+
     #[arg(
         short = 'u',
         long = "user",

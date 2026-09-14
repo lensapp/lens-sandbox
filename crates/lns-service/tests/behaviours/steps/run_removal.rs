@@ -353,6 +353,27 @@ async fn two_stopped_one_running(w: &mut BehaviourWorld) {
     w.startrun_target = Some(live);
 }
 
+/// The prune scenarios describe runs, not builds; what a build leaves behind is pinned in the service's own tests.
+struct NoBuilds;
+
+impl lns_service::ipc::BuiltImageSweep for NoBuilds {
+    async fn sweep(
+        &self,
+        _cache_root: &Path,
+        _surviving_runs: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    async fn candidates(
+        &self,
+        _cache_root: &Path,
+        _surviving_runs: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
 #[given("a run dir with no run record")]
 async fn an_orphan_run_dir(w: &mut BehaviourWorld) {
     hold_serial(w).await;
@@ -367,8 +388,10 @@ async fn i_run_prune(w: &mut BehaviourWorld) {
         fs.run_dirs = vec![Path::new(CACHE_ROOT).join("runs").join(orphan)];
     }
     let fake = remover(w);
-    w.response =
-        Some(lns_service::ipc::prune_runs_with(&fs, &fake, Path::new(CACHE_ROOT), |_| {}).await);
+    w.response = Some(
+        lns_service::ipc::prune_runs_with(&fs, &fake, Path::new(CACHE_ROOT), &NoBuilds, |_| {})
+            .await,
+    );
     w.startrun_status_after = w
         .startrun_target
         .as_ref()
@@ -378,7 +401,7 @@ async fn i_run_prune(w: &mut BehaviourWorld) {
 
 #[then("both stopped runs are removed")]
 fn both_stopped_runs_removed(w: &mut BehaviourWorld) -> Result<(), String> {
-    let Some(Response::RunsPruned { removed }) = &w.response else {
+    let Some(Response::RunsPruned { removed, .. }) = &w.response else {
         return Err(format!("expected RunsPruned, got {:?}", w.response));
     };
     for id in &w.prune_stopped {

@@ -11,12 +11,16 @@ use crate::service::client::{BoxFuture, SandboxService};
 
 pub(crate) struct CannedService {
     response: Response,
+    /// The document this machine holds, for a verb that reads one before it asks the service.
+    document: Option<String>,
     stats_response: Option<Response>,
     inspect_image_response: Option<Response>,
     remove_image_response: Option<Response>,
     list_prunable_response: Option<Response>,
     list_images_response: Option<Response>,
     frames: Vec<Vec<u8>>,
+    /// The engine this machine builds a Containerfile with, so a unit test can pin that a verb sends it (§3.1.1).
+    build_engine: lns_ipc::BuildEngine,
     pub requests: Arc<Mutex<Vec<Request>>>,
 }
 
@@ -24,13 +28,22 @@ impl CannedService {
     pub fn new(response: Response) -> Self {
         Self {
             response,
+            document: None,
             stats_response: None,
             inspect_image_response: None,
             remove_image_response: None,
             list_prunable_response: None,
             list_images_response: None,
             frames: Vec::new(),
+            build_engine: lns_ipc::BuildEngine::default(),
             requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn holding_a_document(response: Response, document: &str) -> Self {
+        Self {
+            document: Some(document.to_string()),
+            ..Self::new(response)
         }
     }
 
@@ -84,6 +97,8 @@ pub(crate) fn sandbox_inspection(tools: Vec<String>) -> Response {
 pub(crate) fn sandbox_inspection_with_digest(tools: Vec<String>, digest: String) -> Response {
     Response::ImageInspected {
         inspection: lns_ipc::ArtifactInspection::Sandbox(Box::new(lns_ipc::SandboxView {
+            image_architectures: Vec::new(),
+            image_source: None,
             mixins: Vec::new(),
             pinned_mixins: Vec::new(),
             contributions: Vec::new(),
@@ -181,6 +196,19 @@ impl SandboxService for CannedService {
 
     fn write_document(&self, _path: &std::path::Path, _contents: &str) -> std::io::Result<()> {
         Ok(())
+    }
+
+    fn build_engine(&self) -> Result<lns_ipc::BuildEngine> {
+        Ok(self.build_engine.clone())
+    }
+
+    fn document(&self, file: Option<&std::path::Path>) -> Result<(PathBuf, String)> {
+        let path =
+            crate::artifact::author::selected_definition_path(file, std::path::Path::new("/work"));
+        match &self.document {
+            Some(yaml) => Ok((path, yaml.clone())),
+            None => bail!("reading {}; run `lns init` to scaffold one", path.display()),
+        }
     }
 }
 

@@ -11,6 +11,7 @@ use oci_client::{
     client::{ClientConfig, ClientProtocol},
     secrets::RegistryAuth,
 };
+use sha2::Digest;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -100,4 +101,45 @@ fn reqwest_free_get(url: &str) -> String {
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("read response");
     response
+}
+
+/// The seam the architecture-index scenario stands on: what a push from another
+/// architecture would leave in the repository, and the read that finds it again.
+#[tokio::test]
+async fn an_architecture_image_written_by_the_harness_reads_back_as_the_platform_it_names() {
+    let reg = registry::LocalRegistry::start();
+    let digest = reg.publish_architecture_image("team/agent", "1.4.0-image-linux-amd64", "amd64");
+    let bytes = reg
+        .manifest_at("team/agent", "1.4.0-image-linux-amd64")
+        .expect("the tag holds what was written to it");
+    assert_eq!(
+        digest,
+        format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes))),
+        "the digest answered is the digest of the bytes stored"
+    );
+    let reference: Reference = format!("{}/team/agent:1.4.0-image-linux-amd64", reg.host())
+        .parse()
+        .expect("ref parses");
+    let client = oci_client::Client::new(ClientConfig {
+        protocol: ClientProtocol::Http,
+        ..Default::default()
+    });
+    let (manifest, _) = client
+        .pull_manifest_raw(
+            &reference,
+            &RegistryAuth::Anonymous,
+            &["application/vnd.oci.image.manifest.v1+json"],
+        )
+        .await
+        .expect("the manifest pulls back");
+    let manifest: oci_client::manifest::OciImageManifest =
+        serde_json::from_slice(&manifest).expect("the manifest is one");
+    let mut config = Vec::new();
+    client
+        .pull_blob(&reference, &manifest.config, &mut config)
+        .await
+        .expect("the config pulls back");
+    let config: serde_json::Value = serde_json::from_slice(&config).expect("the config is json");
+    assert_eq!(config["architecture"], "amd64");
+    assert_eq!(config["os"], "linux");
 }

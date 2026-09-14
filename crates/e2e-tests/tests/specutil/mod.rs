@@ -258,6 +258,40 @@ pub fn data_lns_dir(home: &Path) -> PathBuf {
     home.join(".lns")
 }
 
+/// The CLI prints a run id short and the service names the run's own directory with the full one, so a test that wants that directory matches the printed id as a prefix.
+pub fn run_dir_for_prefix(home: &Path, prefix: &str) -> Result<PathBuf, String> {
+    let runs = data_lns_dir(home).join("runs");
+    let listing =
+        std::fs::read_dir(&runs).map_err(|e| format!("reading {}: {e}", runs.display()))?;
+    let mut names = Vec::new();
+    for entry in listing {
+        let entry = entry.map_err(|e| format!("reading {}: {e}", runs.display()))?;
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    let name = run_dir_name_for_prefix(&names, prefix)
+        .map_err(|e| format!("{e} in {}", runs.display()))?;
+    Ok(runs.join(name))
+}
+
+pub fn run_dir_name_for_prefix(names: &[String], prefix: &str) -> Result<String, String> {
+    let mut matched: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    matched.sort_unstable();
+    match matched.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => Err(format!(
+            "no run directory starts with {prefix:?}; the directories are {names:?}"
+        )),
+        many => Err(format!(
+            "{} run directories start with {prefix:?}: {many:?}",
+            many.len()
+        )),
+    }
+}
+
 pub fn assert_eq_int(expected: i32, actual: i32, label: &str) -> Result<(), String> {
     if expected == actual {
         Ok(())

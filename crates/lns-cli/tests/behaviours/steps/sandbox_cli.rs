@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -25,8 +25,10 @@ pub(crate) struct FakeSandboxService {
     remove_image_response: Option<Response>,
     cached_references: Vec<String>,
     prunable_references: Vec<String>,
+    prunable_built_images: Vec<String>,
     list_runs_response: Option<Response>,
     remove_run_response: Option<Response>,
+    resolve_response: Option<Response>,
     frames: Vec<Vec<u8>>,
     unreachable: bool,
     policy: Option<serde_json::Value>,
@@ -35,6 +37,9 @@ pub(crate) struct FakeSandboxService {
     existing_documents: Vec<PathBuf>,
     unwritable_documents: Vec<PathBuf>,
     written_documents: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    /// The documents this machine holds, so a verb that reads one before it asks the service can.
+    documents: std::collections::HashMap<PathBuf, String>,
+    build_engine: lns_ipc::BuildEngine,
 }
 
 impl SandboxService for FakeSandboxService {
@@ -74,8 +79,15 @@ impl SandboxService for FakeSandboxService {
                     .map(|reference| cached_entry(reference))
                     .collect(),
             }),
+            Request::ListPrunableBuiltImages => Some(Response::PrunableBuiltImages {
+                references: self.prunable_built_images.clone(),
+            }),
             Request::ListRuns => self
                 .list_runs_response
+                .clone()
+                .or_else(|| self.response.clone()),
+            Request::ResolveDefinition { .. } => self
+                .resolve_response
                 .clone()
                 .or_else(|| self.response.clone()),
             Request::RemoveRun { .. } => self
@@ -88,6 +100,7 @@ impl SandboxService for FakeSandboxService {
                 .filter(|r| matches!(r, Response::RunsPruned { .. }))
                 .or(Some(Response::RunsPruned {
                     removed: Vec::new(),
+                    built_images: Vec::new(),
                 })),
             _ => self.response.clone(),
         };
@@ -124,6 +137,18 @@ impl SandboxService for FakeSandboxService {
 
     fn load_policy(&self, _path: &str) -> Option<serde_json::Value> {
         self.policy.clone()
+    }
+
+    fn document(&self, file: Option<&Path>) -> anyhow::Result<(PathBuf, String)> {
+        let path = lns_cli::artifact::author::selected_definition_path(file, Path::new("/work"));
+        let yaml = self.documents.get(&path).ok_or_else(|| {
+            anyhow::anyhow!("reading {}; run `lns init` to scaffold one", path.display())
+        })?;
+        Ok((path, yaml.clone()))
+    }
+
+    fn build_engine(&self) -> anyhow::Result<lns_ipc::BuildEngine> {
+        Ok(self.build_engine.clone())
     }
 
     fn write_document(&self, path: &Path, contents: &str) -> std::io::Result<()> {
@@ -385,6 +410,7 @@ fn stream_opens_with_error(w: &mut BehaviourWorld, _run_id: u32, message: String
 
 struct StepFs {
     files: RefCell<HashMap<PathBuf, String>>,
+    symlinks: HashSet<PathBuf>,
 }
 
 impl author::Fs for StepFs {
@@ -392,6 +418,7 @@ impl author::Fs for StepFs {
         self.files
             .borrow()
             .keys()
+            .chain(self.symlinks.iter())
             .any(|held| held.ancestors().skip(1).any(|dir| dir == path))
     }
 
@@ -409,10 +436,13 @@ impl author::Fs for StepFs {
         Ok(())
     }
     fn exists(&self, path: &Path) -> bool {
-        self.files.borrow().contains_key(path)
+        self.files.borrow().contains_key(path) || self.symlinks.contains(path)
     }
-    fn is_symlink(&self, _path: &Path) -> bool {
-        false
+    fn is_symlink(&self, path: &Path) -> bool {
+        self.symlinks.contains(path)
+    }
+    fn size(&self, path: &Path) -> std::io::Result<u64> {
+        author::Fs::read_to_string(self, path).map(|held| held.len() as u64)
     }
 }
 
@@ -423,8 +453,50 @@ impl lns_artifact::walk::SnapshotFs for StepFs {
         Ok(bytes)
     }
     fn dir_entries(&self, dir: &Path) -> std::io::Result<Vec<lns_artifact::walk::DirEntry>> {
-        lns_artifact::walk::map_dir_entries(self.files.borrow().keys(), dir)
+        let held: Vec<PathBuf> = self
+            .files
+            .borrow()
+            .keys()
+            .chain(self.symlinks.iter())
+            .cloned()
+            .collect();
+        let mut listed = lns_artifact::walk::map_dir_entries(held.iter(), dir)?;
+        for entry in &mut listed {
+            entry.symlink = self.symlinks.contains(&dir.join(&entry.name));
+        }
+        Ok(listed)
     }
+}
+
+/// A repository whose per-architecture tags a scenario staged holds the index those tags assemble to, as the push that wrote them left it.
+fn staged_indexes(
+    held: &std::collections::HashMap<String, lns_artifact::image_index::IndexEntry>,
+) -> std::collections::HashMap<String, lns_artifact::image_index::HeldIndex> {
+    let mut by_repository: std::collections::HashMap<String, Vec<_>> =
+        std::collections::HashMap::new();
+    for (at, entry) in held {
+        let Some((repository, tag)) = at.rsplit_once(':') else {
+            continue;
+        };
+        let Some((artifact_tag, _)) = tag.split_once("-image-") else {
+            continue;
+        };
+        by_repository
+            .entry(format!(
+                "{repository}:{}",
+                lns_artifact::image_index::index_tag(artifact_tag)
+            ))
+            .or_default()
+            .push(entry.clone());
+    }
+    by_repository
+        .into_iter()
+        .filter_map(|(at, entries)| {
+            let entries = lns_artifact::image_index::in_index_order(entries);
+            let digest = lns_artifact::image_index::assemble(&entries).ok()?.digest;
+            Some((at, lns_artifact::image_index::HeldIndex { digest, entries }))
+        })
+        .collect()
 }
 
 struct StepProducer {
@@ -432,6 +504,14 @@ struct StepProducer {
     uploaded: RefCell<Vec<(String, lns_artifact::build::BuiltArtifact)>>,
     /// A mixin push that must succeed even while the sandbox push is scripted to fail, so a partial-publish scenario can assert what landed.
     fail_after: Option<usize>,
+    /// Every built image the push uploaded, with the repository it landed in.
+    images: RefCell<Vec<(lns_ipc::PushableImage, String)>>,
+    /// What the registry already holds under each per-architecture image tag, which is what a push assembles its index over.
+    held: RefCell<std::collections::HashMap<String, lns_artifact::image_index::IndexEntry>>,
+    /// Every index the push uploaded, with the tag it landed under.
+    indexes: RefCell<Vec<(String, Vec<u8>)>>,
+    /// The index each tag named before this push, assembled from what the scenario staged.
+    published_index: std::collections::HashMap<String, lns_artifact::image_index::HeldIndex>,
 }
 
 impl distribute::Producer for StepProducer {
@@ -453,6 +533,131 @@ impl distribute::Producer for StepProducer {
                 .map(|_| ()),
         };
         Box::pin(async move { outcome })
+    }
+
+    fn push_image<'a>(
+        &'a self,
+        image: &'a lns_ipc::PushableImage,
+        repository: &'a str,
+        _tag: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<()>> {
+        self.images
+            .borrow_mut()
+            .push((image.clone(), repository.to_string()));
+        let refused = self.outcome.clone().err();
+        Box::pin(async move {
+            match refused {
+                Some(message) => Err(anyhow::anyhow!(message)),
+                None => Ok(()),
+            }
+        })
+    }
+
+    fn image_at<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<Option<lns_artifact::image_index::IndexEntry>>> {
+        let held = self
+            .held
+            .borrow()
+            .get(&format!("{repository}:{tag}"))
+            .cloned();
+        Box::pin(async move { Ok(held) })
+    }
+
+    fn index_at<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+    ) -> LocalBoxFuture<'a, anyhow::Result<Option<lns_artifact::image_index::HeldIndex>>> {
+        let held = self
+            .indexes
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(at, _)| at == &format!("{repository}:{tag}"))
+            .and_then(|(_, bytes)| lns_artifact::image_index::held(bytes).ok())
+            .flatten()
+            .or_else(|| {
+                self.published_index
+                    .get(&format!("{repository}:{tag}"))
+                    .cloned()
+            });
+        Box::pin(async move { Ok(held) })
+    }
+
+    fn push_index<'a>(
+        &'a self,
+        repository: &'a str,
+        tag: &'a str,
+        index: &'a [u8],
+    ) -> LocalBoxFuture<'a, anyhow::Result<()>> {
+        self.indexes
+            .borrow_mut()
+            .push((format!("{repository}:{tag}"), index.to_vec()));
+        Box::pin(async move { Ok(()) })
+    }
+}
+
+/// The service's half of a push, as a scenario stages it: the key it answers, and the image behind that key when this machine has one.
+struct StepImageBuilder<'a> {
+    staged: Option<&'a crate::world::StagedBuild>,
+    resolution: Option<&'a crate::world::StagedResolution>,
+    asked: RefCell<Vec<crate::world::StagedRequest>>,
+    inputs: RefCell<Vec<crate::world::StagedBuildInput>>,
+    resolved: RefCell<Vec<String>>,
+}
+
+impl distribute::ImageBuilder for StepImageBuilder<'_> {
+    fn resolve<'a>(
+        &'a self,
+        document: &'a [u8],
+        _project_dir: &'a Path,
+    ) -> LocalBoxFuture<'a, anyhow::Result<distribute::ResolvedDefinition>> {
+        self.resolved
+            .borrow_mut()
+            .push(String::from_utf8_lossy(document).into_owned());
+        let answer = self.resolution.cloned();
+        Box::pin(async move {
+            let staged = answer.ok_or_else(|| {
+                anyhow::anyhow!("this scenario stages no resolution, so nothing may ask for one")
+            })?;
+            Ok(distribute::ResolvedDefinition {
+                definition: staged.definition.into_bytes(),
+                authored_egress: Some(staged.authored_egress),
+                packed_filesets: Vec::new(),
+            })
+        })
+    }
+
+    fn build<'a>(
+        &'a self,
+        request: &'a distribute::ImageRequest<'a>,
+    ) -> LocalBoxFuture<'a, anyhow::Result<distribute::BuiltImage>> {
+        self.asked.borrow_mut().push(crate::world::StagedRequest {
+            plan_only: request.plan_only,
+            rebuild: request.rebuild,
+            build_engine: request.build_engine.clone(),
+        });
+        self.inputs
+            .borrow_mut()
+            .push(crate::world::StagedBuildInput {
+                definition: String::from_utf8_lossy(&request.document).into_owned(),
+                authored_egress: request.authored_egress.clone(),
+            });
+        let answer = self.staged.cloned();
+        Box::pin(async move {
+            let staged = answer.ok_or_else(|| {
+                anyhow::anyhow!("this scenario stages no build, so nothing may ask for one")
+            })?;
+            Ok(distribute::BuiltImage {
+                key: staged.key,
+                label: staged.label,
+                reused: staged.reused,
+                image: staged.image,
+            })
+        })
     }
 }
 
@@ -491,6 +696,7 @@ fn run_author_verb(w: &mut BehaviourWorld, cmd: &ArtifactCommand) {
     let cwd = Path::new("/work");
     let fs = StepFs {
         files: RefCell::new(w.author_files.clone()),
+        symlinks: w.author_symlinks.clone(),
     };
     let mut out: Vec<u8> = Vec::new();
     let mut err: Vec<u8> = Vec::new();
@@ -550,8 +756,10 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         remove_image_response: w.sandbox.remove_image_response.clone(),
         cached_references: w.sandbox.cached_references.clone(),
         prunable_references: w.sandbox.prunable_references.clone(),
+        prunable_built_images: w.sandbox.prunable_built_images.clone(),
         list_runs_response: w.sandbox.list_runs_response.clone(),
         remove_run_response: w.sandbox.remove_run_response.clone(),
+        resolve_response: w.sandbox.resolve_response.clone(),
         frames: w.sandbox.frames.clone(),
         unreachable: w.sandbox.unreachable,
         policy: w.sandbox.policy.clone(),
@@ -559,6 +767,8 @@ pub(crate) fn fake_sandbox_service(w: &BehaviourWorld) -> FakeSandboxService {
         existing_documents: w.sandbox.existing_documents.clone(),
         unwritable_documents: w.sandbox.unwritable_documents.clone(),
         written_documents: w.sandbox.written_documents.clone(),
+        documents: w.author_files.clone(),
+        build_engine: w.build_engine.clone(),
     }
 }
 
@@ -689,6 +899,7 @@ pub(crate) async fn drive_artifact_command(w: &mut BehaviourWorld, cmd: &str) {
 async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::PushArgs) {
     let fs = StepFs {
         files: RefCell::new(w.author_files.clone()),
+        symlinks: w.author_symlinks.clone(),
     };
     let producer = StepProducer {
         outcome: w.push_outcome.clone().unwrap_or(Err(
@@ -696,19 +907,42 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
         )),
         uploaded: RefCell::new(Vec::new()),
         fail_after: w.push_fails_after,
+        images: RefCell::new(Vec::new()),
+        held: RefCell::new(w.published_images.clone()),
+        indexes: RefCell::new(Vec::new()),
+        published_index: staged_indexes(&w.published_images),
     };
     let mut out: Vec<u8> = Vec::new();
     let path = author::selected_definition_path(push_args.file.as_deref(), Path::new("/work"));
     let project_dir = path.parent().unwrap_or(Path::new("/work")).to_path_buf();
+    let builder = StepImageBuilder {
+        staged: w.built_image.as_ref(),
+        resolution: w.staged_resolution.as_ref(),
+        asked: RefCell::new(Vec::new()),
+        inputs: RefCell::new(Vec::new()),
+        resolved: RefCell::new(Vec::new()),
+    };
     let result = match author::load_definition_json_at(&fs, &path) {
-        Ok(doc) if push_args.dry_run => distribute::push_dry_run_formatted(
-            &fs,
-            &project_dir,
-            &doc,
-            &push_args.reference,
-            push_args.output.format,
-            &mut out,
-        ),
+        Ok(doc) if push_args.dry_run => {
+            distribute::push_dry_run_formatted(
+                distribute::DryRunPorts {
+                    fs: &fs,
+                    cwd: &project_dir,
+                    producer: &producer,
+                    builder: &builder,
+                    image_limit: w
+                        .image_limit
+                        .unwrap_or(lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES),
+                    rebuild: push_args.rebuild,
+                    build_engine: w.build_engine.clone(),
+                },
+                &doc,
+                &push_args.reference,
+                push_args.output.format,
+                &mut out,
+            )
+            .await
+        }
         Ok(doc) => {
             let resolver = StepResolver {
                 versions: w.tool_index.clone(),
@@ -722,6 +956,12 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
                     cwd: &project_dir,
                     producer: &producer,
                     resolver: &resolver,
+                    builder: &builder,
+                    image_limit: w
+                        .image_limit
+                        .unwrap_or(lns_artifact::image::DEFAULT_IMAGE_LIMIT_BYTES),
+                    rebuild: push_args.rebuild,
+                    build_engine: w.build_engine.clone(),
                 },
                 &doc,
                 &push_args.reference,
@@ -736,6 +976,23 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
         }
         Err(e) => Err(e),
     };
+    w.build_requests = builder.asked.into_inner();
+    w.build_inputs = builder.inputs.into_inner();
+    w.resolve_requests = builder.resolved.into_inner();
+    w.pushed_indexes = producer
+        .indexes
+        .borrow()
+        .iter()
+        .filter_map(|(tag, bytes)| {
+            Some((tag.clone(), lns_artifact::image_index::parse(bytes).ok()?))
+        })
+        .collect();
+    w.pushed_images = producer
+        .images
+        .into_inner()
+        .into_iter()
+        .map(|(image, repository)| (repository, image))
+        .collect();
     let uploaded = producer.uploaded.into_inner();
     w.pushed_refs = uploaded
         .iter()
@@ -756,6 +1013,9 @@ async fn run_push_verb(w: &mut BehaviourWorld, push_args: &lns_cli::artifact::Pu
             )
         })
         .collect();
+    w.pushed_build_source = uploaded
+        .last()
+        .and_then(|(_, built)| built.build_source_layer().map(|layer| layer.data.clone()));
     w.pushed_doc = uploaded.last().and_then(|(_, built)| {
         built
             .blobs
