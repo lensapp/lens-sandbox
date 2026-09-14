@@ -5,8 +5,8 @@
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-SCRIPT="$SCRIPT_DIR/../actions/lib/push-publish.sh"
-ACTION="$SCRIPT_DIR/../actions/lns-push/action.yml"
+SCRIPT="$SCRIPT_DIR/../lib/push-publish.sh"
+ACTION="$SCRIPT_DIR/../lns-push/action.yml"
 
 PASS=0
 FAIL=0
@@ -103,7 +103,7 @@ run_publish() {
         export PATH="$WORK/bin:$PATH"
         export INPUT_FILE=lns.yaml
         export TAGS_FILE="$WORK/tags.txt"
-        export REGISTRY_HOST=hub.lns.run
+        export REGISTRY_HOST="${2:-hub.lns.run}"
         export REPOSITORY=acme/gh
         export GITHUB_OUTPUT="$WORK/output"
         export GITHUB_STEP_SUMMARY="$WORK/summary"
@@ -168,9 +168,15 @@ test_a_failed_push_stops_the_loop() {
     make_fakes "sha256:aaa
 FAIL" 200
     run_publish "hub.lns.run/acme/gh:v1
-hub.lns.run/acme/gh:latest"
+hub.lns.run/acme/gh:latest
+hub.lns.run/acme/gh:never"
     assert_eq "failed push: status" 7 "$STATUS"
     assert_contains "failed push: names the ref" "$LOG" "pushing hub.lns.run/acme/gh:latest"
+    assert_contains "failed push: reports known digest" "$OUTPUT" "digest=sha256:aaa"
+    assert_contains "failed push: reports successful ref" "$OUTPUT" "hub.lns.run/acme/gh:v1"
+    assert_contains "failed push: summary retains success" "$SUMMARY" "— \`sha256:aaa\`"
+    assert_lacks "failed push: excludes failed ref" "$OUTPUT$SUMMARY" "gh:latest"
+    assert_lacks "failed push: stops before next ref" "$(cat "$WORK/calls")" "gh:never"
 }
 
 test_a_missing_repository_is_a_first_push() {
@@ -180,6 +186,22 @@ test_a_missing_repository_is_a_first_push() {
     assert_contains "first push: output" "$OUTPUT" "first-push=true"
     assert_contains "first push: the summary points at the settings page" \
         "$SUMMARY" "hub.lns.run/acme/gh/settings"
+}
+
+test_registry_guidance_is_host_specific() {
+    for host in hub.lns.run hub.staging.lns.run ghcr.io hub.lns.run.example.invalid; do
+        make_fakes "sha256:aaa" 404
+        run_publish "$host/acme/gh:v1" "$host"
+        case "$host" in
+            hub.lns.run | hub.staging.lns.run)
+                assert_contains "$host: private guidance" "$SUMMARY" "is new and private"
+                assert_contains "$host: settings" "$SUMMARY" "https://$host/acme/gh/settings" ;;
+            *)
+                assert_lacks "$host: no visibility claim" "$SUMMARY" "private"
+                assert_lacks "$host: no settings route" "$SUMMARY" "/settings"
+                assert_contains "$host: neutral probe result" "$SUMMARY" "Anonymous repository probe returned HTTP 404" ;;
+        esac
+    done
 }
 
 # The action must go through the script; an inline loop is what this harness
@@ -212,6 +234,7 @@ test_a_second_manifest_fails_the_step
 test_a_push_reporting_no_digest_fails_the_step
 test_a_failed_push_stops_the_loop
 test_a_missing_repository_is_a_first_push
+test_registry_guidance_is_host_specific
 test_the_action_publishes_through_the_script
 
 echo ""
