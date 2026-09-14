@@ -53,7 +53,24 @@ test_actions_package_is_its_own_component() {
         '.packages["actions"].component == "lns-actions"'
 }
 
+test_action_harnesses_are_release_isolated() {
+    root=$(cd "$SCRIPT_DIR/.." && pwd)
+    for harness in "$root"/scripts/actions-*.test.sh "$root"/actions/tests/*.test.sh; do
+        [ -f "$harness" ] || continue
+        relative=${harness#"$root/"}
+        assert_ok "$relative is excluded by a directory prefix" \
+            ".packages[\".\"][\"exclude-paths\"] | any(. as \$prefix | \"$relative\" | startswith(\$prefix + \"/\"))"
+    done
+    if grep -q 'actions/tests/\*.test.sh' "$root/Makefile"; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        echo '  FAIL: Makefile must discover actions/tests/*.test.sh'
+    fi
+}
+
 echo "── release-please-config.json ──"
+test_action_harnesses_are_release_isolated
 test_root_excludes_actions
 test_root_excludes_codeowners
 test_root_excludes_every_governance_file

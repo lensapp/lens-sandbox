@@ -31,32 +31,35 @@ report_published() {
     printf '%s' "$refs_md"
     if [ "$first_push" = true ]; then
       echo
-      echo "$REPOSITORY is new and private. Publish it at https://$REGISTRY_HOST/$REPOSITORY/settings"
+      case "$REGISTRY_HOST" in
+        hub.lns.run | hub.staging.lns.run)
+          echo "$REPOSITORY is new and private. Publish it at https://$REGISTRY_HOST/$REPOSITORY/settings"
+          ;;
+        *) echo "Anonymous repository probe returned HTTP 404 for $REGISTRY_HOST/$REPOSITORY; check your registry's visibility controls." ;;
+      esac
     fi
   } >>"$GITHUB_STEP_SUMMARY"
 }
 
 push_one() {
   local tag=$1 output status pushed
-  set +e
-  output=$(lns artifact push "$tag" -f "$INPUT_FILE" --yes 2>&1)
-  status=$?
-  set -e
+  status=0
+  output=$(lns artifact push "$tag" -f "$INPUT_FILE" --yes 2>&1) || status=$?
   printf '%s\n' "$output" >&2
   if [ "$status" -ne 0 ]; then
     echo "::error::pushing $tag failed." >&2
-    exit "$status"
+    return "$status"
   fi
   pushed=$(printf '%s\n' "$output" | grep '^built and pushed ' | tail -1 || true)
   if [ -z "$pushed" ]; then
     echo "::error::pushing $tag reported no digest, so nothing here can say what it published." >&2
-    exit 1
+    return 1
   fi
   printf '%s' "${pushed##*@}"
 }
 
 main() {
-  local first_push digest first_ref refs refs_md tag tag_digest
+  local first_push digest first_ref refs refs_md tag tag_digest status=0
   first_push=$(probe_first_push)
 
   digest=""
@@ -65,7 +68,12 @@ main() {
   refs_md=""
   while IFS= read -r tag; do
     [ -n "$tag" ] || continue
-    tag_digest=$(push_one "$tag")
+    if tag_digest=$(push_one "$tag"); then
+      :
+    else
+      status=$?
+      break
+    fi
     refs_md="$refs_md- \`$tag\` — \`$tag_digest\`"$'\n'
     if [ -n "$digest" ] && [ "$tag_digest" != "$digest" ]; then
       report_published "lns-push published two manifests" "" "$refs_md" "$first_push"
@@ -76,6 +84,10 @@ main() {
     refs="$refs$tag"$'\n'
   done <"$TAGS_FILE"
 
+  if [ "$status" -ne 0 ] && [ -z "$refs" ]; then
+    return "$status"
+  fi
+
   {
     echo "digest=$digest"
     echo "first-push=$first_push"
@@ -84,7 +96,12 @@ main() {
     echo 'LNS_REFS_EOF'
   } >>"$GITHUB_OUTPUT"
 
-  report_published "lns-push published" "$digest" "$refs_md" "$first_push"
+  if [ "$status" -ne 0 ]; then
+    report_published "lns-push partially published" "$digest" "$refs_md" "$first_push" || return "$status"
+  else
+    report_published "lns-push published" "$digest" "$refs_md" "$first_push"
+  fi
+  return "$status"
 }
 
 main "$@"

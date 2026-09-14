@@ -172,7 +172,7 @@ fmt:
 # tool it needs is present, so silence is not a missing jq but a dead harness.
 shell-tests:
 	@status=0; failed=""; silent=""; ci="$${CI:-}"; \
-		for t in scripts/*.test.sh; do \
+		for t in scripts/*.test.sh actions/tests/*.test.sh; do \
 			for mode in no-CI CI; do \
 				echo "── $$t ($$mode) ──"; \
 				if [ "$$mode" = CI ]; then \

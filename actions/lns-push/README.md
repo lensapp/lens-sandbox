@@ -86,18 +86,26 @@ versions, or leave `require-exact-tool-versions` at `true`, and re-run. With
 exact versions the rebuild is deterministic and every tag lands on one
 manifest, which is what `digest` claims.
 
+If a later push fails, the action stops and keeps that failure's exit status.
+The outputs and summary retain only earlier references with known digests.
+The failed reference can have partial registry changes; check the push log.
+
 ## What the job summary carries
 
 The dry run's output verbatim — the filesets and README layer it packed, the
 digest it would publish, and any mixin it would publish alongside — then, for
 a real push, every reference pushed with the digest it received. When the
-repository did not exist before, one more line:
+repository did not exist before on `hub.lns.run` or `hub.staging.lns.run`,
+one more line:
 
 > `acme/gh` is new and private. Publish it at <https://hub.lns.run/acme/gh/settings>
 
 The hub decides that a new repository is private. Making it public is a
 setting on the hub until an API exists for it
 ([#398](https://github.com/lensapp/lens-sandbox/issues/398), work item 7).
+
+For other hosts, the summary reports the anonymous HTTP 404 response without
+claiming a visibility policy or linking to a Hub settings page.
 
 `first-push` comes from an anonymous `GET /v2/<repo>/tags/list` before the
 push: a `404` means new. A repository that exists but is private answers `401`

@@ -5,7 +5,7 @@
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-WORKFLOW="$SCRIPT_DIR/../.github/workflows/ci.yml"
+WORKFLOW="$SCRIPT_DIR/../../.github/workflows/ci.yml"
 
 PASS=0
 FAIL=0

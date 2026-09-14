@@ -4,8 +4,8 @@
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-SCRIPT="$SCRIPT_DIR/../actions/lib/push-inputs.sh"
-ACTION="$SCRIPT_DIR/../actions/lns-push/action.yml"
+SCRIPT="$SCRIPT_DIR/../lib/push-inputs.sh"
+ACTION="$SCRIPT_DIR/../lns-push/action.yml"
 
 PASS=0
 FAIL=0

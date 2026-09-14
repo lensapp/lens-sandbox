@@ -5,8 +5,8 @@
 set -eu
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-SCRIPT="$SCRIPT_DIR/../actions/lib/mask-secret.sh"
-ACTION="$SCRIPT_DIR/../actions/lns-login/action.yml"
+SCRIPT="$SCRIPT_DIR/../lib/mask-secret.sh"
+ACTION="$SCRIPT_DIR/../lns-login/action.yml"
 
 PASS=0
 FAIL=0

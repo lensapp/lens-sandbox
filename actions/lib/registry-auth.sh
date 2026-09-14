@@ -64,7 +64,7 @@ require_jq() {
 
 # Rewrites the auth file through a jq program that reads the current entries,
 # keeping every other host and the 0600 the CLI writes.
-rewrite_auth_file() {
+rewrite_auth_file() (
   local program=$1
   shift
   local file current tmp
@@ -78,15 +78,15 @@ rewrite_auth_file() {
       exit 1
     fi
   fi
-  tmp="$file.$$.tmp"
-  (
-    umask 077
-    printf '%s' "$current" | jq "$@" "$program" >"$tmp"
-  )
-  chmod 0600 "$tmp"
+  umask 077
+  tmp=$(mktemp "$file.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  printf '%s' "$current" | jq "$@" "$program" >"$tmp"
   mv -f "$tmp" "$file"
   printf 'wrote %s\n' "$file"
-}
+)
 
 # The CLI owns the store, so only "no service" sends us to the file; every
 # other failure is the CLI's answer and stands, bar the one a caller names as
