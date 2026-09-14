@@ -1897,8 +1897,8 @@ an abandoned one does: nothing is stored and the offer stands
 `resume` is not a fourth moment. It is the rest of one `connect`, so the press that
 authorised the connect authorises it, a session lns did not open cannot be resumed,
 and `sessionSeconds` bounds how long the whole exchange may take. Between calls
-lns holds the state and nothing else: it is opaque to lns, is never persisted, is
-only ever handed back to the component that produced it, and — like every other
+lns holds the component state: it is opaque to lns, is never persisted, is only
+ever handed back to the component that produced it, and — like every other
 resource this section bounds — has a size ceiling, past which the connect fails.
 
 **What lns lends a component**, and nothing else: outbound HTTP, over TLS and only
@@ -1909,8 +1909,8 @@ nowhere else to draw unpredictable ones; and, where the method declared `exec`,
 host execution. During `connect` and `resume` only, it may also request a browser
 authorization callback managed by lns. The component receives an opaque handle,
 a loopback redirect URI, and a random state value; it may open an HTTPS
-authorization URL on a declared host, carrying that exact redirect URI and state,
-and poll for the resulting authorization code. lns owns the listener, binds it
+authorization URL on a declared host, carrying that exact redirect URI and state
+and an S256 PKCE challenge, and poll for the resulting authorization code. lns owns the listener, binds it
 only to `127.0.0.1` on an ephemeral port, accepts a single matching callback, and
 never gives the component a socket or arbitrary inbound request content. A denial
 is a failed authorization; an unrelated or malformed callback cannot complete it.
