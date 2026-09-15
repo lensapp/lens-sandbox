@@ -77,11 +77,14 @@ jobs:
               - 'crates/lns-cli/**'
               - '.github/workflows/ci.yml'
             macos-ui:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'Makefile'
+              - 'crates/lns-cli/**'
               - 'clients/macos/**'
               - 'crates/lns-ipc/**'
-              - 'crates/lns-service/src/approval_flow/**'
-              - 'crates/lns-service/src/dashboard/**'
-              - 'crates/lns-service/src/ipc/**'
+              - 'crates/lns-service/**'
               - '.github/workflows/ci.yml'
             static-nft:
               - 'vendor/static-nft/**'
@@ -140,11 +143,45 @@ jobs:
 
   macos-ui:
     runs-on: macos-latest
+    timeout-minutes: 45
     needs: changes
     if: needs.changes.outputs.macos-ui == 'true'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - run: make -C clients/macos verify
+      - uses: ./.github/actions/install-cross-toolchain
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: .
+          cache-shared-key: native-macos-bundle
+          cache-on-failure: true
+      - run: |
+          if make -C clients/macos verify > native-verify.log 2>&1; then
+            cat native-verify.log
+          else
+            cat native-verify.log
+            sh scripts/gate-annotate.sh native-verify.log
+          fi
+
+      - run: |
+          if make -C clients/macos package > native-package.log 2>&1; then
+            cat native-package.log
+          else
+            cat native-package.log
+            sh scripts/gate-annotate.sh native-package.log
+          fi
+      - run: |
+          if make -C clients/macos smoke > native-smoke.log 2>&1; then
+            cat native-smoke.log
+          else
+            cat native-smoke.log
+            sh scripts/gate-annotate.sh native-smoke.log
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: LNS-macos-${{ github.sha }}
+          path: clients/macos/dist/LNS-macos.zip
+          if-no-files-found: error
+          retention-days: 7
 
   test:
     runs-on: ubuntu-latest
