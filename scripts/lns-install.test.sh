@@ -29,7 +29,7 @@ done
 case "$url" in
   https://api.github.com/repos/lensapp/lens-sandbox/releases/tags/lns-v0.25.0)
     [ "${INSTALLER_TEST_METADATA_FAIL:-0}" != 1 ] || exit 1
-    printf '{"assets":[{"name":"lns-0.25.0-darwin-aarch64.%s"}]}' "$INSTALLER_TEST_EXTENSION";;
+    printf '{"assets":[{"name":"lns-%s-darwin-aarch64.%s"}]}' "${INSTALLER_TEST_ASSET_VERSION:-0.25.0}" "$INSTALLER_TEST_EXTENSION";;
   */lns-latest.json) printf '{"version":"0.25.0","platforms":{"darwin-aarch64":{"url":"https://get.lns.run/lns-0.25.0-darwin-aarch64.%s","sha256":"digest"}}}' "$INSTALLER_TEST_EXTENSION";;
   *.sha256) printf 'digest  archive\n' > "$destination";;
   *.tar.gz)
@@ -59,10 +59,12 @@ printf '#!/bin/sh\nexit 0\n' > "$installer_test_tmp/bin/spctl"
 printf '#!/bin/sh\necho "digest  archive"\n' > "$installer_test_tmp/bin/sha256sum"
 cat > "$installer_test_tmp/bin/plutil" <<'MOCK'
 #!/usr/bin/env python3
-import json,sys
+import json,os,sys
+if os.environ.get("INSTALLER_TEST_REAL_PLUTIL") == "1":
+    os.execv("/usr/bin/plutil", ["plutil"] + sys.argv[1:])
 data = json.load(sys.stdin)
 if sys.argv[2] == 'assets':
-    print(json.dumps(data['assets'], separators=(',', ':')))
+    print(json.dumps(data['assets'], indent=2) if os.environ.get('INSTALLER_TEST_PRETTY') == '1' else json.dumps(data['assets'], separators=(',', ':')))
 else:
     assert sys.argv[1:] == ['-extract', 'platforms.darwin-aarch64.url', 'raw', '-o', '-', '-']
     print(data['platforms']['darwin-aarch64']['url'])
@@ -106,4 +108,33 @@ if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_METADATA_FAIL=1 VERSION=0.25.0 en
 fi
 [ ! -e "$INSTALL_DIR/result" ]
 echo 'PASS: failed pinned release lookup aborts installation'
-echo "Results: 7 passed, 0 failed"
+for installer_test_extension in tar.gz zip; do
+  INSTALLER_TEST_EXTENSION="$installer_test_extension" INSTALLER_TEST_PRETTY=1 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
+  if [ "$installer_test_extension" = zip ]; then
+    [ "$(cat "$INSTALL_DIR/result")" = native ]
+    rm "$INSTALL_DIR/result"
+  else
+    [ -x "$INSTALL_DIR/lns" ] && [ ! -e "$INSTALL_DIR/result" ]
+  fi
+done
+echo 'PASS: pinned archive selection accepts formatted JSON'
+installer_test_passed=9
+if [ -x /usr/bin/plutil ] && [ "$(/usr/bin/uname -s)" = Darwin ]; then
+  for installer_test_extension in tar.gz zip; do
+    INSTALLER_TEST_EXTENSION="$installer_test_extension" INSTALLER_TEST_REAL_PLUTIL=1 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
+    if [ "$installer_test_extension" = zip ]; then
+      [ "$(cat "$INSTALL_DIR/result")" = native ]
+      rm "$INSTALL_DIR/result"
+    else
+      [ -x "$INSTALL_DIR/lns" ] && [ ! -e "$INSTALL_DIR/result" ]
+    fi
+  done
+  echo 'PASS: pinned archive selection uses the real macOS plutil'
+  installer_test_passed=10
+fi
+if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_ASSET_VERSION=0x25x0 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"; then
+  echo 'FAIL: version punctuation matched a different release asset' >&2; exit 1
+fi
+[ ! -e "$INSTALL_DIR/result" ]
+echo 'PASS: version punctuation is matched literally'
+echo "Results: $installer_test_passed passed, 0 failed"

@@ -131,9 +131,10 @@ if [ "$OS" = darwin ]; then
       error "Failed to look up release ${VERSION}."
     ASSETS=$(printf '%s' "$RELEASE" | plutil -extract assets json -o - -) || \
       error "The release has no asset list."
-    if printf '%s' "$ASSETS" | grep -Fq "\"name\":\"lns-${VERSION}-${PLATFORM}.zip\""; then
+    ASSET_STEM=$(printf '%s' "lns-${VERSION}-${PLATFORM}" | sed 's/[][\.^$*+?(){}|]/\\&/g')
+    if grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${ASSET_STEM}\\.zip\"" <<< "$ASSETS"; then
       ARCHIVE_EXTENSION=zip
-    elif printf '%s' "$ASSETS" | grep -Fq "\"name\":\"lns-${VERSION}-${PLATFORM}.tar.gz\""; then
+    elif grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${ASSET_STEM}\\.tar\\.gz\"" <<< "$ASSETS"; then
       ARCHIVE_EXTENSION=tar.gz
     else
       error "Release ${VERSION} has no download for ${PLATFORM}."
