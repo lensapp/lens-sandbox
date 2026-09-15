@@ -16,6 +16,8 @@ public struct LiveApproval: Decodable, Identifiable, Equatable {
     public let raw: Bool
     public let waiting: Bool
     public let submitting: Bool
+    public var connect: LiveConnectAsk? = nil
+    public var connect_seq: UInt64 = 0
     public let offer: ConnectorOffer?
 }
 
@@ -29,6 +31,10 @@ public struct ConnectorOffer: Decodable, Equatable {
 }
 
 public struct ConnectorMethod: Decodable, Identifiable, Equatable {
+    public var oauth: OAuthDisclosure? = nil
+    public var hosts: [String] = []
+    public var runs_programs = false
+    public var carries_code = false
     public let name: String
     public let label: String
     public let auth_label: String?
@@ -52,9 +58,10 @@ public struct ConnectorConnection: Decodable, Identifiable, Equatable {
 
 public enum ApprovalAction: Encodable {
     case allowOnce, allowAlways, denyOnce, denyAlways, dismiss, decline
+    case beginConnect(method: String, label: String), answerConnect(values: [String: String]), openConnectBrowser
     case grant(method: String, connection: ConnectionChoice)
 
-    private enum CodingKeys: String, CodingKey { case kind, method, connection }
+    private enum CodingKeys: String, CodingKey { case kind, method, connection, label, values }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -66,6 +73,14 @@ public enum ApprovalAction: Encodable {
         case .denyAlways: kind = "deny_always"
         case .dismiss: kind = "dismiss"
         case .decline: kind = "decline"
+        case .openConnectBrowser: kind = "open_connect_browser"
+        case let .beginConnect(method, label):
+            kind = "begin_connect"
+            try container.encode(method, forKey: .method)
+            try container.encode(label, forKey: .label)
+        case let .answerConnect(values):
+            kind = "answer_connect"
+            try container.encode(values, forKey: .values)
         case let .grant(method, connection):
             kind = "grant"
             try container.encode(method, forKey: .method)
@@ -118,7 +133,7 @@ public struct ServiceRequest: Encodable {
     public var replyTimeout: Double {
         switch type {
         case "StartRun", "InstallConnector", "PreviewSandbox": return 300
-        case "RegistryLogin": return 120
+        case "RegistryLogin", "BeginConnect", "AnswerConnect": return 120
         case "StopRun": return 30
         default: return 10
         }
@@ -211,6 +226,8 @@ public enum ServiceReply {
     case snapshot(ApprovalSnapshot), submitted, stale, shuttingDown
     case acknowledged, offer(ConnectorOffer?)
     case connectors([ConnectorOffer]), completed(String)
+    case connectFailed(String)
+    case connectAsk(ConnectAsk), connectPending(session: String, progress: OAuthProgress)
     case registryLogins([RegistryLogin])
     case configuration(SandboxConfiguration), savedDocument(String)
 

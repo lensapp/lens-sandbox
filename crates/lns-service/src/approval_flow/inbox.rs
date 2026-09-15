@@ -115,7 +115,7 @@ impl ApprovalInbox {
             Ok(action) => action,
             Err(message) => return Response::Error { message },
         };
-        let keep = matches!(action, RequestAction::Grant { .. } | RequestAction::Decline);
+        let keep = !matches!(action, RequestAction::Dismiss | RequestAction::Decide(_));
         let entry = &inner.pending[index];
         if entry
             .decision_tx
@@ -331,31 +331,43 @@ impl std::ops::DerefMut for InboxGuard<'_> {
 impl Drop for InboxGuard<'_> {
     fn drop(&mut self) {
         if self.changed {
-            let snapshot = LiveApprovalSnapshot {
-                approvals: self
-                    .inner
-                    .pending
-                    .iter()
-                    .map(|entry| LiveApproval {
-                        id: entry.presentation.clone(),
-                        token: entry.token.clone(),
-                        host: entry.prompt.host.clone(),
-                        action: entry.prompt.action.clone(),
-                        run: entry.prompt.run.clone(),
-                        raw: entry.prompt.treatment
-                            == crate::approval_flow::protocol::Treatment::Raw,
-                        waiting: entry.waiting,
-                        submitting: entry.submitting,
-                        offer: entry.prompt.offer.clone(),
-                    })
-                    .collect(),
-                notices: self
-                    .inner
-                    .informs
-                    .iter()
-                    .map(|entry| entry.msg.clone())
-                    .collect(),
-            };
+            let snapshot =
+                LiveApprovalSnapshot {
+                    approvals: self
+                        .inner
+                        .pending
+                        .iter()
+                        .map(|entry| LiveApproval {
+                            id: entry.presentation.clone(),
+                            token: entry.token.clone(),
+                            host: entry.prompt.host.clone(),
+                            action: entry.prompt.action.clone(),
+                            run: entry.prompt.run.clone(),
+                            raw: entry.prompt.treatment
+                                == crate::approval_flow::protocol::Treatment::Raw,
+                            waiting: entry.waiting,
+                            submitting: entry.submitting,
+                            offer: entry.prompt.offer.clone(),
+                            connect_seq: entry.prompt.connect_seq,
+                            connect: entry.prompt.connect.as_ref().map(|ask| {
+                                lns_ipc::LiveConnectAsk {
+                                    connector: ask.connector.clone(),
+                                    method: ask.method.clone(),
+                                    message: ask.message.clone(),
+                                    fields: ask.fields.clone(),
+                                    from_code: ask.from_code,
+                                    oauth: ask.oauth.clone(),
+                                }
+                            }),
+                        })
+                        .collect(),
+                    notices: self
+                        .inner
+                        .informs
+                        .iter()
+                        .map(|entry| entry.msg.clone())
+                        .collect(),
+                };
             self.updates.send_if_modified(|current| {
                 if *current == snapshot {
                     return false;
@@ -374,7 +386,39 @@ fn requested_action(
     match action {
         LiveApprovalAction::Dismiss => Ok(RequestAction::Dismiss),
         LiveApprovalAction::Decline if prompt.offer.is_some() => Ok(RequestAction::Decline),
-        LiveApprovalAction::Grant { method, connection } => {
+        LiveApprovalAction::BeginConnect { method, label } if prompt.connect.is_none() => {
+            let offer = prompt
+                .offer
+                .as_ref()
+                .ok_or("this approval offers no connector")?;
+            let selected = offer.methods.iter().any(|candidate| {
+                candidate.name == method && candidate.offerable && candidate.auth_label.is_some()
+            });
+            if !selected
+                || label.trim().is_empty()
+                || offer.connections.iter().any(|held| held.label == label)
+            {
+                return Err("choose an available method and a new connection name".into());
+            }
+            Ok(RequestAction::BeginConnect { method, label })
+        }
+        LiveApprovalAction::AnswerConnect { values } if prompt.connect.is_some() => {
+            Ok(RequestAction::AnswerConnect { values })
+        }
+        LiveApprovalAction::OpenConnectBrowser
+            if prompt.connect.as_ref().is_some_and(|ask| {
+                matches!(
+                    ask.oauth,
+                    Some(
+                        lns_ipc::OAuthProgress::DeviceAuthorization { .. }
+                            | lns_ipc::OAuthProgress::WaitingForBrowser { .. }
+                    )
+                )
+            }) =>
+        {
+            Ok(RequestAction::OpenConnectBrowser)
+        }
+        LiveApprovalAction::Grant { method, connection } if prompt.connect.is_none() => {
             grant_action(prompt, method, connection)
         }
         action if prompt.offer.is_none() => network_action(action),
@@ -495,6 +539,225 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn native_sign_in_begins_without_collecting_outputs_and_keeps_the_card() {
+        let inbox = ApprovalInbox::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        inbox.insert_pending(connector_prompt(), tx);
+        let token = inbox.watch().borrow().approvals[0].token.clone();
+        let action = serde_json::from_value(serde_json::json!({
+            "kind": "begin_connect", "method": "token", "label": "personal"
+        }))
+        .expect("native cards must support service-driven sign-in");
+        assert_eq!(
+            inbox.respond(&token, action),
+            Response::LiveApprovalSubmitted
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().action,
+            RequestAction::BeginConnect {
+                method: "token".into(),
+                label: "personal".into()
+            }
+        );
+        assert!(inbox.watch().borrow().approvals[0].submitting);
+    }
+
+    #[test]
+    fn native_snapshot_preserves_the_current_sign_in_round() {
+        let inbox = ApprovalInbox::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut prompt = connector_prompt();
+        prompt.connect_seq = 2;
+        prompt.connect = Some(crate::approval_flow::session::ConnectAsk {
+            connector: "provider".into(),
+            method: "token".into(),
+            message: "Next code".into(),
+            fields: vec![lns_ipc::ConnectorFieldView {
+                name: "otp".into(),
+                label: "One-time code".into(),
+                secret: true,
+            }],
+            from_code: true,
+            oauth: None,
+        });
+        inbox.insert_pending(prompt, tx);
+        let snapshot = serde_json::to_value(&*inbox.watch().borrow()).unwrap();
+        assert_eq!(
+            snapshot["approvals"][0]["connect"]["fields"][0]["name"],
+            "otp"
+        );
+        assert_eq!(snapshot["approvals"][0]["connect_seq"], 2);
+    }
+
+    #[test]
+    fn native_sign_in_rejects_stale_rounds_and_actions_the_card_did_not_offer() {
+        let inbox = ApprovalInbox::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut prompt = connector_prompt();
+        inbox.insert_pending(prompt.clone(), tx.clone());
+        let token = inbox.watch().borrow().approvals[0].token.clone();
+        for action in [
+            LiveApprovalAction::BeginConnect {
+                method: "missing".into(),
+                label: "personal".into(),
+            },
+            LiveApprovalAction::BeginConnect {
+                method: "token".into(),
+                label: "work".into(),
+            },
+            LiveApprovalAction::BeginConnect {
+                method: "token".into(),
+                label: " ".into(),
+            },
+            LiveApprovalAction::AnswerConnect {
+                values: Default::default(),
+            },
+            LiveApprovalAction::OpenConnectBrowser,
+        ] {
+            assert!(matches!(
+                inbox.respond(&token, action),
+                Response::Error { .. }
+            ));
+        }
+        assert!(rx.try_recv().is_err());
+        prompt.connect = Some(crate::approval_flow::session::ConnectAsk {
+            connector: "provider".into(),
+            method: "token".into(),
+            message: String::new(),
+            fields: vec![],
+            from_code: false,
+            oauth: Some(lns_ipc::OAuthProgress::DeviceAuthorization {
+                verification_uri: "https://provider.test/device".into(),
+                user_code: "ABCD".into(),
+            }),
+        });
+        prompt.connect_seq = 1;
+        inbox.insert_pending(prompt.clone(), tx.clone());
+        assert_eq!(
+            inbox.respond(&token, LiveApprovalAction::Dismiss),
+            Response::LiveApprovalStale
+        );
+        let token = inbox.watch().borrow().approvals[0].token.clone();
+        assert_eq!(
+            inbox.respond(&token, LiveApprovalAction::OpenConnectBrowser),
+            Response::LiveApprovalSubmitted
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().action,
+            RequestAction::OpenConnectBrowser
+        );
+        assert!(inbox.watch().borrow().approvals[0].submitting);
+        inbox.complete_delivery("request");
+        let token = inbox.watch().borrow().approvals[0].token.clone();
+        let values = lns_ipc::SecretValues([("scopeOption".into(), "read".into())].into());
+        assert_eq!(
+            inbox.respond(
+                &token,
+                LiveApprovalAction::AnswerConnect {
+                    values: values.clone()
+                }
+            ),
+            Response::LiveApprovalSubmitted
+        );
+        assert_eq!(
+            rx.try_recv().unwrap().action,
+            RequestAction::AnswerConnect { values }
+        );
+        assert_eq!(
+            inbox.respond(&token, LiveApprovalAction::Dismiss),
+            Response::LiveApprovalStale
+        );
+        inbox.complete_delivery("request");
+        let token = inbox.watch().borrow().approvals[0].token.clone();
+        assert!(matches!(
+            inbox.respond(
+                &token,
+                LiveApprovalAction::BeginConnect {
+                    method: "token".into(),
+                    label: "personal".into()
+                }
+            ),
+            Response::Error { .. }
+        ));
+        assert!(matches!(
+            inbox.respond(
+                &token,
+                LiveApprovalAction::Grant {
+                    method: "token".into(),
+                    connection: ApprovalConnection::Held {
+                        label: "work".into()
+                    }
+                }
+            ),
+            Response::Error { .. }
+        ));
+        prompt.connect = None;
+        prompt.offer = None;
+        inbox.insert_pending(prompt, tx);
+        let token = inbox.watch().borrow().approvals[0].token.clone();
+        assert!(matches!(
+            inbox.respond(
+                &token,
+                LiveApprovalAction::BeginConnect {
+                    method: "token".into(),
+                    label: "personal".into()
+                }
+            ),
+            Response::Error { .. }
+        ));
+    }
+
+    #[test]
+    fn native_browser_opening_requires_a_browser_ready_oauth_round() {
+        for oauth in [
+            None,
+            Some(lns_ipc::OAuthProgress::SelectingScopes { options: vec![] }),
+            Some(lns_ipc::OAuthProgress::Starting {
+                destinations: vec![],
+                scopes: vec![],
+            }),
+            Some(lns_ipc::OAuthProgress::Canceled),
+            Some(lns_ipc::OAuthProgress::Expired),
+            Some(lns_ipc::OAuthProgress::WaitingForBrowser {
+                authorization_endpoint: "https://provider.test/authorize".into(),
+                redirect_uri: "http://127.0.0.1:4567/callback".into(),
+            }),
+        ] {
+            let allowed = matches!(
+                oauth,
+                Some(lns_ipc::OAuthProgress::WaitingForBrowser { .. })
+            );
+            let inbox = ApprovalInbox::new();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mut prompt = connector_prompt();
+            prompt.connect = Some(crate::approval_flow::session::ConnectAsk {
+                connector: "provider".into(),
+                method: "token".into(),
+                message: String::new(),
+                fields: vec![],
+                from_code: false,
+                oauth,
+            });
+            inbox.insert_pending(prompt, tx);
+            let token = inbox.watch().borrow().approvals[0].token.clone();
+            let response = inbox.respond(&token, LiveApprovalAction::OpenConnectBrowser);
+            if allowed {
+                assert_eq!(response, Response::LiveApprovalSubmitted);
+                assert_eq!(
+                    rx.try_recv().unwrap().action,
+                    RequestAction::OpenConnectBrowser
+                );
+            } else {
+                assert!(matches!(response, Response::Error { .. }));
+                assert!(
+                    rx.try_recv().is_err(),
+                    "no browser action may be delivered before the user selects permissions"
+                );
+            }
+        }
+    }
 
     fn connector_prompt() -> PendingPrompt {
         PendingPrompt {

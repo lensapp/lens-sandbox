@@ -16,7 +16,6 @@ final class LiveConnectorDraftTests: XCTestCase {
         let draft = LiveConnectorDraft(offer: offer())
         XCTAssertEqual(draft.selection, "connection:work")
         XCTAssertEqual(try encoded(draft), ["kind": "grant", "method": "token", "connection": ["kind": "held", "label": "work"]])
-        XCTAssertTrue(draft.values.isEmpty)
     }
 
     func testUnconnectedNotificationStartsInTheNewConnectionForm() {
@@ -54,43 +53,38 @@ final class LiveConnectorDraftTests: XCTestCase {
         XCTAssertEqual(try encoded(draft), ["kind": "grant", "method": "public", "connection": ["kind": "none"]])
     }
 
-    func testNewConnectionRequiresCompleteCredentialsAndANewName() throws {
+    func testNewConnectionBeginsWithANewNameAndAsksTheServiceForFields() throws {
         var draft = LiveConnectorDraft()
         draft.choose("new:token")
         XCTAssertEqual(draft.newMethod(in: offer())?.name, "token")
         draft.name = "personal"
-        XCTAssertNil(draft.action(offer: offer()))
-        draft.values["token"] = "fixture-secret"
+        XCTAssertNotNil(draft.action(offer: offer()))
         draft.name = " work "
         XCTAssertNil(draft.action(offer: offer()), "the inline form must not replace a saved account")
         draft.name = "  "
         XCTAssertNil(draft.action(offer: offer()))
         draft.name = " personal "
-        XCTAssertEqual(try encoded(draft), ["kind": "grant", "method": "token", "connection": [
-            "kind": "new", "label": "personal", "values": ["token": "fixture-secret"]
-        ]])
+        XCTAssertEqual(try encoded(draft), ["kind": "begin_connect", "method": "token", "label": "personal"])
     }
 
-    func testSwitchingConnectionsClearsUnsubmittedCredentials() {
+    func testSwitchingConnectionsClearsTheNewAccountName() {
         var draft = LiveConnectorDraft()
         draft.choose("new:token")
         draft.name = "personal"
-        draft.values["token"] = "fixture-secret"
         draft.choose("connection:work")
         XCTAssertEqual(draft.name, "")
-        XCTAssertEqual(draft.values, [:], "secrets from a new connection must not follow another selection")
     }
 
     func testRemovedConnectionsAndUnavailableMethodsCannotBeGranted() {
         var draft = LiveConnectorDraft()
         for selection in ["connection:gone", "new:missing", "new:public", "method:token"] {
             draft.choose(selection)
-            draft.name = "personal"; draft.values["token"] = "fixture-secret"
+            draft.name = "personal"
             XCTAssertNil(draft.action(offer: offer()))
         }
         for selection in ["connection:work", "new:token"] {
             draft.choose(selection)
-            draft.name = "personal"; draft.values["token"] = "fixture-secret"
+            draft.name = "personal"
             XCTAssertNil(draft.action(offer: offer(available: false)))
         }
     }

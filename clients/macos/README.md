@@ -263,6 +263,16 @@ coordinated app/service updates are still required before shipping it.
   Notice dismissal uses bounded batches of exactly the notices observed.
   A single notice too large for a dismissal request is reported without sending
   any batches; it does not prevent receiving or answering approvals.
+- Account sign-in uses `BeginConnect`, then the service's `ConnectorAsks` fields
+  or structured OAuth progress. `AnswerConnect` submits one round; OAuth status
+  polls automatically after an explicit permission choice. Browser opening and
+  cancellation go through the service. Closing the account form cancels its
+  session, including a session whose first reply arrives after closing.
+- Live sign-in rounds travel with approval snapshots as `connect` and
+  `connect_seq`. Cards submit `begin_connect`, `answer_connect`, or
+  `open_connect_browser` against their current token. The service keeps sign-in
+  and the resulting grant bound to the original run. Cancel Sign-In dismisses
+  the held request without recording a decision.
 - Each approval has a stable `id` for view identity and an opaque `token` for
   responding to its current presentation. Hold expiry changes the token but
   preserves the form's identity.

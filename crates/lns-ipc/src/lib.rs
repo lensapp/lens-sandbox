@@ -23,7 +23,7 @@ pub use configuration::{
 pub use dashboard::{DashboardApproval, DashboardEvent, DashboardSandbox};
 pub use ledger::{AnswerSource, ApprovalKind, ConnectorVerb, Decision, LedgerEvent, LedgerRecord};
 pub use live_approvals::{
-    ApprovalConnection, LiveApproval, LiveApprovalAction, LiveApprovalSnapshot,
+    ApprovalConnection, LiveApproval, LiveApprovalAction, LiveApprovalSnapshot, LiveConnectAsk,
     live_approval_frames,
 };
 pub use paths::{

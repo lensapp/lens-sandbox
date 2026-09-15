@@ -28,13 +28,29 @@
       "name": "github"
     },
     {
-      "type": "ConnectConnector",
+      "type": "BeginConnect",
       "name": "github",
       "method": "token",
-      "connection": "work",
+      "connection": "work"
+    },
+    {
+      "type": "AnswerConnect",
+      "session": "sign-in",
       "values": {
         "token": "fixture-secret"
       }
+    },
+    {
+      "type": "ConnectStatus",
+      "session": "sign-in"
+    },
+    {
+      "type": "OpenConnectBrowser",
+      "session": "sign-in"
+    },
+    {
+      "type": "CancelConnect",
+      "session": "sign-in"
     },
     {
       "type": "DisconnectConnector",
@@ -92,7 +108,10 @@
               ],
               "asks": [
                 "token"
-              ]
+              ],
+              "hosts": [],
+              "runs_programs": false,
+              "carries_code": false
             }
           ],
           "connections": [
@@ -131,7 +150,10 @@
             ],
             "asks": [
               "token"
-            ]
+            ],
+            "hosts": [],
+            "runs_programs": false,
+            "carries_code": false
           }
         ],
         "connections": [
@@ -175,6 +197,85 @@
       "name": "github",
       "had_decision": true,
       "reserved": false
+    },
+    {
+      "type": "ConnectorAsks",
+      "session": "sign-in",
+      "message": "Enter a token",
+      "fields": [
+        {
+          "name": "token",
+          "label": "Token",
+          "secret": true
+        }
+      ],
+      "from_code": true
+    },
+    {
+      "type": "ConnectorPending",
+      "session": "sign-in",
+      "progress": {
+        "kind": "selecting_scopes",
+        "options": [
+          {
+            "name": "read",
+            "label": "Read only",
+            "scopes": [
+              "repo:read"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "ConnectorPending",
+      "session": "sign-in",
+      "progress": {
+        "kind": "starting",
+        "destinations": [
+          "https://provider.test/token"
+        ],
+        "scopes": [
+          "read"
+        ]
+      }
+    },
+    {
+      "type": "ConnectorPending",
+      "session": "sign-in",
+      "progress": {
+        "kind": "device_authorization",
+        "verification_uri": "https://provider.test/device",
+        "user_code": "ABCD"
+      }
+    },
+    {
+      "type": "ConnectorPending",
+      "session": "sign-in",
+      "progress": {
+        "kind": "waiting_for_browser",
+        "authorization_endpoint": "https://provider.test/authorize",
+        "redirect_uri": "http://127.0.0.1:4567/callback"
+      }
+    },
+    {
+      "type": "ConnectorPending",
+      "session": "sign-in",
+      "progress": {
+        "kind": "canceled"
+      }
+    },
+    {
+      "type": "ConnectorPending",
+      "session": "sign-in",
+      "progress": {
+        "kind": "expired"
+      }
+    },
+    {
+      "type": "ConnectorConnectFailed",
+      "name": "github",
+      "reason": "Authorization denied"
     }
   ]
 }

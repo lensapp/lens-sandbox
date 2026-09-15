@@ -1,0 +1,116 @@
+{
+  "requests": [
+    {
+      "type": "RespondToApproval",
+      "token": "round-2",
+      "action": {
+        "kind": "begin_connect",
+        "method": "token",
+        "label": "personal"
+      }
+    },
+    {
+      "type": "RespondToApproval",
+      "token": "round-2",
+      "action": {
+        "kind": "answer_connect",
+        "values": {
+          "otp": "fixture-secret",
+          "account": "alice"
+        }
+      }
+    },
+    {
+      "type": "RespondToApproval",
+      "token": "round-2",
+      "action": {
+        "kind": "open_connect_browser"
+      }
+    },
+    {
+      "type": "RespondToApproval",
+      "token": "round-2",
+      "action": {
+        "kind": "dismiss"
+      }
+    }
+  ],
+  "responses": [
+    {
+      "type": "LiveApprovals",
+      "approvals": [
+        {
+          "id": "approval-1",
+          "token": "round-2",
+          "host": "api.github.com",
+          "action": "CONNECT api.github.com:443",
+          "run": "run-1",
+          "raw": false,
+          "waiting": false,
+          "submitting": false,
+          "offer": {
+            "name": "github",
+            "digest": "sha256:one",
+            "serves": [
+              "api.github.com"
+            ],
+            "methods": [
+              {
+                "name": "token",
+                "label": "Token",
+                "auth_label": "Token",
+                "offerable": true,
+                "opens": [
+                  "api.github.com"
+                ],
+                "writes": [],
+                "env": [],
+                "credentials": [
+                  "TOKEN"
+                ],
+                "asks": [
+                  "token"
+                ],
+                "hosts": [
+                  "https://provider.test"
+                ],
+                "runs_programs": true,
+                "carries_code": true
+              }
+            ],
+            "connections": [
+              {
+                "label": "work",
+                "method": "token",
+                "authority": [
+                  "repo:read"
+                ]
+              }
+            ]
+          },
+          "connect": {
+            "connector": "github",
+            "method": "token",
+            "message": "Enter a one-time code",
+            "fields": [
+              {
+                "name": "otp",
+                "label": "One-time code",
+                "secret": true
+              },
+              {
+                "name": "account",
+                "label": "Account",
+                "secret": false
+              }
+            ],
+            "from_code": true,
+            "oauth": null
+          },
+          "connect_seq": 2
+        }
+      ],
+      "notices": []
+    }
+  ]
+}

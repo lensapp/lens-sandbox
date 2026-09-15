@@ -98,7 +98,7 @@ private final class OverlayService: ServiceClient {
     var dashboardData = DashboardData()
     func replies(to request: ServiceRequest, once: Bool, latestOnly: Bool) throws -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream {
-            $0.yield(Data(#"{"type":"LiveApprovals","approvals":[{"id":"request-1","token":"token-1","host":"example.com","action":"CONNECT example.com:443","run":"demo","raw":false,"waiting":true,"submitting":false,"offer":null}],"notices":[]}"#.utf8))
+            $0.yield(Data(#"{"type":"LiveApprovals","approvals":[{"id":"request-1","token":"token-1","host":"example.com","action":"CONNECT example.com:443","run":"demo","raw":false,"waiting":true,"submitting":false,"connect_seq":0,"connect":null,"offer":null}],"notices":[]}"#.utf8))
         }
     }
     func send(_ request: ServiceRequest) async throws -> ServiceReply {

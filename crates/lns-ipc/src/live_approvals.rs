@@ -90,6 +90,8 @@ mod tests {
                 waiting: true,
                 submitting: false,
                 offer: None,
+                connect: None,
+                connect_seq: 0,
             }],
             notices: vec!["A decision could not be saved.".into()],
         });
@@ -154,6 +156,18 @@ pub struct LiveApproval {
     pub waiting: bool,
     pub submitting: bool,
     pub offer: Option<ConnectorView>,
+    pub connect: Option<LiveConnectAsk>,
+    pub connect_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveConnectAsk {
+    pub connector: String,
+    pub method: String,
+    pub message: String,
+    pub fields: Vec<crate::ConnectorFieldView>,
+    pub from_code: bool,
+    pub oauth: Option<crate::OAuthProgress>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,6 +179,14 @@ pub enum LiveApprovalAction {
     DenyAlways,
     Dismiss,
     Decline,
+    BeginConnect {
+        method: String,
+        label: String,
+    },
+    AnswerConnect {
+        values: SecretValues,
+    },
+    OpenConnectBrowser,
     Grant {
         method: String,
         connection: ApprovalConnection,

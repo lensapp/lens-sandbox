@@ -6,6 +6,7 @@ struct ApprovalCard: View {
     var compact = true
     var details: (() -> Void)?
     let respond: (ApprovalAction) -> Void
+    @State private var answers = ConnectAnswers()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -50,8 +51,14 @@ struct ApprovalCard: View {
                 Text(approval.offer == nil ? "The request stopped waiting." : "The request stopped waiting. Connecting still applies to its next attempt.")
                     .font(.system(size: 12)).foregroundStyle(LNSTheme.muted)
             }
-            if let offer = approval.offer {
-                ConnectorGrant(offer: offer, showsDecline: false, showsDetails: !compact, details: details, respond: respond)
+            if let ask = approval.connect {
+                ConnectorRound(connector: ask.connector, message: ask.message, fields: ask.fields, fromCode: ask.from_code,
+                    progress: ask.oauth, answers: $answers, submit: {
+                        let values = answers.values; answers = ConnectAnswers(); respond(.answerConnect(values: values))
+                    }, openBrowser: { respond(.openConnectBrowser) })
+                Button("Cancel Sign-In") { respond(.dismiss) }
+            } else if let offer = approval.offer {
+                ConnectorGrant(offer: offer, showsDecline: false, showsDetails: true, details: details, respond: respond)
                     .id(offer.digest)
             } else {
                 HStack {
@@ -64,5 +71,7 @@ struct ApprovalCard: View {
         }
         .padding(16).frame(maxWidth: .infinity, alignment: .leading).lnsPanel()
         .accessibilityElement(children: .contain)
+        .onChange(of: approval.connect_seq) { _ in answers = ConnectAnswers() }
+        .onDisappear { answers = ConnectAnswers() }
     }
 }

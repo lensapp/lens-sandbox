@@ -5,15 +5,17 @@ struct ConnectorGrant: View {
     let offer: ConnectorOffer
     var showsDecline = true
     var showsDetails = true
+    var connectTitle = "Connect & Grant"
     var details: (() -> Void)?
     let respond: (ApprovalAction) -> Void
     @State private var draft: LiveConnectorDraft
 
-    init(offer: ConnectorOffer, showsDecline: Bool = true, showsDetails: Bool = true,
+    init(offer: ConnectorOffer, showsDecline: Bool = true, showsDetails: Bool = true, connectTitle: String = "Connect & Grant",
          details: (() -> Void)? = nil, respond: @escaping (ApprovalAction) -> Void) {
         self.offer = offer
         self.showsDecline = showsDecline
         self.showsDetails = showsDetails
+        self.connectTitle = connectTitle
         self.details = details
         self.respond = respond
         _draft = State(initialValue: LiveConnectorDraft(offer: offer))
@@ -38,16 +40,11 @@ struct ConnectorGrant: View {
                     }
                 }
             }
-            if let method = draft.newMethod(in: offer) {
+            if draft.newMethod(in: offer) != nil {
                 Text("Connect an account to grant access.")
                     .font(.system(size: 12)).foregroundStyle(LNSTheme.muted)
                 LNSFormField(title: "Connection name") {
                     TextField("e.g. work", text: $draft.name)
-                }
-                ForEach(method.asks, id: \.self) { field in
-                    LNSFormField(title: field) {
-                        SecureField(field, text: Binding(get: { draft.values[field] ?? "" }, set: { draft.values[field] = $0 }))
-                    }
                 }
                 if offer.connections.contains(where: { $0.label == draft.name.trimmingCharacters(in: .whitespacesAndNewlines) }) {
                     Text("That name is already saved. Choose another name.")
@@ -77,20 +74,19 @@ struct ConnectorGrant: View {
                     Button("Skip Connector") { respond(.decline) }.buttonStyle(LNSApprovalActionStyle())
                 }
                 Spacer()
-                Button(draft.newMethod(in: offer) == nil ? "Grant Access" : "Connect & Grant") {
+                Button(draft.newMethod(in: offer) == nil ? "Grant Access" : connectTitle) {
                     guard let action = draft.action(offer: offer) else { return }
-                    draft.values = [:]
                     respond(action)
                 }
                 .buttonStyle(LNSApprovalActionStyle(prominent: true)).disabled(draft.action(offer: offer) == nil)
             }
         }
         .controlSize(.large).textFieldStyle(.roundedBorder)
-        .onDisappear { draft.values = [:] }
     }
 
     private func disclosure(_ method: ConnectorMethod) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            ConnectorDisclosure(method: method, digest: offer.digest)
             if let connection { disclosureLine("Connection authority", connection.authority) }
             disclosureLine("Opens", method.opens)
             disclosureLine("Writes", method.writes)

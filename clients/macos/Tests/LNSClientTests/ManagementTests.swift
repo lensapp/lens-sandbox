@@ -34,7 +34,8 @@ final class ManagementTests: XCTestCase {
         let commands: [ManagementCommand] = [
             .start("run-1"), .stop("run-1"), .remove("run-1"), .listConnectors,
             .install("/recipes/github.yaml"), .uninstall("github"),
-            .connect("github", method: "token", label: "work", values: ["token": "fixture-secret"]),
+            .beginConnect("github", method: "token", label: "work"),
+            .answerConnect("sign-in", values: ["token": "fixture-secret"]), .connectStatus("sign-in"), .openConnectBrowser("sign-in"), .cancelConnect("sign-in"),
             .disconnect("github", connection: "work"),
             .grant("github", run: "run-1", method: "token", connection: "work"), .forget("github", run: "run-1")
         ]
@@ -59,7 +60,7 @@ final class ManagementTests: XCTestCase {
             (.listConnectors, ["type": "ListConnectors"]),
             (.install("/recipes/github.yaml"), ["type": "InstallConnector", "source": "/recipes/github.yaml"]),
             (.uninstall("github"), ["type": "UninstallConnector", "name": "github"]),
-            (.connect("github", method: "token", label: "work", values: ["token": "secret"]), ["type": "ConnectConnector", "name": "github", "method": "token", "connection": "work", "values": ["token": "secret"]]),
+            (.beginConnect("github", method: "token", label: "work"), ["type": "BeginConnect", "name": "github", "method": "token", "connection": "work"]),
             (.disconnect("github", connection: "work"), ["type": "DisconnectConnector", "name": "github", "connection": "work"]),
             (.grant("github", run: "run-1", method: "token", connection: "work"), ["type": "GrantConnector", "name": "github", "run": "run-1", "method": "token", "connection": "work", "answered_by": "card"]),
             (.forget("github", run: "run-1"), ["type": "ForgetConnector", "name": "github", "run": "run-1"])
@@ -71,7 +72,7 @@ final class ManagementTests: XCTestCase {
     }
 
     func testGrantRequiresAnExistingSandboxAndAnExplicitCompatibleConnection() throws {
-        let offer = try JSONDecoder().decode(ConnectorOffer.self, from: Data(#"{"name":"github","digest":"sha256:one","serves":["api.github.com"],"methods":[{"name":"token","label":"Token","auth_label":"Token","offerable":true,"opens":["api.github.com"],"writes":[],"env":[],"credentials":["TOKEN"],"asks":["token"]},{"name":"public","label":"Public","offerable":true,"opens":[],"writes":[],"env":[],"credentials":[],"asks":[]},{"name":"unsupported","label":"Unsupported","offerable":false,"opens":[],"writes":[],"env":[],"credentials":[],"asks":[]}],"connections":[{"label":"work","method":"token","authority":["repo:read"]}]}"#.utf8))
+        let offer = try JSONDecoder().decode(ConnectorOffer.self, from: Data(#"{"name":"github","digest":"sha256:one","serves":["api.github.com"],"methods":[{"name":"token","label":"Token","auth_label":"Token","offerable":true,"opens":["api.github.com"],"writes":[],"env":[],"credentials":["TOKEN"],"asks":["token"],"hosts":[],"runs_programs":false,"carries_code":false},{"name":"public","label":"Public","offerable":true,"opens":[],"writes":[],"env":[],"credentials":[],"asks":[],"hosts":[],"runs_programs":false,"carries_code":false},{"name":"unsupported","label":"Unsupported","offerable":false,"opens":[],"writes":[],"env":[],"credentials":[],"asks":[],"hosts":[],"runs_programs":false,"carries_code":false}],"connections":[{"label":"work","method":"token","authority":["repo:read"]}]}"#.utf8))
         let sandboxes = [DashboardSandbox(id: "run-1", name: "agent", image: "alpine", status: "running"), DashboardSandbox(id: "gone", name: "old", image: "", status: "")]
         var selection = GrantSelection()
         XCTAssertNil(selection.command(offer: offer, sandboxes: sandboxes))

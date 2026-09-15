@@ -10,8 +10,12 @@
       "raw": false,
       "waiting": true,
       "submitting": false,
-      "offer": null
+      "offer": null,
+      "connect": null,
+      "connect_seq": 0
     }
   ],
-  "notices": ["A decision could not be saved."]
+  "notices": [
+    "A decision could not be saved."
+  ]
 }

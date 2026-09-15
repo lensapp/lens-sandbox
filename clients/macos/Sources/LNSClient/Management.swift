@@ -7,6 +7,7 @@ public struct ManagementCommand: Encodable {
     public private(set) var method: String?
     public private(set) var connection: String?
     public private(set) var source: String?
+    public private(set) var session: String?
     public private(set) var values: [String: String]?
     public private(set) var answered_by: String?
     public private(set) var attach: Bool?
@@ -53,9 +54,20 @@ public struct ManagementCommand: Encodable {
         var command = Self(type: "UninstallConnector"); command.name = name
         return command
     }
-    public static func connect(_ name: String, method: String, label: String, values: [String: String]) -> Self {
-        var command = Self(type: "ConnectConnector")
-        command.name = name; command.method = method; command.connection = label; command.values = values
+    public static func beginConnect(_ name: String, method: String, label: String) -> Self {
+        var command = Self(type: "BeginConnect")
+        command.name = name; command.method = method; command.connection = label
+        return command
+    }
+    public static func answerConnect(_ session: String, values: [String: String]) -> Self {
+        var command = Self(type: "AnswerConnect"); command.session = session; command.values = values
+        return command
+    }
+    public static func connectStatus(_ session: String) -> Self { connectCommand("ConnectStatus", session) }
+    public static func cancelConnect(_ session: String) -> Self { connectCommand("CancelConnect", session) }
+    public static func openConnectBrowser(_ session: String) -> Self { connectCommand("OpenConnectBrowser", session) }
+    private static func connectCommand(_ type: String, _ session: String) -> Self {
+        var command = Self(type: type); command.session = session
         return command
     }
     public static func disconnect(_ name: String, connection: String) -> Self {
@@ -123,6 +135,16 @@ extension ServiceReply {
     static func management(_ data: Data, type: String) throws -> Self? {
         let decoder = JSONDecoder()
         switch type {
+        case "ConnectorAsks":
+            return .connectAsk(try decoder.decode(ConnectAsk.self, from: data))
+        case "ConnectorPending":
+            struct Pending: Decodable { let session: String; let progress: OAuthProgress }
+            let pending = try decoder.decode(Pending.self, from: data)
+            return .connectPending(session: pending.session, progress: pending.progress)
+        case "ConnectorConnectFailed":
+            struct Failed: Decodable { let name: String; let reason: String }
+            let failed = try decoder.decode(Failed.self, from: data)
+            return .connectFailed("Connecting \(failed.name) did not finish: \(failed.reason)")
         case "ConnectorList":
             struct Inventory: Decodable { let connectors: [ConnectorOffer] }
             return .connectors(try decoder.decode(Inventory.self, from: data).connectors)

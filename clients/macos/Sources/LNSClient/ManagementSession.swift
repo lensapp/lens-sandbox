@@ -4,18 +4,19 @@ private struct ManagementEnvelope: Decodable { let type: String }
 
 extension ServiceClient {
     public func manage(_ command: ManagementCommand) async throws -> ServiceReply {
-        let expected: String
+        let expected: [String]
         switch command.type {
-        case "StartRun": expected = "RunStarted"
-        case "StopRun": expected = "RunStopped"
-        case "RemoveRun": expected = "Acknowledged"
-        case "ListConnectors": expected = "ConnectorList"
-        case "InstallConnector": expected = "ConnectorInstalled"
-        case "UninstallConnector": expected = "ConnectorUninstalled"
-        case "ConnectConnector": expected = "ConnectorConnected"
-        case "DisconnectConnector": expected = "ConnectorDisconnected"
-        case "GrantConnector": expected = "ConnectorGranted"
-        case "ForgetConnector": expected = "ConnectorForgotten"
+        case "StartRun": expected = ["RunStarted"]
+        case "StopRun": expected = ["RunStopped"]
+        case "RemoveRun": expected = ["Acknowledged"]
+        case "ListConnectors": expected = ["ConnectorList"]
+        case "InstallConnector": expected = ["ConnectorInstalled"]
+        case "UninstallConnector": expected = ["ConnectorUninstalled"]
+        case "BeginConnect", "AnswerConnect", "ConnectStatus", "OpenConnectBrowser", "CancelConnect":
+            expected = ["ConnectorAsks", "ConnectorPending", "ConnectorConnected", "ConnectorConnectFailed"]
+        case "DisconnectConnector": expected = ["ConnectorDisconnected"]
+        case "GrantConnector": expected = ["ConnectorGranted"]
+        case "ForgetConnector": expected = ["ConnectorForgotten"]
         default: throw ServiceError(message: "Unknown management action.")
         }
         for try await bytes in try replies(to: .management(command), once: false, latestOnly: false) {
@@ -23,7 +24,7 @@ extension ServiceClient {
             let type = try JSONDecoder().decode(ManagementEnvelope.self, from: bytes).type
             if type == "RunProgress" || type == "RunLog" { continue }
             let reply = try ServiceReply.decode(bytes)
-            guard type == expected else { throw ServiceError(message: "The service did not confirm that action. Refresh before trying again.") }
+            guard expected.contains(type) else { throw ServiceError(message: "The service did not confirm that action. Refresh before trying again.") }
             return reply
         }
         throw ServiceError(message: "The service disconnected before confirming the action. Refresh before trying again.")
@@ -45,6 +46,7 @@ public final class ManagementSession {
     private var dirty = false
 
     public init(service: any ServiceClient) { self.service = service }
+    public func makeConnectSession() -> ConnectSession { ConnectSession(service: service) }
     public func serviceConnected() { connected = true; onChange?() }
     public func dismissMessage() { message = nil; onChange?() }
     public func refresh() async {

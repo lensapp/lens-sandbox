@@ -4,7 +4,7 @@ import XCTest
 
 final class ApprovalPresentationTests: XCTestCase {
     func snapshot(_ notices: [String], approval: Bool = false) throws -> ApprovalSnapshot {
-        let row: [String: Any] = ["id": "request", "token": "token", "host": "example.com", "action": "CONNECT", "raw": false, "waiting": true, "submitting": false]
+        let row: [String: Any] = ["id": "request", "token": "token", "host": "example.com", "action": "CONNECT", "raw": false, "waiting": true, "submitting": false,"connect_seq":0,"connect":NSNull()]
         return try JSONDecoder().decode(ApprovalSnapshot.self, from: JSONSerialization.data(withJSONObject: ["approvals": approval ? [row] : [], "notices": notices]))
     }
 

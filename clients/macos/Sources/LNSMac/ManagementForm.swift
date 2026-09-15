@@ -22,8 +22,6 @@ struct ManagementForm: View {
     let sheet: ManagementSheet
     @State private var selection = GrantSelection()
     @State private var source = ""
-    @State private var label = ""
-    @State private var values: [String: String] = [:]
     @State private var access = ""
 
     private var offer: ConnectorOffer? { sheet.offer }
@@ -32,6 +30,21 @@ struct ManagementForm: View {
     private var busy: Bool { model.management.busy }
 
     var body: some View {
+        if sheet.kind == .connect, let offer {
+            AccountConnectForm(session: model.management.makeConnectSession(), offer: offer, connected: model.connected) { outcome in
+                model.notice = outcome
+                Task {
+                    await model.management.refresh()
+                    guard model.managementSheet?.id == sheet.id else { return }
+                    if sheet.returnToGrant, let current = model.management.connectors.first(where: { $0.name == offer.name }) {
+                        model.managementSheet = ManagementSheet(kind: .grant, offer: current, run: sheet.run)
+                    } else { model.managementSheet = nil }
+                }
+            }
+        } else { form }
+    }
+
+    private var form: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(sheet.kind.rawValue).font(.system(size: 22, weight: .semibold)).foregroundStyle(LNSTheme.heading)
@@ -62,17 +75,11 @@ struct ManagementForm: View {
         .interactiveDismissDisabled(busy)
         .onAppear {
             selection.run = sheet.run
-            if sheet.kind == .connect {
-                selection.method = offer?.methods.first { $0.offerable && $0.auth_label != nil }?.name ?? ""
-            } else if sheet.kind == .grant {
+            if sheet.kind == .grant {
                 access = offer?.grantOptions.first?.id ?? ""
             }
         }
-        .onChange(of: selection.method) { _ in
-            if sheet.kind == .connect { label = ""; values = [:] }
-        }
         .onChange(of: access) { id in if let offer { selection.choose(id, in: offer) } }
-        .onDisappear { values = [:] }
     }
 
     @ViewBuilder private var fields: some View {
@@ -85,25 +92,7 @@ struct ManagementForm: View {
                     Button("Choose File…", action: chooseFile)
                 }
             }
-        case .connect:
-            Text("Save a connection on this Mac. You choose which sandboxes may use it when you grant access.")
-            methodPicker(connecting: true)
-            if let method, method.offerable, method.auth_label != nil {
-                if let help = method.help { Text(help).textSelection(.enabled) }
-                LNSFormField(title: "Connection name") {
-                    TextField("e.g. work", text: $label).textFieldStyle(.roundedBorder)
-                }
-                if offer?.connections.contains(where: { $0.label == label.trimmingCharacters(in: .whitespacesAndNewlines) }) == true {
-                    Text("That name is already used. Choose a new name to keep the existing account.").foregroundStyle(LNSTheme.warning)
-                }
-                ForEach(method.asks, id: \.self) { field in
-                    LNSFormField(title: field) {
-                        SecureField(field, text: Binding(get: { values[field] ?? "" }, set: { values[field] = $0 }))
-                            .textFieldStyle(.roundedBorder)
-                    }
-                }
-                Text("Real credentials stay outside the workload.").font(.caption).foregroundStyle(LNSTheme.muted)
-            }
+        case .connect: EmptyView()
         case .grant:
             sandboxPicker
             Picker("Access", selection: $access) {
@@ -125,6 +114,7 @@ struct ManagementForm: View {
                     }
                 }
                 Divider()
+                ConnectorDisclosure(method: method, digest: offer?.digest ?? "")
                 Text("This sandbox will receive").font(.headline)
                 DisclosureLine(title: "Opens", entries: method.opens)
                 DisclosureLine(title: "Writes", entries: method.writes)
@@ -161,16 +151,6 @@ struct ManagementForm: View {
         }
     }
 
-    private func methodPicker(connecting: Bool) -> some View {
-        Picker("Method", selection: $selection.method) {
-            Text("Choose a method").tag("")
-            ForEach(offer?.methods ?? []) { method in
-                Text(method.label + (!method.offerable ? " — unavailable" : ""))
-                    .tag(method.name).disabled(!method.offerable || (connecting && method.auth_label == nil))
-            }
-        }
-    }
-
     private var destructive: Bool {
         [.remove, .uninstall, .disconnect, .forget].contains(sheet.kind)
     }
@@ -180,12 +160,7 @@ struct ManagementForm: View {
         case .install:
             let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : .install(trimmed)
-        case .connect:
-            let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let offer, let method, method.offerable, method.auth_label != nil,
-                  !trimmed.isEmpty, !offer.connections.contains(where: { $0.label == trimmed }),
-                  method.asks.allSatisfy({ !(values[$0] ?? "").isEmpty }) else { return nil }
-            return .connect(offer.name, method: method.name, label: trimmed, values: values)
+        case .connect: return nil
         case .grant:
             guard let offer else { return nil }
             return selection.command(offer: offer, sandboxes: model.currentSandboxes)
@@ -207,7 +182,6 @@ struct ManagementForm: View {
 
     private func submit() {
         guard let command else { return }
-        values = [:]
         Task {
             guard await model.manage(command, reviewing: offer) else { return }
             guard model.managementSheet?.id == sheet.id else { return }

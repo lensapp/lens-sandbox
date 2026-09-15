@@ -3,7 +3,6 @@ import Foundation
 public struct LiveConnectorDraft {
     public private(set) var selection = ""
     public var name = ""
-    public var values: [String: String] = [:]
     public init() {}
     public init(offer: ConnectorOffer) {
         selection = offer.grantOptions.first?.id
@@ -14,7 +13,6 @@ public struct LiveConnectorDraft {
     public mutating func choose(_ id: String) {
         selection = id
         name = ""
-        values = [:]
     }
 
     public func newMethod(in offer: ConnectorOffer) -> ConnectorMethod? {
@@ -27,8 +25,7 @@ public struct LiveConnectorDraft {
         }
         guard let method = newMethod(in: offer) else { return nil }
         let label = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !label.isEmpty, !offer.connections.contains(where: { $0.label == label }),
-              method.asks.allSatisfy({ !(values[$0] ?? "").isEmpty }) else { return nil }
-        return .grant(method: method.name, connection: .new(label: label, values: values))
+        guard !label.isEmpty, !offer.connections.contains(where: { $0.label == label }) else { return nil }
+        return .beginConnect(method: method.name, label: label)
     }
 }

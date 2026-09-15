@@ -107,6 +107,9 @@ struct HistoryRow: View {
     let approval: DashboardApproval
     @ObservedObject var model: DashboardModel
     @State private var confirmingRemoval = false
+    @State private var connecting = false
+    @State private var connectMethod = ""
+    @State private var connectLabel = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -154,12 +157,22 @@ struct HistoryRow: View {
             if model.offerLoading { ProgressView("Loading current connector offer…").controlSize(.small) }
             if let error = model.offerError { Text(error).foregroundStyle(LNSTheme.warning).textSelection(.enabled) }
             if let offer = model.offer {
-                ConnectorGrant(offer: offer, showsDecline: false) { action in
+                ConnectorGrant(offer: offer, showsDecline: false, connectTitle: "Connect Account…") { action in
+                    if case let .beginConnect(method, label) = action {
+                        connectMethod = method; connectLabel = label; connecting = true
+                    }
                     if case let .grant(method, connection) = action {
                         model.perform(.grantHistory(id: approval.id, method: method, digest: offer.digest, connection: connection), for: approval.id)
                     }
                 }
                 .id(approval.id + offer.digest)
+                .sheet(isPresented: $connecting, onDismiss: {
+                    model.clearHistory(); model.selectHistory(approval)
+                }) {
+                    AccountConnectForm(session: model.management.makeConnectSession(), offer: offer, connected: model.connected, method: connectMethod, label: connectLabel) { outcome in
+                        model.notice = outcome; connecting = false
+                    }
+                }
             }
         }
         HStack {
