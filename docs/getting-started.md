@@ -41,9 +41,11 @@ openSUSE Tumbleweed) all qualify. Check yours with `ldd --version`.
 curl -fsSL https://get.lns.run | bash
 ```
 
-This installs two binaries — the `lns` CLI and the `lns-service` background
-service — into `~/.local/bin` by default. Set `INSTALL_DIR` to choose another
-location:
+On macOS this installs the native app at `~/Applications/LNS.app`, with the
+CLI and service inside the signed bundle. It links `lns` and `lns-service` from
+`~/.local/bin` so they are available in Terminal. Set `APP_DIR` to choose another
+parent directory for the app. On Linux it installs the two binaries directly.
+Set `INSTALL_DIR` to choose another location for the CLI commands:
 
 ```bash
 curl -fsSL https://get.lns.run | INSTALL_DIR=/usr/local/bin bash
@@ -64,16 +66,20 @@ it once per login session:
 lns service start
 ```
 
-This launches the tray-resident service (you'll see its menu-bar / system-tray
-icon) and waits until it's ready. Check on it any time:
+This starts the service and waits until it is ready. On macOS it also opens the
+native LNS app, which provides the menu-bar interface, sandbox controls,
+connectors, approvals, and audit. Opening the app from Finder starts the same
+bundled service. On Linux the service provides its own tray interface. Check on it any time:
 
 ```bash
 lns service status
 ```
 
 The service keeps running across sandbox runs — it owns the microVM lifecycle, the
-cache, the approval window, and the audit log. Stop it from the tray's **Quit**
-menu or with `lns service stop`. See [the background service](service.md) for
+cache, pending approvals, and the audit log. On macOS, closing a window or choosing
+**Quit Interface** leaves the service running. Choose **Stop Service and Quit
+LNS…** to stop it and its running sandboxes, or use `lns service stop`. On Linux,
+the tray's **Quit** stops the service. See [the background service](service.md) for
 details.
 
 ## Your first run
@@ -199,7 +205,8 @@ lns uninstall
 ```
 
 This stops any running sandboxes, stops the background service, removes the login
-auto-start entry, and deletes the installed `lns` and `lns-service` binaries. It
+auto-start entry, and removes the installed program. On macOS it closes and
+removes the whole app and its CLI links; on Linux it deletes the two binaries. It
 asks for confirmation first; pass `-y`/`--yes` to skip the prompt. Your local data
 — cached images, named volumes, the audit trail, and config — is left in place so a reinstall picks up where you left off.
 

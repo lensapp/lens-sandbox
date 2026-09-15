@@ -42,7 +42,9 @@ pub mod shutdown;
 pub mod supervisor;
 mod time_fmt;
 pub mod tools;
+#[cfg(not(target_os = "macos"))]
 pub mod tray;
+#[cfg(not(target_os = "macos"))]
 pub mod ui;
 pub mod update_check;
 pub mod upperfs;

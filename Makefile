@@ -76,6 +76,7 @@ dev:
 # binary gets the next exec SIGKILLed on macOS; unlink before copying.
 
 build: build-lns build-lns-service
+	@if [ "$$(uname -s)" = Darwin ]; then $(MAKE) -C clients/macos package; fi
 
 build-lns:
 	$(CARGO) build --release $(CARGO_LOCKED) -p lns-cli
@@ -320,6 +321,7 @@ coverage-lcov:
 # LNS_SERVICE_BIN. Excluded from the coverage gate (spawns real
 # subprocesses with side effects).
 e2e:
+	$(CARGO) test -p e2e-tests --test artifact_filesystem
 	$(CARGO) build -p lns-cli -p lns-service
 	$(CARGO) test -p e2e-tests --test specutil_env
 	@LNS_BIN=$(CARGO_TARGET_DIR)/debug/lns \

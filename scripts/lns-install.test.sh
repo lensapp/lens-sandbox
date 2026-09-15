@@ -1,0 +1,140 @@
+#!/bin/sh
+set -eu
+installer_test_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+installer_test_tmp=$(mktemp -d)
+trap 'rm -rf "$installer_test_tmp"' EXIT HUP INT TERM
+cp "$installer_test_root/scripts/lns-install/lns-install.sh" "$installer_test_tmp/install.sh"
+MACOS_TEAM_ID=TESTTEAM01 python3 "$installer_test_root/scripts/configure-macos-signing.py" "$installer_test_tmp/install.sh"
+
+mkdir -p "$installer_test_tmp/bin" "$installer_test_tmp/helpers" "$installer_test_tmp/LNS.app/Contents/Resources" "$installer_test_tmp/home"
+printf '#!/bin/sh\necho "lns 0.25.0"\n' > "$installer_test_tmp/helpers/lns"
+cp "$installer_test_tmp/helpers/lns" "$installer_test_tmp/helpers/lns-service"
+chmod +x "$installer_test_tmp/helpers/"*
+cat > "$installer_test_tmp/LNS.app/Contents/Resources/install.sh" <<'MOCK'
+#!/bin/sh
+set -eu
+printf native > "$INSTALL_DIR/result"
+MOCK
+cat > "$installer_test_tmp/bin/uname" <<'MOCK'
+#!/bin/sh
+case "$1" in -s) echo Darwin;; -m) echo arm64;; -r) echo 26;; esac
+MOCK
+cat > "$installer_test_tmp/bin/curl" <<'MOCK'
+#!/bin/sh
+set -eu
+destination=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in -A) shift 2;; -o) destination=$2; shift 2;; -*) shift;; *) url=$1; shift;; esac
+done
+case "$url" in
+  https://api.github.com/repos/lensapp/lens-sandbox/releases/tags/lns-v0.25.0)
+    [ "${INSTALLER_TEST_METADATA_FAIL:-0}" != 1 ] || exit 1
+    printf '{"assets":[{"name":"lns-%s-darwin-aarch64.%s"}]}' "${INSTALLER_TEST_ASSET_VERSION:-0.25.0}" "$INSTALLER_TEST_EXTENSION";;
+  */lns-latest.json) printf '{"version":"0.25.0","platforms":{"darwin-aarch64":{"url":"https://get.lns.run/lns-0.25.0-darwin-aarch64.%s","sha256":"digest"}}}' "$INSTALLER_TEST_EXTENSION";;
+  *.sha256) printf 'digest  archive\n' > "$destination";;
+  *.tar.gz)
+    [ "$INSTALLER_TEST_EXTENSION" = tar.gz ] || exit 1
+    tar czf "$destination" -C "$INSTALLER_TEST_SOURCE/helpers" lns lns-service;;
+  *.zip)
+    [ "$INSTALLER_TEST_EXTENSION" = zip ] || { echo 'FAIL: installer requested a ZIP before the manifest published one' >&2; exit 1; }
+    touch "$destination";;
+  *) exit 1;;
+esac
+MOCK
+cat > "$installer_test_tmp/bin/ditto" <<'MOCK'
+#!/bin/sh
+set -eu
+mkdir -p "$4"
+cp -R "$INSTALLER_TEST_SOURCE/LNS.app" "$4/LNS.app"
+MOCK
+cat > "$installer_test_tmp/bin/codesign" <<'MOCK'
+#!/bin/sh
+case "$*" in
+  *'certificate leaf[subject.OU]'*)
+    case "$*" in *"${INSTALLER_TEST_SIGNING_TEAM:-TESTTEAM01}"*) ;; *) exit 1;; esac;;
+esac
+[ "${INSTALLER_TEST_BAD_SIGNATURE:-0}" != 1 ]
+MOCK
+printf '#!/bin/sh\nexit 0\n' > "$installer_test_tmp/bin/spctl"
+printf '#!/bin/sh\necho "digest  archive"\n' > "$installer_test_tmp/bin/sha256sum"
+cat > "$installer_test_tmp/bin/plutil" <<'MOCK'
+#!/usr/bin/env python3
+import json,os,sys
+if os.environ.get("INSTALLER_TEST_REAL_PLUTIL") == "1":
+    os.execv("/usr/bin/plutil", ["plutil"] + sys.argv[1:])
+data = json.load(sys.stdin)
+if sys.argv[2] == 'assets':
+    print(json.dumps(data['assets'], indent=2) if os.environ.get('INSTALLER_TEST_PRETTY') == '1' else json.dumps(data['assets'], separators=(',', ':')))
+else:
+    assert sys.argv[1:] == ['-extract', 'platforms.darwin-aarch64.url', 'raw', '-o', '-', '-']
+    print(data['platforms']['darwin-aarch64']['url'])
+MOCK
+chmod +x "$installer_test_tmp/bin/"*
+export PATH="$installer_test_tmp/bin:$PATH" INSTALLER_TEST_SOURCE="$installer_test_tmp"
+export VERSION=''
+export INSTALL_DIR="$installer_test_tmp/install" APP_DIR="$installer_test_tmp/apps" LNS_NO_SERVICE=1
+mkdir -p "$INSTALL_DIR"
+INSTALLER_TEST_EXTENSION=tar.gz env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
+[ -x "$INSTALL_DIR/lns" ] && [ ! -e "$INSTALL_DIR/result" ]
+echo 'PASS: the installer follows the current tarball manifest before native publication'
+INSTALLER_TEST_EXTENSION=zip env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
+[ "$(cat "$INSTALL_DIR/result")" = native ]
+echo 'PASS: a native manifest selects the verified complete-app installer'
+rm "$INSTALL_DIR/result"
+if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_BAD_SIGNATURE=1 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"; then
+  echo 'FAIL: unsigned native app was installed' >&2; exit 1
+fi
+[ ! -e "$INSTALL_DIR/result" ]
+echo 'PASS: native signature failure cannot fall back to installing loose helpers'
+
+if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_SIGNING_TEAM=OTHERTEAM1 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"; then
+  echo 'FAIL: native app from another signing team was installed' >&2; exit 1
+fi
+[ ! -e "$INSTALL_DIR/result" ]
+echo 'PASS: native app must be signed by the configured team'
+
+for installer_test_extension in tar.gz zip; do
+  INSTALLER_TEST_EXTENSION="$installer_test_extension" VERSION=v0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
+  if [ "$installer_test_extension" = zip ]; then
+    [ "$(cat "$INSTALL_DIR/result")" = native ]
+    rm "$INSTALL_DIR/result"
+  else
+    [ -x "$INSTALL_DIR/lns" ] && [ ! -e "$INSTALL_DIR/result" ]
+  fi
+  echo "PASS: pinned release selects its published $installer_test_extension asset"
+done
+if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_METADATA_FAIL=1 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"; then
+  echo 'FAIL: failed release lookup guessed an archive format' >&2; exit 1
+fi
+[ ! -e "$INSTALL_DIR/result" ]
+echo 'PASS: failed pinned release lookup aborts installation'
+for installer_test_extension in tar.gz zip; do
+  INSTALLER_TEST_EXTENSION="$installer_test_extension" INSTALLER_TEST_PRETTY=1 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
+  if [ "$installer_test_extension" = zip ]; then
+    [ "$(cat "$INSTALL_DIR/result")" = native ]
+    rm "$INSTALL_DIR/result"
+  else
+    [ -x "$INSTALL_DIR/lns" ] && [ ! -e "$INSTALL_DIR/result" ]
+  fi
+done
+echo 'PASS: pinned archive selection accepts formatted JSON'
+installer_test_passed=9
+if [ -x /usr/bin/plutil ] && [ "$(/usr/bin/uname -s)" = Darwin ]; then
+  for installer_test_extension in tar.gz zip; do
+    INSTALLER_TEST_EXTENSION="$installer_test_extension" INSTALLER_TEST_REAL_PLUTIL=1 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
+    if [ "$installer_test_extension" = zip ]; then
+      [ "$(cat "$INSTALL_DIR/result")" = native ]
+      rm "$INSTALL_DIR/result"
+    else
+      [ -x "$INSTALL_DIR/lns" ] && [ ! -e "$INSTALL_DIR/result" ]
+    fi
+  done
+  echo 'PASS: pinned archive selection uses the real macOS plutil'
+  installer_test_passed=10
+fi
+if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_ASSET_VERSION=0x25x0 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"; then
+  echo 'FAIL: version punctuation matched a different release asset' >&2; exit 1
+fi
+[ ! -e "$INSTALL_DIR/result" ]
+echo 'PASS: version punctuation is matched literally'
+echo "Results: $installer_test_passed passed, 0 failed"

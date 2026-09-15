@@ -39,14 +39,6 @@ lns-policy  = { path = "../lns-policy" }
 lns-spec    = { path = "../lns-spec" }
 lns-session = { path = "../lns-session" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "net", "process", "signal", "sync", "time"] }
-# eframe / egui drive the main-thread event loop. The hidden main viewport
-# becomes the always-on-top approval window when a pending prompt arrives;
-# `tray-icon` runs alongside via its own event channel.
-eframe = { version = "0.34", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
-egui = "0.34"
-winit = "0.30"
-tray-icon = "0.24"
-png = "0.17"
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -80,13 +72,8 @@ tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
 anstyle = "1"
 
-# Approval-flow deps. serde_yaml: decisions.yaml load/save. notify:
-# filesystem watcher for hot-swap on manual policy edits. The
-# approval UI itself is rendered by the eframe/egui setup above —
-# no HTTP stack is involved.
 serde_yaml      = "0.9"
 notify          = "6"
-egui_material_icons = { version = "0.6", default-features = false, features = ["filled"] }
 
 # Apple Virtualization.framework bindings — macOS only. These pull in just
 # the Vz/Foundation symbols we use; the linkage to the underlying frameworks
@@ -94,8 +81,6 @@ egui_material_icons = { version = "0.6", default-features = false, features = ["
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2                 = "0.6"
 objc2-foundation      = { version = "0.3", features = ["NSError", "NSString", "NSURL", "NSFileHandle", "NSObject"] }
-# Tray window joins every macOS Space so a notification shows on the active desktop, not the one it was created on.
-objc2-app-kit         = { version = "0.3", features = ["NSApplication", "NSResponder", "NSWindow"] }
 objc2-virtualization  = { version = "0.3", features = [
     "VZVirtualMachine",
     "VZVirtualMachineConfiguration",
@@ -169,7 +154,6 @@ tokio-test = "0.4"
 # `regex` in as a dev-dep is cheap because cucumber already depends on
 # it transitively.
 regex = "1"
-egui_kittest = "0.34"
 
 # Layer 2 (behavioural unit) cucumber harness. Drives lns_service
 # library modules in-process — no subprocess spawns, no real FS, no
@@ -196,3 +180,14 @@ cognitive_complexity = { level = "deny", priority = 1 }
 # unsafe block carries an inline justification.
 [lints.rust]
 unsafe_code = "allow"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+winit = "0.30"
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+egui = "0.34"
+tray-icon = "0.24"
+png = "0.17"
+egui_material_icons = { version = "0.6", default-features = false, features = ["filled"] }
+
+[target.'cfg(not(target_os = "macos"))'.dev-dependencies]
+egui_kittest = "0.34"

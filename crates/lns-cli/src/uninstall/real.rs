@@ -50,6 +50,31 @@ async fn build_plan(purge: bool) -> Result<UninstallPlan> {
     let lns = tokio::fs::canonicalize(&lns)
         .await
         .with_context(|| format!("canonicalizing {}", lns.display()))?;
+    let application = lns_ipc::desktop_bundle(&lns);
+    if let Some(app) = application {
+        let home = dirs::home_dir().context("finding the CLI installation")?;
+        let bin = crate::update::native_cli_directory(&home).await;
+        let mut binaries = Vec::new();
+        for name in ["lns", "lns-service"] {
+            let link = bin.join(name);
+            if tokio::fs::read_link(&link).await.ok().as_deref()
+                == Some(app.join("Contents/Helpers").join(name).as_path())
+            {
+                binaries.push(link);
+            }
+        }
+        let (purge_dirs, purge_files) = if purge {
+            purge_targets_from_env()?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        return Ok(UninstallPlan {
+            application: Some(app),
+            binaries,
+            purge_dirs,
+            purge_files,
+        });
+    }
     let mut binaries = Vec::new();
     if let Some(parent) = lns.parent() {
         let service = parent.join("lns-service");
@@ -64,6 +89,7 @@ async fn build_plan(purge: bool) -> Result<UninstallPlan> {
         (Vec::new(), Vec::new())
     };
     Ok(UninstallPlan {
+        application: None,
         binaries,
         purge_dirs,
         purge_files,
@@ -100,6 +126,28 @@ impl LoginAgent for RealLoginAgent {
 struct RealFs;
 
 impl Fs for RealFs {
+    fn quit_application(&self, path: &Path) -> LocalBoxFuture<'_, std::io::Result<()>> {
+        let path = path.to_path_buf();
+        Box::pin(async move {
+            let status = tokio::process::Command::new("/usr/bin/osascript")
+                .args([
+                    "-l",
+                    "JavaScript",
+                    "-e",
+                    include_str!("../../../../clients/macos/scripts/quit.js"),
+                ])
+                .arg(path)
+                .status()
+                .await?;
+            if !status.success() {
+                return Err(std::io::Error::other(format!(
+                    "quitting LNS failed: {status}"
+                )));
+            }
+            Ok(())
+        })
+    }
+
     fn remove_file(&self, path: &Path) -> LocalBoxFuture<'_, std::io::Result<()>> {
         let path = path.to_path_buf();
         Box::pin(async move { tokio::fs::remove_file(&path).await })

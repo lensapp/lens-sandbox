@@ -95,6 +95,7 @@ if [ "$OS" = "darwin" ] && [ "$ARCH" != "aarch64" ]; then
   error "lns requires Apple Silicon (M-series) on macOS — Intel Macs cannot host the guest VM."
 fi
 
+MANIFEST=""
 if [ -n "${VERSION:-}" ]; then
   VERSION="${VERSION#v}"
 else
@@ -114,7 +115,33 @@ fi
 
 info "Installing ${BOLD}${BINARY_NAME} ${VERSION}${RESET} for ${PLATFORM}"
 
-ASSET_NAME="lns-${VERSION}-${PLATFORM}.tar.gz"
+ARCHIVE_EXTENSION=tar.gz
+if [ "$OS" = darwin ]; then
+  ARCHIVE_EXTENSION=zip
+  if [ -n "$MANIFEST" ]; then
+    MANIFEST_URL=$(printf '%s' "$MANIFEST" | plutil -extract "platforms.${PLATFORM}.url" raw -o - -) || \
+      error "The release manifest has no download for ${PLATFORM}."
+    case "$MANIFEST_URL" in
+      *.zip) ARCHIVE_EXTENSION=zip ;;
+      *.tar.gz) ARCHIVE_EXTENSION=tar.gz ;;
+      *) error "Unsupported macOS release archive: ${MANIFEST_URL}" ;;
+    esac
+  else
+    RELEASE=$(fetch "https://api.github.com/repos/lensapp/lens-sandbox/releases/tags/lns-v${VERSION}") || \
+      error "Failed to look up release ${VERSION}."
+    ASSETS=$(printf '%s' "$RELEASE" | plutil -extract assets json -o - -) || \
+      error "The release has no asset list."
+    ASSET_STEM=$(printf '%s' "lns-${VERSION}-${PLATFORM}" | sed 's/[][\.^$*+?(){}|]/\\&/g')
+    if grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${ASSET_STEM}\\.zip\"" <<< "$ASSETS"; then
+      ARCHIVE_EXTENSION=zip
+    elif grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${ASSET_STEM}\\.tar\\.gz\"" <<< "$ASSETS"; then
+      ARCHIVE_EXTENSION=tar.gz
+    else
+      error "Release ${VERSION} has no download for ${PLATFORM}."
+    fi
+  fi
+fi
+ASSET_NAME="lns-${VERSION}-${PLATFORM}.${ARCHIVE_EXTENSION}"
 ASSET_URL="${CDN_BASE}/${ASSET_NAME}"
 CHECKSUM_URL="${ASSET_URL}.sha256"
 
@@ -148,6 +175,20 @@ info "Checksum OK."
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 INSTALL_DIR="${INSTALL_DIR%/}"
 
+if [ "$OS" = darwin ] && [ "$ARCHIVE_EXTENSION" = zip ]; then
+  ditto -x -k "${TMPDIR_INSTALL}/${ASSET_NAME}" "${TMPDIR_INSTALL}/native"
+  NATIVE_APP="${TMPDIR_INSTALL}/native/LNS.app"
+  SIGNING_TEAM='@MACOS_TEAM_ID@'
+  printf '%s' "$SIGNING_TEAM" | LC_ALL=C grep -Eq '^[A-Z0-9]{10}$' || error 'This installer has no configured signing team.'
+  codesign --verify --deep --strict -R "identifier \"run.lns.desktop\" and anchor apple generic and certificate leaf[subject.OU] = \"$SIGNING_TEAM\"" "$NATIVE_APP"
+  spctl --assess --type execute --verbose=2 "$NATIVE_APP"
+  APP_DESTINATION="${APP_DIR:-${HOME}/Applications}/LNS.app"
+  LNS_NO_SERVICE="${NO_SERVICE:-0}" sh "$NATIVE_APP/Contents/Resources/install.sh" "$NATIVE_APP" "$APP_DESTINATION" "$INSTALL_DIR" "$VERSION"
+  if [ "${NO_SERVICE:-0}" != 1 ]; then "$APP_DESTINATION/Contents/Helpers/lns" service enable; fi
+  info "Add ${INSTALL_DIR} to PATH to use lns from Terminal."
+  exit 0
+fi
+
 tar xzf "${TMPDIR_INSTALL}/${ASSET_NAME}" -C "${TMPDIR_INSTALL}"
 [ -f "${TMPDIR_INSTALL}/${BINARY_NAME}" ] || \
   error "Tarball ${ASSET_NAME} did not contain ${BINARY_NAME} at the top level."
@@ -156,14 +197,6 @@ HAS_SERVICE=true
 if [ ! -f "${TMPDIR_INSTALL}/${SERVICE_BINARY_NAME}" ]; then
   warn "Tarball does not contain ${SERVICE_BINARY_NAME} (older release?). Skipping service binary."
   HAS_SERVICE=false
-fi
-
-# Clear the quarantine bit so Gatekeeper doesn't block the binary; the Vz entitlement is in the release signature.
-if [ "$OS" = "darwin" ]; then
-  xattr -d com.apple.quarantine "${TMPDIR_INSTALL}/${BINARY_NAME}" 2>/dev/null || true
-  if [ "$HAS_SERVICE" = true ]; then
-    xattr -d com.apple.quarantine "${TMPDIR_INSTALL}/${SERVICE_BINARY_NAME}" 2>/dev/null || true
-  fi
 fi
 
 if [ ! -d "${INSTALL_DIR}" ]; then

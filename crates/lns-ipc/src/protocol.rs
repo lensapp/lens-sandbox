@@ -8,6 +8,25 @@ pub enum Request {
     Ping,
     Status,
     Shutdown,
+    WatchApprovals,
+    DismissApprovalNotices {
+        notices: Vec<String>,
+    },
+    ReadDashboard,
+    WatchDashboard,
+    InspectApprovalOffer {
+        id: String,
+    },
+    GrantApproval {
+        id: String,
+        digest: String,
+        method: String,
+        connection: crate::ApprovalConnection,
+    },
+    RespondToApproval {
+        token: String,
+        action: crate::LiveApprovalAction,
+    },
     Unknown {
         method: String,
     },
@@ -51,6 +70,13 @@ pub enum Request {
     },
     InspectRun {
         run: String,
+    },
+    ReadRunConfiguration {
+        run: String,
+    },
+    PreviewSandbox {
+        source: String,
+        mixins: Vec<String>,
     },
     RunLogs {
         run: String,
@@ -215,6 +241,33 @@ pub enum Response {
     Pong,
     Status(StatusInfo),
     ShuttingDown,
+    LiveApprovals(crate::LiveApprovalSnapshot),
+    LiveApprovalsChunk {
+        offset: usize,
+        data: String,
+        complete: bool,
+    },
+    /// The answer was queued; snapshots report subsequent state and persistence failures.
+    LiveApprovalSubmitted,
+    LiveApprovalStale,
+    DashboardChanged,
+    DashboardBegin,
+    DashboardSandbox {
+        sandbox: crate::DashboardSandbox,
+    },
+    DashboardEvent {
+        event: crate::DashboardEvent,
+    },
+    DashboardApproval {
+        approval: crate::DashboardApproval,
+    },
+    DashboardWarning {
+        message: String,
+    },
+    DashboardEnd,
+    ApprovalOffer {
+        offer: Option<ConnectorView>,
+    },
     Error {
         message: String,
     },
@@ -254,6 +307,9 @@ pub enum Response {
     },
     RunSaved {
         document: String,
+    },
+    SandboxConfiguration {
+        configuration: Box<crate::SandboxConfiguration>,
     },
     RunsPruned {
         removed: Vec<String>,
@@ -429,6 +485,8 @@ impl std::fmt::Debug for SecretValues {
 /// One installed connector as `lns connector list` shows it: what it serves, how it can be connected, and the connections this machine holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub name: String,
     pub digest: String,
     pub serves: Vec<String>,
@@ -953,6 +1011,8 @@ pub struct RunImageArgs {
     #[serde(default)]
     pub composed_mixins: Vec<String>,
     #[serde(default)]
+    pub configuration_sources: Option<Box<crate::ConfigurationSources>>,
+    #[serde(default)]
     pub name: Option<String>,
     pub cpus: u8,
     pub mem: usize,
@@ -1303,6 +1363,13 @@ mod secret_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn connector_description_survives_the_wire() {
+        let data = serde_json::json!({"name":"issues","digest":"sha256:one","description":"Work with projects and issues.","serves":["api.example.com"],"methods":[],"connections":[]});
+        let view: super::ConnectorView =
+            serde_json::from_value(data.clone()).expect("decode connector");
+        assert_eq!(serde_json::to_value(view).expect("encode connector"), data);
+    }
 
     fn a_method_setting(env: &[&str], credentials: &[&str]) -> ConnectorMethodView {
         ConnectorMethodView {
@@ -1337,6 +1404,7 @@ mod tests {
 
     fn holding(labels: &[&str]) -> ConnectorView {
         ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: vec!["api.some-provider.example".into()],
@@ -1567,6 +1635,7 @@ mod tests {
             resolved_image: None,
             mixins: Vec::new(),
             composed_mixins: Vec::new(),
+            configuration_sources: None,
             name: None,
             cpus: 1,
             mem: 512,
@@ -1609,6 +1678,7 @@ mod tests {
             resolved_image: Some(format!("ubuntu@sha256:{}", "a".repeat(64))),
             mixins: Vec::new(),
             composed_mixins: Vec::new(),
+            configuration_sources: None,
             name: None,
             cpus: 1,
             mem: 512,
@@ -1755,6 +1825,7 @@ mod tests {
             resolved_image: None,
             mixins: Vec::new(),
             composed_mixins: Vec::new(),
+            configuration_sources: None,
             name: None,
             cpus: 2,
             mem: 1024,

@@ -32,6 +32,7 @@ jobs:
       static-nft: ${{ steps.filter.outputs['static-nft'] }}
       shell: ${{ steps.filter.outputs.shell }}
       actions: ${{ steps.filter.outputs.actions }}
+      macos-ui: ${{ steps.filter.outputs['macos-ui'] }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
@@ -74,6 +75,16 @@ jobs:
             actions:
               - 'actions/**'
               - 'crates/lns-cli/**'
+              - '.github/workflows/ci.yml'
+            macos-ui:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'Makefile'
+              - 'crates/lns-cli/**'
+              - 'clients/macos/**'
+              - 'crates/lns-ipc/**'
+              - 'crates/lns-service/**'
               - '.github/workflows/ci.yml'
             static-nft:
               - 'vendor/static-nft/**'
@@ -129,6 +140,48 @@ jobs:
         with:
           cache: false
       - run: make shell-tests
+
+  macos-ui:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    needs: changes
+    if: needs.changes.outputs.macos-ui == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/install-cross-toolchain
+      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache-workspaces: .
+          cache-shared-key: native-macos-bundle
+          cache-on-failure: true
+      - run: |
+          if make -C clients/macos verify > native-verify.log 2>&1; then
+            cat native-verify.log
+          else
+            cat native-verify.log
+            sh scripts/gate-annotate.sh native-verify.log
+          fi
+
+      - run: |
+          if make -C clients/macos package > native-package.log 2>&1; then
+            cat native-package.log
+          else
+            cat native-package.log
+            sh scripts/gate-annotate.sh native-package.log
+          fi
+      - run: |
+          if make -C clients/macos smoke > native-smoke.log 2>&1; then
+            cat native-smoke.log
+          else
+            cat native-smoke.log
+            sh scripts/gate-annotate.sh native-smoke.log
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: LNS-macos-${{ github.sha }}
+          path: clients/macos/dist/LNS-macos.zip
+          if-no-files-found: error
+          retention-days: 7
 
   test:
     runs-on: ubuntu-latest
@@ -699,7 +752,7 @@ jobs:
   # hard-fails so we don't accidentally green-light real code changes.
   check:
     runs-on: ubuntu-latest
-    needs: [changes, lint, shell-tests-macos, test, coverage, coverage-as-root, audit, check-release-build, verify-static-nft, actions, actions-staging]
+    needs: [changes, lint, shell-tests-macos, test, coverage, coverage-as-root, audit, check-release-build, verify-static-nft, actions, actions-staging, macos-ui]
     if: always()
     steps:
       - name: Verify all gates passed
@@ -711,6 +764,7 @@ jobs:
           }
           if ! ok "${{ needs.lint.result }}" \
             || ! ok "${{ needs['shell-tests-macos'].result }}" \
+            || ! ok "${{ needs['macos-ui'].result }}" \
             || ! ok "${{ needs.test.result }}" \
             || ! ok "${{ needs.coverage.result }}" \
             || ! ok "${{ needs['coverage-as-root'].result }}" \
@@ -719,7 +773,7 @@ jobs:
             || ! ok "${{ needs.verify-static-nft.result }}" \
             || ! ok "${{ needs.actions.result }}" \
             || ! ok "${{ needs['actions-staging'].result }}"; then
-            echo "One or more gates failed: lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} coverage-as-root=${{ needs['coverage-as-root'].result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }}"
+            echo "One or more gates failed: lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} macos-ui=${{ needs['macos-ui'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} coverage-as-root=${{ needs['coverage-as-root'].result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }}"
             exit 1
           fi
           # Guard against the changes detector itself failing (e.g.
@@ -730,5 +784,5 @@ jobs:
             echo "Changes detector failed: changes=${{ needs.changes.result }}"
             exit 1
           fi
-          echo "All gates passed (lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }})."
+          echo "All gates passed (lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} macos-ui=${{ needs['macos-ui'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }})."
 

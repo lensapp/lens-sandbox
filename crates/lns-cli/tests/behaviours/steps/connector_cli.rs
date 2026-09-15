@@ -14,6 +14,7 @@ const DIGEST: &str = "sha256:abc";
 
 fn view(name: &str, serves: &str, connections: Vec<&str>) -> ConnectorView {
     ConnectorView {
+        description: None,
         name: name.to_string(),
         digest: DIGEST.to_string(),
         serves: vec![serves.to_string()],

@@ -130,6 +130,21 @@ jobs:
           # dispatch, fall back to the operator-provided tag.
           ref: ${{ needs.release-please.outputs.lns-install-tag || inputs.lns_install_tag }}
 
+      - name: Configure the trusted macOS signing team
+        env:
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          ALLOW_LEGACY_INSTALLER: ${{ github.event_name == 'workflow_dispatch' && inputs.force_deploy_install }}
+        run: |
+          if [ "$ALLOW_LEGACY_INSTALLER" = true ] && [ ! -f scripts/configure-macos-signing.py ]; then
+            if grep -Fq '@MACOS_TEAM_ID@' scripts/lns-install/lns-install.sh; then
+              echo 'Native installer is missing its signing configuration helper.' >&2
+              exit 1
+            fi
+            echo 'Redeploying the unchanged legacy installer.'
+          else
+            python3 scripts/configure-macos-signing.py scripts/lns-install/lns-install.sh
+          fi
+
       - name: Validate script syntax
         run: bash -n scripts/lns-install/lns-install.sh
 
@@ -249,6 +264,12 @@ jobs:
           cache-workspaces: .
           cache-on-failure: true
 
+      - name: Configure the trusted macOS signing team before compiling the updater
+        if: matrix.os == 'darwin'
+        env:
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: python3 scripts/configure-macos-signing.py clients/macos/scripts/install.sh
+
       - name: Build lns
         # --locked makes the release build hermetic; the cargo-workspace plugin keeps the tag's Cargo.lock in sync.
         run: cargo build --release --locked --target ${{ matrix.target }} -p lns-cli
@@ -280,50 +301,29 @@ jobs:
           check "target/${{ matrix.target }}/release/lns"
           check "target/${{ matrix.target }}/release/lns-service"
 
-      - name: Codesign with virtualization entitlement (macOS only)
+      - name: Sign and notarize the native macOS app
         if: matrix.os == 'darwin'
-        # Ad-hoc sign (--sign -) embeds com.apple.security.virtualization
-        # into the binary. Without it, the Vz backend's
-        # `startWithCompletionHandler:` returns NSCocoaErrorDomain 4097
-        # ("operation not permitted") on Apple Silicon. Ad-hoc signing
-        # needs no Apple Developer cert; users still see a Gatekeeper
-        # "unverified developer" dialog the first time, which the install
-        # script strips via `xattr -d com.apple.quarantine`. Upgrading to
-        # Developer ID + notarization removes that warning entirely; can
-        # be added later when we enroll.
-        run: |
-          set -euo pipefail
-          codesign --force --sign - \
-            --entitlements crates/lns-cli/lns.entitlements \
-            target/${{ matrix.target }}/release/lns
-          codesign --display --entitlements - \
-            target/${{ matrix.target }}/release/lns 2>&1
-
-      - name: Codesign lns-service with virtualization entitlement (macOS only)
-        if: matrix.os == 'darwin'
-        # lns-service is the process that actually creates `VZVirtualMachine`
-        # (see crates/lns-service/src/vm/vz.rs — sole consumer of
-        # objc2-virtualization in the workspace). It needs the same
-        # com.apple.security.virtualization entitlement as `lns` or Vz
-        # rejects boot with "Invalid virtual machine configuration. The
-        # process doesn't have the com.apple.security.virtualization
-        # entitlement." This mirrors the dev signing in
-        # crates/lns-cli/scripts/codesign-macos.sh, which already signs both
-        # binaries with the same entitlements file.
-        run: |
-          set -euo pipefail
-          codesign --force --sign - \
-            --entitlements crates/lns-cli/lns.entitlements \
-            target/${{ matrix.target }}/release/lns-service
-          codesign --display --entitlements - \
-            target/${{ matrix.target }}/release/lns-service 2>&1
+        env:
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_NOTARY_KEY_P8: ${{ secrets.MACOS_NOTARY_KEY_P8 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: sh clients/macos/scripts/ci-release.sh "target/${{ matrix.target }}/release" "$VERSION"
 
       - name: Package tarball and compute checksum
         id: pkg
         run: |
           set -euo pipefail
           ASSET="lns-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz"
-          tar czf "$ASSET" -C target/${{ matrix.target }}/release lns lns-service
+          if [ "${{ matrix.os }}" = darwin ]; then
+            ASSET="lns-${VERSION}-darwin-aarch64.zip"
+            cp clients/macos/dist/LNS-macos.zip "$ASSET"
+          else
+            tar czf "$ASSET" -C target/${{ matrix.target }}/release lns lns-service
+          fi
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$ASSET" > "$ASSET.sha256"
           elif command -v shasum >/dev/null 2>&1; then
@@ -352,9 +352,11 @@ jobs:
           # is reachable at a stable, never-rewritten URL. The pull-zone
           # edge rule pins this URL pattern to 1 year cache. We don't pass
           # --cache-control: the storage backend drops it on PUT.
+          CONTENT_TYPE=application/gzip
+          if [ "${{ matrix.os }}" = darwin ]; then CONTENT_TYPE=application/zip; fi
           aws s3 cp "$ASSET" "s3://${S3_BUCKET}/${ASSET}" \
             --endpoint-url "$S3_ENDPOINT_URL" \
-            --content-type "application/gzip"
+            --content-type "$CONTENT_TYPE"
           aws s3 cp "$ASSET.sha256" "s3://${S3_BUCKET}/${ASSET}.sha256" \
             --endpoint-url "$S3_ENDPOINT_URL" \
             --content-type "text/plain"
@@ -389,7 +391,9 @@ jobs:
           # the manifest is guaranteed to match what's actually published.
           get_sha() {
             local os="$1" arch="$2"
-            local key="lns-${VERSION}-${os}-${arch}.tar.gz.sha256"
+            local extension=tar.gz
+            if [ "$os" = darwin ]; then extension=zip; fi
+            local key="lns-${VERSION}-${os}-${arch}.${extension}.sha256"
             aws s3 cp "s3://${S3_BUCKET}/${key}" "${tmp}/${os}-${arch}.sha256" \
               --endpoint-url "$S3_ENDPOINT_URL" >/dev/null
             awk '{print $1}' "${tmp}/${os}-${arch}.sha256"
@@ -403,7 +407,7 @@ jobs:
             "tag": "${TAG}",
             "platforms": {
               "darwin-aarch64": {
-                "url": "${CDN_BASE}/lns-${VERSION}-darwin-aarch64.tar.gz",
+                "url": "${CDN_BASE}/lns-${VERSION}-darwin-aarch64.zip",
                 "sha256": "${DARWIN_AARCH64_SHA}"
               },
               "linux-aarch64": {

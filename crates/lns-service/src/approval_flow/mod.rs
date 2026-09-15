@@ -1,9 +1,11 @@
 pub mod answering;
 pub mod entries;
+pub mod inbox;
 pub mod notification;
 pub mod offline;
 pub mod protocol;
 pub mod session;
 pub mod system_font;
 pub mod watcher;
+#[cfg(not(target_os = "macos"))]
 pub mod window;

@@ -56,12 +56,14 @@ pub trait LoginAgent {
 }
 
 pub trait Fs {
+    fn quit_application(&self, path: &Path) -> LocalBoxFuture<'_, std::io::Result<()>>;
     fn remove_file(&self, path: &Path) -> LocalBoxFuture<'_, std::io::Result<()>>;
     fn remove_dir_all(&self, path: &Path) -> LocalBoxFuture<'_, std::io::Result<()>>;
 }
 
 #[derive(Default)]
 pub struct UninstallPlan {
+    pub application: Option<PathBuf>,
     pub binaries: Vec<PathBuf>,
     pub purge_dirs: Vec<PathBuf>,
     pub purge_files: Vec<PathBuf>,
@@ -241,6 +243,11 @@ async fn remove_binaries(
     plan: &UninstallPlan,
     writer: &mut impl Write,
 ) -> Result<()> {
+    if let Some(app) = &plan.application {
+        fs.quit_application(app)
+            .await
+            .context("quitting the native interface before uninstall")?;
+    }
     for bin in &plan.binaries {
         match fs.remove_file(bin).await {
             Ok(()) => writeln!(writer, "removed {}", bin.display())?,
@@ -254,6 +261,9 @@ async fn remove_binaries(
                 });
             }
         }
+    }
+    if let Some(app) = &plan.application {
+        removed(fs.remove_dir_all(app).await, app, writer)?;
     }
     Ok(())
 }
@@ -443,6 +453,9 @@ mod tests {
     }
 
     impl Fs for FakeFs {
+        fn quit_application(&self, _path: &Path) -> LocalBoxFuture<'_, std::io::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
         fn remove_file(&self, path: &Path) -> LocalBoxFuture<'_, std::io::Result<()>> {
             let r = self.outcome(path);
             Box::pin(async move { r })
@@ -476,8 +489,27 @@ mod tests {
         UninstallArgs { purge, yes }
     }
 
+    #[tokio::test]
+    async fn native_uninstall_removes_the_whole_app_after_its_cli_links() {
+        let fs = FakeFs::default();
+        let plan = UninstallPlan {
+            application: Some("/Applications/LNS.app".into()),
+            binaries: vec!["/Users/a/.local/bin/lns".into()],
+            ..Default::default()
+        };
+        remove_binaries(&fs, &plan, &mut Vec::new()).await.unwrap();
+        assert_eq!(
+            fs.removed(),
+            vec![
+                PathBuf::from("/Users/a/.local/bin/lns"),
+                PathBuf::from("/Applications/LNS.app")
+            ]
+        );
+    }
+
     fn plan_with_binaries(binaries: &[&str]) -> UninstallPlan {
         UninstallPlan {
+            application: None,
             binaries: binaries.iter().map(PathBuf::from).collect(),
             ..UninstallPlan::default()
         }
@@ -947,6 +979,7 @@ mod tests {
     #[tokio::test]
     async fn purge_removes_the_one_directory_and_the_socket_then_the_binaries() {
         let plan = UninstallPlan {
+            application: None,
             binaries: vec![PathBuf::from("/bin/lns")],
             purge_dirs: vec![PathBuf::from("/home/me/.lns")],
             purge_files: vec![PathBuf::from("/run/user/1000/lns/service.log")],
@@ -1001,6 +1034,7 @@ mod tests {
             FakeFs::default(),
         );
         let plan = UninstallPlan {
+            application: None,
             binaries: vec![PathBuf::from("/bin/lns")],
             purge_dirs: vec![
                 PathBuf::from("/home/me/.lns"),
@@ -1043,6 +1077,7 @@ mod tests {
     #[tokio::test]
     async fn purge_surfaces_a_data_removal_error_and_skips_binaries() {
         let plan = UninstallPlan {
+            application: None,
             binaries: vec![PathBuf::from("/bin/lns")],
             purge_dirs: vec![PathBuf::from("/cache/lns")],
             ..UninstallPlan::default()
@@ -1068,6 +1103,7 @@ mod tests {
     #[tokio::test]
     async fn purge_tolerates_already_removed_data() {
         let plan = UninstallPlan {
+            application: None,
             binaries: vec![PathBuf::from("/bin/lns")],
             purge_dirs: vec![PathBuf::from("/home/me/.lns")],
             purge_files: vec![PathBuf::from("/run/user/1000/lns/service.log")],

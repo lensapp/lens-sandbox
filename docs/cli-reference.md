@@ -305,6 +305,11 @@ See [Running workloads — volumes](running-workloads.md#volumes).
 Decide what this machine offers. A connector is a mixin you install once per
 machine.
 
+A connector can set `spec.description` to explain what it lets a sandbox do.
+The macOS connector card shows this text; without it, the description row is
+omitted. The description grants no access and does not replace the grant's
+disclosure of destinations, credentials, and files.
+
 ```bash
 lns connector install <REF|PATH>
 lns connector uninstall <ID>
@@ -504,8 +509,8 @@ after. The list also shows lines that ask
 nothing, such as a rule the run could not write; each is listed as a notice, with
 no verdict to give.
 
-The service shows the same entries. Its tray menu opens an **Approvals** view,
-one row per question. Open a row to answer it, the way this command does. An open
+The desktop interface shows the same entries. Open **Approvals** in the native
+macOS app or the Linux service's tray menu to see one row per question. Open a row to answer it, the way this command does. An open
 connector row offers the grant its card offered — a method, a connection, and the
 same disclosure — so a connector card you closed is answered where you found it.
 This command lists a connector entry without deciding it; `lns connector grant`

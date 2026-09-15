@@ -3,7 +3,7 @@
 Installs the [lns](https://github.com/lensapp/lens-sandbox) CLI on a GitHub
 Actions runner.
 
-The action reads this repository's releases, downloads the tarball for the
+The action reads this repository's releases, downloads the archive for the
 runner's platform, verifies the `.sha256` published beside it, extracts only
 `lns` into `$RUNNER_TOOL_CACHE` and appends that directory to `GITHUB_PATH`. It
 never runs the get.lns.run installer, and it never installs `lns-service` — a
@@ -49,7 +49,10 @@ repository when you want a newer CLI; omit it to follow the newest release.
 | --- | --- |
 | Linux x86_64 | `lns-<version>-linux-x86_64.tar.gz` |
 | Linux aarch64 | `lns-<version>-linux-aarch64.tar.gz` |
-| macOS arm64 | `lns-<version>-darwin-aarch64.tar.gz` |
+| macOS arm64 | `lns-<version>-darwin-aarch64.zip` |
 
 Any other platform fails the step: no lns release covers it. Checksums are
 verified with `sha256sum` on Linux and `shasum -a 256` on macOS.
+
+On macOS the action extracts only the CLI helper from the native app ZIP.
+Pinned releases published before the native app use their original tarball.

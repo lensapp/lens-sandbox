@@ -401,8 +401,8 @@ answer you gave is listed with the verdict it got.
 A connector card is listed from the moment it is raised too: undecided until you
 answer it, granted or declined after.
 
-Two surfaces read that list. The service's tray menu has an **Approvals** item
-that lists the entries and answers them. At your terminal, `lns approval ls`
+Two surfaces read that list. Open **Approvals** in the native macOS app or
+the Linux service's tray menu to list the entries and answer them. At your terminal, `lns approval ls`
 reads the list and `lns approval answer` answers an entry, or answers it again:
 
 - **always-allow** and **always-deny** write the rule, or rewrite it, and a

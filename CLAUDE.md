@@ -8,7 +8,7 @@ LNS is a local desktop app for running AI agents, commands, OCI images, and othe
 - **Target format:** `docs/sandbox-spec.md` is the normative specification for the `lns.run/v1` document format and the decisions behind it. **The code does not implement all of it** — see [Transitional mode](#transitional-mode) before you touch a document-format surface.
 - **Sibling product:** Lens Agents is the centrally managed counterpart for IT teams. Same policy model.
 
-Before proposing new features or architecture, consider whether they preserve the core principles: **a sandbox you don't turn off**, **disposable, never leaky** (a run's state never escapes the sandbox; stopped runs persist until removed, and one `prune` sweeps them all away), **no system dependencies** (the user runs one binary; no apt/brew preflight, no privileged installer), **policy you run into, not write**, **the working directory only roots relative paths**, **real secrets stay outside the workload**. A small user-launched background service (the tray-resident `lns-service`, started by `lns service start` and stoppable via the tray Quit menu or `lns service stop`) is part of "a sandbox you don't turn off" — not a daemon in the apt/launchd sense.
+Before proposing new features or architecture, consider whether they preserve the core principles: **a sandbox you don't turn off**, **disposable, never leaky** (a run's state never escapes the sandbox; stopped runs persist until removed, and one `prune` sweeps them all away), **no system dependencies** (the user runs one binary; no apt/brew preflight, no privileged installer), **policy you run into, not write**, **the working directory only roots relative paths**, **real secrets stay outside the workload**. A small user-launched background service (`lns-service`, started by the native macOS app or `lns service start` and stoppable from the native app, the Linux tray, or `lns service stop`) is part of "a sandbox you don't turn off" — not a daemon in the apt/launchd sense.
 
 ## Transitional mode
 
@@ -41,7 +41,7 @@ Monorepo. A Cargo workspace (production crates, two operator tools, two test/cov
 | Package | Purpose |
 |---------|---------|
 | `crates/lns-cli` | The `lns` developer CLI — thin clap-driven IPC client that drives the daemon. The shipping artifact. |
-| `crates/lns-service` | Tray-resident background service. Owns the microVM lifecycle, OCI ingest, content / layer caches, supervisor relay, and audit-chain writer; exposes a local Unix-socket IPC. |
+| `crates/lns-service` | Background service with a native macOS app and a Linux tray interface. Owns the microVM lifecycle, OCI ingest, content / layer caches, supervisor relay, and audit-chain writer; exposes a local Unix-socket IPC. |
 | `crates/lns-ipc` | Shared `Request`/`Response` types and wire-format codec for the lns-cli ↔ lns-service contract. |
 | `crates/lns-spec` | The `lns.run/v1` document grammar — the shared definitions every `kind` is built from (`docs/sandbox-spec.md`). |
 | `crates/lns-policy` | Policy schema — file-format types shared between lns-service (enforcement) and lns-cli (run-summary introspection). |

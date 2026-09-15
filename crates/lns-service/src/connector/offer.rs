@@ -37,6 +37,7 @@ mod tests {
 
     fn connector(name: &str, serves: &[&str]) -> ConnectorView {
         ConnectorView {
+            description: None,
             name: name.to_string(),
             digest: "sha256:abc".to_string(),
             serves: serves.iter().map(|s| s.to_string()).collect(),

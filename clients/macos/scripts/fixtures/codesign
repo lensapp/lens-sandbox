@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$BUNDLE_SIGN_LOG"
+if [ "${BUNDLE_SIGN_FAIL:-0}" = 1 ]; then exit 1; fi

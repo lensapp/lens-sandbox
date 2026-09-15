@@ -9,9 +9,10 @@ use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
+use crate::approval_flow::inbox::{ApprovalInbox, Snapshot, StackItem};
 use crate::approval_flow::protocol::Decision;
 use crate::approval_flow::session::{ConnectAsk, ConnectionChoice, PendingPrompt};
-use crate::approval_flow::window::{self, Snapshot, StackItem, WindowState};
+use crate::approval_flow::window;
 use crate::shutdown::Shutdown;
 use crate::ui::{Button, ButtonKind, theme};
 
@@ -32,6 +33,21 @@ const PILE_INSET: f32 = 10.0;
 const PILE_MAX_LEDGES: usize = 2;
 const PILE_HEADER_H: f32 = 19.0;
 const PILE_HEADER_BUTTON_CENTER: f32 = 16.0;
+
+pub async fn watch_approvals(
+    mut updates: tokio::sync::watch::Receiver<lns_ipc::LiveApprovalSnapshot>,
+    shutdown: Arc<Shutdown>,
+) {
+    loop {
+        tokio::select! {
+            changed = updates.changed() => {
+                if changed.is_err() { return; }
+                if let Some(ctx) = window::ctx() { ctx.request_repaint(); }
+            }
+            _ = shutdown.wait_async() => return,
+        }
+    }
+}
 
 /// Builds the tray icon + Quit menu and installs the global menu-event handler (Quit signals shutdown); `on_event` lets the caller repaint after any menu event.
 fn build_tray_icon(
@@ -61,9 +77,6 @@ fn build_tray_icon(
         .with_menu(Box::new(menu))
         .with_tooltip("LNS")
         .with_icon(icon);
-    // Template rendering (monochrome mask adapting to the menu bar) is a macOS concept; on Linux the recolored icon is shown as-is.
-    #[cfg(target_os = "macos")]
-    let builder = builder.with_icon_as_template(true);
     let tray = builder.build().context("build tray icon")?;
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -73,7 +86,7 @@ fn build_tray_icon(
             _ => None,
         };
         if let Some(view) = opens {
-            crate::dashboard::live::request_open(view);
+            crate::dashboard::live::desktop::request_open(view);
             if let Some(ctx) = window::ctx() {
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
@@ -135,17 +148,16 @@ fn approval_viewport() -> egui::ViewportBuilder {
 pub fn run_tray(
     shutdown: Arc<Shutdown>,
     ipc_handle: JoinHandle<anyhow::Result<()>>,
-    window_state: Arc<WindowState>,
+    window_state: Arc<ApprovalInbox>,
 ) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let gtk_tray = spawn_gtk_tray(shutdown.clone());
 
-    let mut native_options = eframe::NativeOptions {
+    let native_options = eframe::NativeOptions {
         viewport: approval_viewport(),
         run_and_return: true,
         ..Default::default()
     };
-    install_activation_policy(&mut native_options);
 
     let app_shutdown = shutdown.clone();
     let result = eframe::run_native(
@@ -182,9 +194,6 @@ fn display_present_with(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> boo
     if env("LNS_HEADLESS").is_some_and(|v| !v.is_empty() && v != "0") {
         return false;
     }
-    if cfg!(target_os = "macos") {
-        return true;
-    }
     has_linux_display(|key| env(key).is_some())
 }
 
@@ -209,9 +218,7 @@ pub fn run_headless(
 
 struct TrayApp {
     shutdown: Arc<Shutdown>,
-    window_state: Arc<WindowState>,
-    #[cfg(target_os = "macos")]
-    _tray: tray_icon::TrayIcon,
+    window_state: Arc<ApprovalInbox>,
     placement: ViewportPlacement,
     cards: CardState,
     audit: Arc<Mutex<AuditWindow>>,
@@ -229,15 +236,8 @@ impl TrayApp {
     fn new(
         ctx: egui::Context,
         shutdown: Arc<Shutdown>,
-        window_state: Arc<WindowState>,
+        window_state: Arc<ApprovalInbox>,
     ) -> anyhow::Result<Self> {
-        // Linux owns the tray on a dedicated gtk-main thread (spawn_gtk_tray); only macOS builds it in-app.
-        #[cfg(target_os = "macos")]
-        let _tray = {
-            let menu_ctx = ctx.clone();
-            build_tray_icon(shutdown.clone(), move || menu_ctx.request_repaint())?
-        };
-
         let watch_shutdown = shutdown.clone();
         let watch_ctx = ctx;
         std::thread::spawn(move || {
@@ -248,8 +248,6 @@ impl TrayApp {
         Ok(Self {
             shutdown,
             window_state,
-            #[cfg(target_os = "macos")]
-            _tray,
             placement: ViewportPlacement::new(),
             cards: CardState::default(),
             audit: Arc::new(Mutex::new(AuditWindow::default())),
@@ -258,7 +256,7 @@ impl TrayApp {
     }
 
     fn render_audit_dashboard(&mut self, ctx: &egui::Context) {
-        if let Some(view) = crate::dashboard::live::take_open_request() {
+        if let Some(view) = crate::dashboard::live::desktop::take_open_request() {
             self.audit_open.store(true, Ordering::Relaxed);
             if let Ok(mut w) = self.audit.lock() {
                 w.state = crate::dashboard::DashboardState::new();
@@ -268,7 +266,7 @@ impl TrayApp {
                 w.focused = false;
             }
             ctx.send_viewport_cmd_to(
-                crate::dashboard::live::viewport_id(),
+                crate::dashboard::live::desktop::viewport_id(),
                 egui::ViewportCommand::Focus,
             );
         }
@@ -278,7 +276,7 @@ impl TrayApp {
         let audit = self.audit.clone();
         let audit_open = self.audit_open.clone();
         ctx.show_viewport_deferred(
-            crate::dashboard::live::viewport_id(),
+            crate::dashboard::live::desktop::viewport_id(),
             crate::dashboard::viewport_builder(),
             move |ui, _class| audit_frame(ui, &audit, &audit_open),
         );
@@ -293,7 +291,7 @@ fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &Atomi
         let vp = i.viewport();
         (vp.focused.unwrap_or(false), vp.close_requested())
     });
-    crate::dashboard::live::set_watching(focused);
+    crate::dashboard::live::desktop::set_watching(focused);
     if let Ok(mut w) = audit.lock() {
         let generation = crate::dashboard::live::generation();
         if (focused && !w.focused) || generation != w.last_gen {
@@ -309,7 +307,7 @@ fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &Atomi
     }
     if close_requested {
         audit_open.store(false, Ordering::Relaxed);
-        crate::dashboard::live::set_watching(false);
+        crate::dashboard::live::desktop::set_watching(false);
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
     }
@@ -354,8 +352,6 @@ impl ViewportPlacement {
                 // A seed height keeps the reveal frame (which skips ui()) close to size; ui() then snaps the window to its measured content so no estimate slop shows as bottom padding.
                 let monitor_height = ctx.input(|i| i.viewport().monitor_size).map(|m| m.y);
                 let seed = target_height(order, monitor_height);
-                join_all_spaces();
-                set_window_shadows(true);
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                     WINDOW_WIDTH,
@@ -374,7 +370,6 @@ impl ViewportPlacement {
                 ctx.request_repaint();
             }
             VisibilityTransition::Hide => {
-                set_window_shadows(false);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
                 self.last_visible = false;
@@ -469,8 +464,6 @@ impl eframe::App for TrayApp {
             }
             None => {}
         }
-
-        refresh_window_shadows();
     }
 }
 
@@ -762,7 +755,7 @@ fn pile_scroll_offset(
 }
 
 /// Dismisses every card the pile is showing; `pub` so a behavioural test drives the same fan-out the header ✕ does rather than deciding each card itself.
-pub fn close_all(state: &WindowState, snapshot: &Snapshot) {
+pub fn close_all(state: &ApprovalInbox, snapshot: &Snapshot) {
     let mut had_inform = false;
     for item in &snapshot.order {
         match close_action(item, snapshot) {
@@ -778,7 +771,7 @@ pub fn close_all(state: &WindowState, snapshot: &Snapshot) {
 }
 
 /// The single place a closed card becomes a non-decision, shared by the per-card ✕ and the pile's close-all.
-fn apply_dismissal(state: &WindowState, dismissal: &Dismissal) {
+fn apply_dismissal(state: &ApprovalInbox, dismissal: &Dismissal) {
     match dismissal {
         Dismissal::Network { id } => {
             state.dismiss(id);
@@ -2052,71 +2045,6 @@ fn visibility_transition(should_show: bool, last_visible: bool) -> VisibilityTra
     }
 }
 
-#[cfg(target_os = "macos")]
-pub fn install_activation_policy(opts: &mut eframe::NativeOptions) {
-    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
-    opts.event_loop_builder = Some(Box::new(|builder| {
-        builder.with_activation_policy(ActivationPolicy::Accessory);
-    }));
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn install_activation_policy(_opts: &mut eframe::NativeOptions) {}
-
-/// Lets the always-on-top approval window appear on whichever macOS Space is active — including a full-screen app's Space — instead of staying pinned to the desktop it was created on.
-#[cfg(target_os = "macos")]
-fn join_all_spaces() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSWindowCollectionBehavior};
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        crate::log::warn!("skipped tray-window Space behavior: not on the main thread");
-        return;
-    };
-    let extra = NSWindowCollectionBehavior::CanJoinAllSpaces
-        | NSWindowCollectionBehavior::FullScreenAuxiliary;
-    for window in NSApplication::sharedApplication(mtm).windows().iter() {
-        window.setCollectionBehavior(window.collectionBehavior() | extra);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn join_all_spaces() {}
-
-/// A transparent window's shadow recomputes only on resize, never on a same-size repaint, so a scrolled card needs explicit per-frame invalidation or its shadow freezes at the old position.
-#[cfg(target_os = "macos")]
-pub fn refresh_window_shadows() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSApplication;
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    for window in NSApplication::sharedApplication(mtm).windows().iter() {
-        window.invalidateShadow();
-    }
-}
-
-/// Dropped before the hide so the card-shaped shadow can't outlive the window; re-enabled on the next show.
-#[cfg(target_os = "macos")]
-fn set_window_shadows(enabled: bool) {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSApplication;
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    for window in NSApplication::sharedApplication(mtm).windows().iter() {
-        window.setHasShadow(enabled);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn set_window_shadows(_enabled: bool) {}
-
-#[cfg(not(target_os = "macos"))]
-pub fn refresh_window_shadows() {}
-
 fn load_icon() -> anyhow::Result<Icon> {
     const ICON_BYTES: &[u8] = include_bytes!("../assets/lnsTemplate@2x.png");
     let decoder = png::Decoder::new(ICON_BYTES);
@@ -2347,6 +2275,7 @@ mod tests {
                 treatment: Treatment::Inspected,
                 run: Some("my-agent".into()),
                 offer: Some(lns_ipc::ConnectorView {
+                    description: None,
                     name: "some-provider".into(),
                     digest: "sha256:abc".into(),
                     serves: vec!["api.some-provider.example".into()],
@@ -2767,6 +2696,7 @@ mod tests {
 
     fn installed_at(digest: &str) -> lns_ipc::ConnectorView {
         lns_ipc::ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: digest.into(),
             serves: Vec::new(),
@@ -3183,6 +3113,7 @@ mod tests {
 
     fn holding(labels: &[&str]) -> lns_ipc::ConnectorView {
         lns_ipc::ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: "sha256:abc".into(),
             serves: Vec::new(),
@@ -3257,7 +3188,7 @@ mod tests {
 
     #[test]
     fn closing_every_card_at_once_decides_nothing() {
-        let state = WindowState::new();
+        let state = ApprovalInbox::new();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         state.insert_pending(
             PendingPrompt {
@@ -3280,7 +3211,7 @@ mod tests {
             .expect("close-all must resolve every held request");
         assert_eq!(
             delivery.action,
-            crate::approval_flow::window::RequestAction::Dismiss,
+            crate::approval_flow::inbox::RequestAction::Dismiss,
             "one click on close-all must not permanently deny every held request in the stack"
         );
     }
