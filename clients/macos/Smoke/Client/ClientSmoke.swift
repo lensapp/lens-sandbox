@@ -43,6 +43,7 @@ struct ClientSmoke {
         let snapshot = try await client.dashboard()
         try require(snapshot.sandboxes.contains { $0.name == "quiet_river" }, "historical sandbox missing")
         try require(snapshot.events.count == 1, "audit event missing")
+        try require(snapshot.warnings.contains { $0.contains("too large") }, "oversized audit row was not reported")
         try require(snapshot.warnings.contains { $0.contains("anchor") }, "integrity warning missing")
         try require(snapshot.approvals.contains { $0.id == id }, "approval history missing")
         stage = "answer history"

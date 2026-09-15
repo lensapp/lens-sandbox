@@ -54,6 +54,13 @@ with tempfile.TemporaryDirectory(prefix="lns-ui-", dir="/tmp") as directory:
         "message": "launch alpine:3.20", "prev_hash": "0" * 64,
         "unmapped": {"lns_kind": "launch", "lns_run": run, "lns_microvm": "quiet_river", "lns_image": "alpine:3.20", "lns_ts": "2026-09-09T12:00:00Z"},
     }) + "\n")
+    previous = hashlib.sha256((audit_dir / "audit.jsonl").read_bytes().rstrip(b"\n")).hexdigest()
+    with (audit_dir / "audit.jsonl").open("a") as audit:
+        audit.write(json.dumps({
+            "message": "oversized row", "payload": "x" * (1024 * 1024),
+            "prev_hash": previous,
+            "unmapped": {"lns_kind": "launch", "lns_run": run, "lns_ts": "2026-09-09T12:00:01Z"},
+        }) + "\n")
     address = str(root / "service.sock")
     environment = dict(os.environ, LNS_HOME=directory, LNS_SOCKET_PATH=address, LNS_HEADLESS="1", LNS_NO_UPDATE_CHECK="1")
     update_environment = dict(environment, HTTP_PROXY="http://127.0.0.1:9", HTTPS_PROXY="http://127.0.0.1:9", ALL_PROXY="http://127.0.0.1:9", NO_PROXY="")

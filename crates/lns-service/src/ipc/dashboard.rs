@@ -162,7 +162,14 @@ pub async fn write_snapshot<W: AsyncWrite + Unpin>(
     shutdown: &Shutdown,
 ) -> anyhow::Result<()> {
     for response in snapshot_frames(snapshot) {
-        let bytes = lns_ipc::encode_frame(&response)?;
+        let json = serde_json::to_vec(&response)?;
+        let bytes = if json.len() >= lns_ipc::MAX_FRAME_SIZE as usize {
+            lns_ipc::encode_frame(&Response::DashboardWarning {
+                message: "A dashboard item is too large to display and was omitted.".into(),
+            })?
+        } else {
+            lns_ipc::encode_raw_frame(lns_ipc::SUBTYPE_JSON, &json)?
+        };
         tokio::select! {
             result = writer.write_all(&bytes) => result?,
             _ = shutdown.wait_async() => return Ok(()),
@@ -399,7 +406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_closed_dashboard_connection_and_an_oversized_event_are_errors_not_completion() {
+    async fn a_closed_dashboard_connection_is_an_error_not_completion() {
         let (mut writer, client) = tokio::io::duplex(1);
         drop(client);
         assert!(
@@ -407,19 +414,37 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_dashboard_items_are_reported_without_losing_the_remaining_snapshot() {
+        let large = "x".repeat(lns_ipc::MAX_FRAME_SIZE as usize);
+        let snapshot = assemble(
+            vec![DashboardSandbox {
+                id: "large".into(),
+                name: large.clone(),
+                image: "image".into(),
+                status: "running".into(),
+            }],
+            lns_audit::Timeline {
+                rows: vec![audit_row("run-1", &large), audit_row("run-1", "readable")],
+                warnings: vec![large, "readable warning".into()],
+            },
+            vec![],
+        );
         let mut writer = Vec::new();
-        let huge = Snapshot {
-            warnings: vec!["x".repeat(lns_ipc::MAX_FRAME_SIZE as usize)],
-            ..Default::default()
-        };
-        assert!(
-            write_snapshot(&mut writer, huge, &Shutdown::new())
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            writer,
-            lns_ipc::encode_frame(&Response::DashboardBegin).unwrap()
-        );
+        write_snapshot(&mut writer, snapshot, &Shutdown::new())
+            .await
+            .unwrap();
+        let mut bytes = writer.as_slice();
+        let mut frames = Vec::new();
+        while !bytes.is_empty() {
+            frames.push(lns_ipc::decode_frame::<Response, _>(&mut bytes).unwrap());
+        }
+        assert_eq!(frames.first(), Some(&Response::DashboardBegin));
+        assert_eq!(frames.last(), Some(&Response::DashboardEnd));
+        assert!(frames.iter().any(|frame| matches!(frame, Response::DashboardEvent { event } if event.detail == "readable")));
+        assert!(frames.iter().any(|frame| matches!(frame, Response::DashboardWarning { message } if message == "readable warning")));
+        assert_eq!(frames.iter().filter(|frame| matches!(frame, Response::DashboardWarning { message } if message.contains("too large"))).count(), 3);
     }
 }
