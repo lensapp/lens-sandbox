@@ -7,7 +7,9 @@ function run(argv) {
         const app = running.objectAtIndex(i);
         if (ObjC.unwrap(app.bundleIdentifier) !== 'run.lns.desktop') continue;
         if (ObjC.unwrap(app.bundleURL.path.stringByResolvingSymlinksInPath) !== destination) continue;
-        if (!app.terminate) throw new Error('LNS did not accept the quit request.');
+        // JXA invokes zero-argument Objective-C methods on property access.
+        const quitAccepted = app.terminate;
+        if (!quitAccepted) throw new Error('LNS did not accept the quit request.');
         for (let attempt = 0; attempt < 100 && !app.isTerminated; attempt++) {
             $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.1));
         }
