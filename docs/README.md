@@ -54,7 +54,7 @@ command surface are becoming.
 ## How it fits together
 
 ```text
-lns (CLI)  ──local Unix socket──▶  lns-service (tray-resident background service)
+lns (CLI)  ──local Unix socket──▶  lns-service (background service)
                                        │
                                        ▼
                                    microVM  (Apple Virtualization, macOS on Apple Silicon)
