@@ -321,6 +321,7 @@ coverage-lcov:
 # LNS_SERVICE_BIN. Excluded from the coverage gate (spawns real
 # subprocesses with side effects).
 e2e:
+	$(CARGO) test -p e2e-tests --test artifact_filesystem
 	$(CARGO) build -p lns-cli -p lns-service
 	$(CARGO) test -p e2e-tests --test specutil_env
 	@LNS_BIN=$(CARGO_TARGET_DIR)/debug/lns \
