@@ -170,8 +170,9 @@ and timestamping. `make notarize` uses a `NOTARY_PROFILE` keychain profile to
 submit the app, staple and validate Apple's ticket, and recreate the ZIP.
 Updates are initiated explicitly with `lns update`.
 
-Branch pushes run a macOS build and bundle smoke check, then retain a zipped app
-as a GitHub Actions artifact for seven days. These are development artifacts,
+The required `macos-ui` CI job verifies, packages, and smoke-tests the app on
+pull requests and main-branch pushes that change the native app or its dependencies.
+It retains a zipped app as a GitHub Actions artifact for seven days. These are development artifacts,
 not notarized public releases. The smoke check uses an isolated temporary home
 and socket; it does not start a guest or touch installed service data.
 
@@ -346,7 +347,10 @@ The `release` GitHub environment supplies these secrets to the macOS release job
 | `MACOS_NOTARY_KEY_ID` | API key ID |
 | `MACOS_NOTARY_ISSUER_ID` | API issuer ID |
 
-The installer publication job also requires `MACOS_TEAM_ID`. The workflow embeds
+Native installer publication also requires `MACOS_TEAM_ID`. An explicit
+`force_deploy_install` rollback to a pre-native tag republishes that historical
+script unchanged, without the macOS signing secrets. Native rollback tags keep
+the same strict signing configuration checks as new releases. The workflow embeds
 it into the public installer and the bundled installer before compiling the CLI,
 so updates use the same pinned team. A missing or malformed team stops publication;
 the signed app must also pass that team's certificate requirement. Local ad-hoc
