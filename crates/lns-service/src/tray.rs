@@ -86,7 +86,7 @@ fn build_tray_icon(
             _ => None,
         };
         if let Some(view) = opens {
-            crate::dashboard::live::request_open(view);
+            crate::dashboard::live::desktop::request_open(view);
             if let Some(ctx) = window::ctx() {
                 ctx.request_repaint_of(egui::ViewportId::ROOT);
             }
@@ -256,7 +256,7 @@ impl TrayApp {
     }
 
     fn render_audit_dashboard(&mut self, ctx: &egui::Context) {
-        if let Some(view) = crate::dashboard::live::take_open_request() {
+        if let Some(view) = crate::dashboard::live::desktop::take_open_request() {
             self.audit_open.store(true, Ordering::Relaxed);
             if let Ok(mut w) = self.audit.lock() {
                 w.state = crate::dashboard::DashboardState::new();
@@ -266,7 +266,7 @@ impl TrayApp {
                 w.focused = false;
             }
             ctx.send_viewport_cmd_to(
-                crate::dashboard::live::viewport_id(),
+                crate::dashboard::live::desktop::viewport_id(),
                 egui::ViewportCommand::Focus,
             );
         }
@@ -276,7 +276,7 @@ impl TrayApp {
         let audit = self.audit.clone();
         let audit_open = self.audit_open.clone();
         ctx.show_viewport_deferred(
-            crate::dashboard::live::viewport_id(),
+            crate::dashboard::live::desktop::viewport_id(),
             crate::dashboard::viewport_builder(),
             move |ui, _class| audit_frame(ui, &audit, &audit_open),
         );
@@ -291,7 +291,7 @@ fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &Atomi
         let vp = i.viewport();
         (vp.focused.unwrap_or(false), vp.close_requested())
     });
-    crate::dashboard::live::set_watching(focused);
+    crate::dashboard::live::desktop::set_watching(focused);
     if let Ok(mut w) = audit.lock() {
         let generation = crate::dashboard::live::generation();
         if (focused && !w.focused) || generation != w.last_gen {
@@ -307,7 +307,7 @@ fn audit_frame(ui: &mut egui::Ui, audit: &Mutex<AuditWindow>, audit_open: &Atomi
     }
     if close_requested {
         audit_open.store(false, Ordering::Relaxed);
-        crate::dashboard::live::set_watching(false);
+        crate::dashboard::live::desktop::set_watching(false);
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
     }
