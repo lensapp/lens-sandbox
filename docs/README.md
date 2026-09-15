@@ -7,7 +7,7 @@ policy you control. Known requests are allowed or denied immediately; anything
 unknown pauses for your approval; and your decisions can be saved to a policy file
 that future runs reuse.
 
-You drive everything through one binary: the `lns` CLI.
+Use the native LNS app on macOS or the `lns` CLI to control the sandbox.
 
 ## Start here
 
@@ -62,5 +62,7 @@ lns (CLI)  ──local Unix socket──▶  lns-service (tray-resident backgrou
 ```
 
 `lns` is a thin client. The `lns-service` background process owns the microVM
-lifecycle, the image and layer caches, the approval window, and the audit writer.
+lifecycle, the image and layer caches, pending approvals, and the audit writer.
+The native macOS app renders the desktop interface through the same local socket;
+Linux uses the service's tray interface.
 Start it once with `lns service start`; `lns run` talks to it over a local socket.

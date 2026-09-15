@@ -105,7 +105,12 @@ pub fn service_command<'a>(matches: &'a clap::ArgMatches, ctx: RunCtx<'a>) -> Ru
 pub async fn dispatch(cmd: &super::ServiceCommand, writer: &mut dyn std::io::Write) -> Result<()> {
     let client = real_client()?;
     match cmd {
-        super::ServiceCommand::Start => super::cmd_start(&client).await,
+        super::ServiceCommand::Start => {
+            super::cmd_start(&client).await?;
+            #[cfg(target_os = "macos")]
+            real::open_native_interface(&super::find_service_binary(), client.socket()).await?;
+            Ok(())
+        }
         super::ServiceCommand::Stop => super::cmd_stop(&client).await,
         super::ServiceCommand::Status(args) => super::cmd_status(&client, args, writer).await,
         super::ServiceCommand::Enable => super::cmd_enable(&client).await,

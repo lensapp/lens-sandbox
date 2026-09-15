@@ -47,3 +47,6 @@ if sh "$bundle_scripts/bundle.sh" "$bundle_scripts/fixtures/lns" "$bundle_test_r
     echo 'FAIL: mismatched CLI version was packaged' >&2; exit 1
 fi
 echo 'PASS: invalid metadata and mismatched helpers are refused'
+grep 'service.entitlements.*Contents/Helpers/lns-service' "$BUNDLE_SIGN_LOG" >/dev/null || {
+    echo 'FAIL: the hardened service lacks its JIT entitlement for connector components' >&2; exit 1;
+}

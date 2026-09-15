@@ -11,6 +11,8 @@ test: shell-tests
 
 shell-tests:
 	sh scripts/bundle.test.sh
+	sh scripts/install.test.sh
+	sh scripts/notarize.test.sh
 
 build:
 	@test "$$(uname -s)" = Darwin || { echo 'Building LNS.app requires macOS and Xcode.' >&2; exit 1; }
@@ -19,7 +21,8 @@ build:
 
 package:
 	@test "$$(uname -s)" = Darwin || { echo 'Packaging LNS.app requires macOS and Xcode.' >&2; exit 1; }
-	$(MAKE) -C ../.. build CARGO_LOCKED=--locked
+	sh scripts/runtime.test.sh
+	$(MAKE) -C ../.. build-lns build-lns-service CARGO_LOCKED=--locked
 	$(SWIFT) build -c release --product LNS
 	SIGN_IDENTITY="$(SIGN_IDENTITY)" sh scripts/bundle.sh .build/release/LNS dist "$(VERSION)" "$(BUILD_NUMBER)" "$(HELPER_DIR)"
 	ditto -c -k --sequesterRsrc --keepParent dist/LNS.app dist/LNS-macos.zip
@@ -42,3 +45,7 @@ icon-smoke: build
 	python3 Smoke/icons.py .build/LNSIconSmoke dist/LNS.app
 
 verify: test icon-smoke transport-smoke launch-smoke
+
+.PHONY: notarize
+notarize:
+	sh scripts/notarize.sh dist/LNS.app dist/LNS-macos.zip

@@ -4,6 +4,21 @@ use lns_audit::TimelineRow;
 
 use super::Sandbox;
 
+pub fn from_summaries(runs: Vec<lns_ipc::RunSummary>) -> Vec<Sandbox> {
+    runs.into_iter()
+        .map(|run| Sandbox {
+            id: run.id,
+            name: run.name,
+            image: run.image,
+            status: match run.status {
+                lns_ipc::RunStatus::Running => "running",
+                lns_ipc::RunStatus::Exited { .. } => "exited",
+            }
+            .to_string(),
+        })
+        .collect()
+}
+
 pub fn merge_sandboxes(active: &[Sandbox], rows: &[TimelineRow]) -> Vec<Sandbox> {
     let mut out: Vec<Sandbox> = Vec::new();
     let mut index: HashMap<&str, usize> = HashMap::new();
@@ -60,6 +75,38 @@ fn row_image(row: &TimelineRow) -> String {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn live_and_stopped_runs_keep_their_identity_and_state_for_external_clients() {
+        let runs = [
+            lns_ipc::RunStatus::Running,
+            lns_ipc::RunStatus::Exited { code: 1 },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, status)| lns_ipc::RunSummary {
+            id: i.to_string(),
+            name: format!("sandbox-{i}"),
+            image: "image".into(),
+            command: "sh".into(),
+            status,
+            created: String::new(),
+            started: String::new(),
+        })
+        .collect();
+        let sandboxes = from_summaries(runs);
+        assert_eq!(
+            (
+                sandboxes[0].id.as_str(),
+                sandboxes[0].name.as_str(),
+                sandboxes[0].image.as_str(),
+                sandboxes[0].status.as_str()
+            ),
+            ("0", "sandbox-0", "image", "running")
+        );
+        assert_eq!(sandboxes[1].status, "exited");
+        assert!(from_summaries(Vec::new()).is_empty());
+    }
 
     fn row(run: &str) -> TimelineRow {
         TimelineRow {

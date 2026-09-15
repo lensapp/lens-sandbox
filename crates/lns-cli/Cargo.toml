@@ -21,6 +21,7 @@ name = "lns"
 path = "src/main.rs"
 
 [dependencies]
+tempfile = "3"
 clap       = { version = "4", features = ["derive"] }
 lns-ipc    = { path = "../lns-ipc" }
 lns-artifact = { path = "../lns-artifact" }
@@ -51,7 +52,6 @@ tar     = "0.4"
 
 [dev-dependencies]
 lns-ocsf = { path = "../lns-ocsf" }
-tempfile = "3"
 cucumber = "0.23"
 tokio    = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 # `#[serial]` for tests that mutate process-wide env state (LNS_LOG /

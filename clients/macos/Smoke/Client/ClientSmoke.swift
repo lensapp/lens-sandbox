@@ -75,6 +75,8 @@ struct ClientSmoke {
         try require(approvals.approvals.isEmpty, "unexpected live request")
         stage = "configuration preview, live decisions, and save"
         try await verifyConfiguration(client, root: URL(fileURLWithPath: CommandLine.arguments[3]).deletingLastPathComponent())
+        stage = "packaged component sign-in"
+        try await verifyComponentSignIn(client, source: URL(fileURLWithPath: CommandLine.arguments[3]).deletingLastPathComponent().appendingPathComponent("code-connector.yaml").path)
         stage = "shutdown acknowledgment"
         guard case .shuttingDown = try await client.send(.shutdown) else {
             throw ServiceError(message: "shutdown not acknowledged")
@@ -85,6 +87,25 @@ struct ClientSmoke {
         try require(try await live.next() == nil, "shutdown did not close approval subscription")
         stage = "complete"
         print("PASS: Swift client and real service agree on audit, history, configuration, mixin preview, saved definitions, connectors, notifications, and shutdown")
+    }
+
+    static func verifyComponentSignIn(_ client: ServiceConnection, source: String) async throws {
+        guard case .completed = try await client.manage(.install(source)) else {
+            throw ServiceError(message: "component connector installation failed")
+        }
+        guard case let .connectAsk(ask) = try await client.manage(.beginConnect("component-smoke", method: "sign-in", label: "smoke")) else {
+            throw ServiceError(message: "packaged service could not execute the component")
+        }
+        try require(ask.from_code && ask.fields.map(\.name) == ["workspace", "access_token"], "component fields did not reach the native client")
+        try require(!ask.fields[0].secret && ask.fields[1].secret, "component field secrecy was lost")
+        guard case .completed = try await client.manage(.answerConnect(ask.session, values: ["workspace": "test", "access_token": "non-secret-smoke-value"])) else {
+            throw ServiceError(message: "component sign-in did not finish")
+        }
+        guard case let .connectors(connectors) = try await client.manage(.listConnectors) else {
+            throw ServiceError(message: "component connection could not be read back")
+        }
+        try require(connectors.first { $0.name == "component-smoke" }?.connections.contains { $0.label == "smoke" } == true, "component connection was not saved")
+        print("PASS: packaged service executes a component and completes native sign-in")
     }
 
     static func verifyLiveConnectorChanges(_ client: ServiceConnection, source: String) async throws {

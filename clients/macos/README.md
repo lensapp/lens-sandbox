@@ -21,8 +21,8 @@ audit search, event details and copy controls, integrity warnings, and approval
 history grouped into waiting requests and an archive. History rows offer the
 service's persistent answers, connector grants, and removal from the list.
 
-The release installer has not been migrated. This app remains a development
-evaluation, not the default shipping macOS interface.
+This is the macOS interface. The macOS service has no egui, winit, or Rust tray
+rendering dependencies; Linux retains its existing desktop interface.
 
 ## Desktop controls
 
@@ -122,7 +122,7 @@ are coalesced into a fresh post-action read, and canceled reads cannot restore
 an old snapshot. A finite read that stops delivering complete frames times out;
 established subscriptions remain idle without polling.
 
-## Self-contained development bundle
+## Self-contained app bundle
 
 On macOS, build a bundle containing the native interface and release-built
 CLI/service helpers:
@@ -134,18 +134,31 @@ make -C clients/macos smoke
 
 This produces `clients/macos/dist/LNS.app` and `LNS-macos.zip`. Copy the app to
 your user-owned Applications directory, or run it from `dist`. On opening, the
-app runs the bundled `lns service start` against the interface's socket, with the
-Rust UI disabled. That command reuses an already-running service. If startup
+app runs the bundled `lns service start` against the interface's socket. That command reuses an already-running service. If startup
 fails, the app shows the error and offers **Start Service** to retry. It does not register
 a login agent, replace a separately installed CLI, or stop an existing service.
-An already-running service must be from the matching build of this branch.
+An already-running service must have the same release version. Both service
+startup and native client requests reject a different version without stopping
+its workloads.
 
-The helpers live in `LNS.app/Contents/Helpers/`. Use that `lns` executable to run
-workloads against the same socket. The bundled helper refuses `lns update` and
-`lns uninstall` before changing anything: those commands manage loose binaries,
-not signed app bundles. `lns update --dry-run` remains read-only and available.
-Update this evaluation by replacing the entire app after stopping its service;
-remove it by moving the entire app to Trash. Neither operation removes run data.
+The helpers live in `LNS.app/Contents/Helpers/`. The macOS release installer
+places the app in `~/Applications/LNS.app` and links `lns` and `lns-service` from
+`~/.local/bin`. `APP_DIR` selects the parent app directory and `INSTALL_DIR`
+selects the CLI directory. The CLI directory is remembered in the app's macOS
+preferences so updates and uninstall find those links.
+
+`lns update` downloads and checksum-verifies the release ZIP, verifies the app's
+signature and Gatekeeper assessment, stages the complete bundle, closes the
+interface, and stops the service before replacing it. It preserves existing
+login startup and restores the previous app and CLI links if installation or
+startup fails. Updating interrupts running sandboxes. `lns update --force`
+reinstalls the current version; `--dry-run` remains read-only. An older
+loose-binary installation migrates through the current release installer.
+
+`lns uninstall` confirms, stops sandboxes and the service, removes login startup,
+closes the interface, and removes the whole app plus CLI links that still point
+to it. Data stays unless `--purge` was explicitly requested. Moving the app to
+Trash manually does not perform this cleanup.
 
 Packaging signs helpers before the enclosing app and verifies the signatures
 before replacing an existing bundle. Each previous build is retained in a
@@ -153,7 +166,9 @@ printed `.lns-previous.*` directory under `dist` for recovery; remove those
 development backups when no longer needed. `VERSION` defaults to the CLI crate
 version and must agree with the packaged helper. `SIGN_IDENTITY` selects ad-hoc
 signing (the default) or a configured Developer ID identity with hardened runtime
-and timestamping. Notarization and automatic app updates are not configured.
+and timestamping. `make notarize` uses a `NOTARY_PROFILE` keychain profile to
+submit the app, staple and validate Apple's ticket, and recreate the ZIP.
+Updates are initiated explicitly with `lns update`.
 
 Branch pushes run a macOS build and bundle smoke check, then retain a zipped app
 as a GitHub Actions artifact for seven days. These are development artifacts,
@@ -169,8 +184,8 @@ make dev
 make -C clients/macos verify
 ```
 
-Start the matching service build with its existing `LNS_HEADLESS=1` option to
-evaluate the native app without also displaying egui cards. Use a dedicated
+Start the matching service build with `LNS_HEADLESS=1` to keep it from
+opening the app automatically during isolated development. Use a dedicated
 socket directory and data home to avoid sharing run state with an installed
 service. The socket directory is made private; do not put the socket directly
 in a shared directory such as `/tmp`.
@@ -229,9 +244,9 @@ or replaced by the next action. Dismissing it does not repeat or undo the action
 Without an override, the app uses
 `~/Library/Application Support/run.lns/service.sock`.
 
-The app bundle is signed ad hoc for local evaluation. `SIGN_IDENTITY` selects
-another signing identity. Release notarization, installer integration, and
-coordinated app/service updates are still required before shipping it.
+Local bundles are signed ad hoc unless `SIGN_IDENTITY` is set. Public release
+jobs require Developer ID signing and successful notarization; development
+artifacts do not pass the public installer's signature and Gatekeeper checks.
 
 ## Client contract
 
@@ -310,9 +325,35 @@ icons from a relocated app bundle and checks missing-resource reporting.
 Those Foundation-only tests also run on Linux with Swift installed. CI runs
 `verify` on macOS when the native client or its service contract changes.
 
-Before replacing the existing macOS interface, verify a live approval through
+For release acceptance, verify a live approval through
 the actual service and guest, simultaneous clients, reconnect after service
 restart, connector expiry while typing, failed policy writes, VoiceOver,
 keyboard navigation, Spaces, fullscreen, multiple displays, idle resource
 usage, and installation/update behavior. Native platform checks cannot be
 substituted by the Linux test result.
+
+## Release credentials
+
+The `release` GitHub environment supplies these secrets to the macOS release job:
+
+| Secret | Value |
+|---|---|
+| `MACOS_CERTIFICATE_P12` | Base64-encoded Developer ID Application certificate and private key export |
+| `MACOS_CERTIFICATE_PASSWORD` | Password for the P12 export |
+| `MACOS_SIGN_IDENTITY` | Exact Developer ID Application signing identity |
+| `MACOS_NOTARY_KEY_P8` | App Store Connect API private key, as its original multiline text |
+| `MACOS_NOTARY_KEY_ID` | API key ID |
+| `MACOS_NOTARY_ISSUER_ID` | API issuer ID |
+
+The job imports credentials into a temporary keychain, builds the app with the
+release's CLI and service, notarizes and staples it, runs the bundled-service
+smoke check, and publishes `lns-<version>-darwin-aarch64.zip` with its SHA-256 to
+GitHub Releases and the CDN. The latest manifest is published only after all
+platform uploads succeed. Missing credentials, rejected notarization, or failed
+smoke checks stop publication. The temporary keychain and credential files are
+removed when the job step exits.
+
+The service's hardened-runtime entitlement permits unsigned executable memory
+for the Wasmtime component engine's generated code. The native app and CLI do
+not receive that entitlement. Apple documents the distribution process in
+[Customizing the notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).

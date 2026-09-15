@@ -170,6 +170,7 @@ public struct ServiceRequest: Encodable {
     }
 
     public static let watchApprovals = ServiceRequest(type: "WatchApprovals", token: nil, action: nil)
+    public static let status = ServiceRequest(type: "Status")
     public static let shutdown = ServiceRequest(type: "Shutdown", token: nil, action: nil)
     public static let readDashboard = ServiceRequest(type: "ReadDashboard", token: nil, action: nil)
     public static let watchDashboard = ServiceRequest(type: "WatchDashboard", token: nil, action: nil)

@@ -1,7 +1,7 @@
 # lns-actions 0.1.0 # x-release-please-version
 name: Set up lns
 description: >-
-  Installs the lns CLI from this repository's releases: downloads the tarball
+  Installs the lns CLI from this repository's releases: downloads the archive
   for the runner's platform, verifies the .sha256 published beside it, extracts
   only `lns` into the runner tool cache and appends it to PATH. It never runs
   the get.lns.run installer and never installs lns-service.
@@ -87,6 +87,12 @@ runs:
           dest="$RUNNER_TOOL_CACHE/lns/$version/$arch"
           if [ ! -x "$dest/lns" ]; then
             asset="lns-$version-$os-$arch.tar.gz"
+            if [ "$os" = darwin ]; then
+              assets=$(gh release view "$tag" --repo "$RELEASE_REPO" --json assets --jq '.assets[].name')
+              if printf '%s\n' "$assets" | grep -Fxq "lns-$version-$os-$arch.zip"; then
+                asset="lns-$version-$os-$arch.zip"
+              fi
+            fi
             tmp=$(mktemp -d)
             gh release download "$tag" --repo "$RELEASE_REPO" --dir "$tmp" \
               --pattern "$asset" --pattern "$asset.sha256"
@@ -96,7 +102,12 @@ runs:
               (cd "$tmp" && shasum -a 256 -c "$asset.sha256")
             fi
             mkdir -p "$dest"
-            tar xzf "$tmp/$asset" -C "$dest" lns
+            if [[ "$asset" == *.zip ]]; then
+              ditto -x -k "$tmp/$asset" "$tmp/native"
+              install -m 0755 "$tmp/native/LNS.app/Contents/Helpers/lns" "$dest/lns"
+            else
+              tar xzf "$tmp/$asset" -C "$dest" lns
+            fi
             chmod +x "$dest/lns"
             rm -rf "$tmp"
           fi

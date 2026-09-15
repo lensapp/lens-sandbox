@@ -77,9 +77,6 @@ fn build_tray_icon(
         .with_menu(Box::new(menu))
         .with_tooltip("LNS")
         .with_icon(icon);
-    // Template rendering (monochrome mask adapting to the menu bar) is a macOS concept; on Linux the recolored icon is shown as-is.
-    #[cfg(target_os = "macos")]
-    let builder = builder.with_icon_as_template(true);
     let tray = builder.build().context("build tray icon")?;
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -156,12 +153,11 @@ pub fn run_tray(
     #[cfg(target_os = "linux")]
     let gtk_tray = spawn_gtk_tray(shutdown.clone());
 
-    let mut native_options = eframe::NativeOptions {
+    let native_options = eframe::NativeOptions {
         viewport: approval_viewport(),
         run_and_return: true,
         ..Default::default()
     };
-    install_activation_policy(&mut native_options);
 
     let app_shutdown = shutdown.clone();
     let result = eframe::run_native(
@@ -198,9 +194,6 @@ fn display_present_with(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> boo
     if env("LNS_HEADLESS").is_some_and(|v| !v.is_empty() && v != "0") {
         return false;
     }
-    if cfg!(target_os = "macos") {
-        return true;
-    }
     has_linux_display(|key| env(key).is_some())
 }
 
@@ -226,8 +219,6 @@ pub fn run_headless(
 struct TrayApp {
     shutdown: Arc<Shutdown>,
     window_state: Arc<ApprovalInbox>,
-    #[cfg(target_os = "macos")]
-    _tray: tray_icon::TrayIcon,
     placement: ViewportPlacement,
     cards: CardState,
     audit: Arc<Mutex<AuditWindow>>,
@@ -247,13 +238,6 @@ impl TrayApp {
         shutdown: Arc<Shutdown>,
         window_state: Arc<ApprovalInbox>,
     ) -> anyhow::Result<Self> {
-        // Linux owns the tray on a dedicated gtk-main thread (spawn_gtk_tray); only macOS builds it in-app.
-        #[cfg(target_os = "macos")]
-        let _tray = {
-            let menu_ctx = ctx.clone();
-            build_tray_icon(shutdown.clone(), move || menu_ctx.request_repaint())?
-        };
-
         let watch_shutdown = shutdown.clone();
         let watch_ctx = ctx;
         std::thread::spawn(move || {
@@ -264,8 +248,6 @@ impl TrayApp {
         Ok(Self {
             shutdown,
             window_state,
-            #[cfg(target_os = "macos")]
-            _tray,
             placement: ViewportPlacement::new(),
             cards: CardState::default(),
             audit: Arc::new(Mutex::new(AuditWindow::default())),
@@ -370,8 +352,6 @@ impl ViewportPlacement {
                 // A seed height keeps the reveal frame (which skips ui()) close to size; ui() then snaps the window to its measured content so no estimate slop shows as bottom padding.
                 let monitor_height = ctx.input(|i| i.viewport().monitor_size).map(|m| m.y);
                 let seed = target_height(order, monitor_height);
-                join_all_spaces();
-                set_window_shadows(true);
                 ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                     WINDOW_WIDTH,
@@ -390,7 +370,6 @@ impl ViewportPlacement {
                 ctx.request_repaint();
             }
             VisibilityTransition::Hide => {
-                set_window_shadows(false);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
                 self.last_visible = false;
@@ -485,8 +464,6 @@ impl eframe::App for TrayApp {
             }
             None => {}
         }
-
-        refresh_window_shadows();
     }
 }
 
@@ -2067,71 +2044,6 @@ fn visibility_transition(should_show: bool, last_visible: bool) -> VisibilityTra
         _ => VisibilityTransition::Unchanged,
     }
 }
-
-#[cfg(target_os = "macos")]
-pub fn install_activation_policy(opts: &mut eframe::NativeOptions) {
-    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
-    opts.event_loop_builder = Some(Box::new(|builder| {
-        builder.with_activation_policy(ActivationPolicy::Accessory);
-    }));
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn install_activation_policy(_opts: &mut eframe::NativeOptions) {}
-
-/// Lets the always-on-top approval window appear on whichever macOS Space is active — including a full-screen app's Space — instead of staying pinned to the desktop it was created on.
-#[cfg(target_os = "macos")]
-fn join_all_spaces() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSWindowCollectionBehavior};
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        crate::log::warn!("skipped tray-window Space behavior: not on the main thread");
-        return;
-    };
-    let extra = NSWindowCollectionBehavior::CanJoinAllSpaces
-        | NSWindowCollectionBehavior::FullScreenAuxiliary;
-    for window in NSApplication::sharedApplication(mtm).windows().iter() {
-        window.setCollectionBehavior(window.collectionBehavior() | extra);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn join_all_spaces() {}
-
-/// A transparent window's shadow recomputes only on resize, never on a same-size repaint, so a scrolled card needs explicit per-frame invalidation or its shadow freezes at the old position.
-#[cfg(target_os = "macos")]
-pub fn refresh_window_shadows() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSApplication;
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    for window in NSApplication::sharedApplication(mtm).windows().iter() {
-        window.invalidateShadow();
-    }
-}
-
-/// Dropped before the hide so the card-shaped shadow can't outlive the window; re-enabled on the next show.
-#[cfg(target_os = "macos")]
-fn set_window_shadows(enabled: bool) {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSApplication;
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    for window in NSApplication::sharedApplication(mtm).windows().iter() {
-        window.setHasShadow(enabled);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn set_window_shadows(_enabled: bool) {}
-
-#[cfg(not(target_os = "macos"))]
-pub fn refresh_window_shadows() {}
 
 fn load_icon() -> anyhow::Result<Icon> {
     const ICON_BYTES: &[u8] = include_bytes!("../assets/lnsTemplate@2x.png");

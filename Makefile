@@ -76,6 +76,7 @@ dev:
 # binary gets the next exec SIGKILLed on macOS; unlink before copying.
 
 build: build-lns build-lns-service
+	@if [ "$$(uname -s)" = Darwin ]; then $(MAKE) -C clients/macos package; fi
 
 build-lns:
 	$(CARGO) build --release $(CARGO_LOCKED) -p lns-cli

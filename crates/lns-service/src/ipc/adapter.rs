@@ -30,6 +30,10 @@ pub async fn run_server(
 ) -> anyhow::Result<()> {
     rebuild_stopped_runs().await;
     let listener = bind_or_replace_stale(&socket_path).await?;
+    #[cfg(target_os = "macos")]
+    if let Err(error) = open_native_interface(&socket_path).await {
+        log::warn!("could not open the native interface: {error:#}");
+    }
 
     loop {
         tokio::select! {
@@ -53,6 +57,31 @@ pub async fn run_server(
     }
 
     let _ = std::fs::remove_file(&socket_path);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn open_native_interface(socket: &Path) -> anyhow::Result<()> {
+    if std::env::var_os("LNS_HEADLESS").is_some_and(|value| !value.is_empty() && value != "0") {
+        return Ok(());
+    }
+    let executable = std::env::current_exe()?;
+    let Some(bundle) = lns_ipc::desktop_bundle(&executable) else {
+        return Ok(());
+    };
+    let status = tokio::process::Command::new("/usr/bin/open")
+        .arg("-g")
+        .arg(&bundle)
+        .arg("--args")
+        .arg("--service-socket")
+        .arg(socket)
+        .status()
+        .await?;
+    anyhow::ensure!(
+        status.success(),
+        "opening {} failed: {status}",
+        bundle.display()
+    );
     Ok(())
 }
 
@@ -210,7 +239,7 @@ fn read_dashboard() -> anyhow::Result<super::dashboard::Snapshot> {
     )?;
     let root = crate::cache::root()?;
     Ok(super::dashboard::assemble(
-        crate::dashboard::active_sandboxes(),
+        crate::dashboard::sandboxes::from_summaries(crate::run_registry::snapshot()),
         timeline,
         crate::approval_flow::answering::entries(&root),
     ))

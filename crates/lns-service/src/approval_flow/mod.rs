@@ -7,4 +7,5 @@ pub mod protocol;
 pub mod session;
 pub mod system_font;
 pub mod watcher;
+#[cfg(not(target_os = "macos"))]
 pub mod window;

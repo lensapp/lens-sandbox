@@ -11,8 +11,10 @@ use crate::command::{CommandSpec, subcommand};
 use crate::log;
 use crate::service::ServiceClient;
 
+mod native;
 mod real;
 
+pub(crate) use real::native_cli_directory;
 pub use real::run;
 
 #[derive(clap::Args)]

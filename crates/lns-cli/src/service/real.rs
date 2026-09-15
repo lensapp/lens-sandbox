@@ -64,6 +64,30 @@ impl RealServiceClient {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) async fn open_native_interface(service_bin: &Path, socket: &Path) -> Result<()> {
+    if std::env::var_os("LNS_HEADLESS").is_some_and(|value| !value.is_empty() && value != "0") {
+        return Ok(());
+    }
+    let Some(bundle) = lns_ipc::desktop_bundle(service_bin) else {
+        return Ok(());
+    };
+    let status = tokio::process::Command::new("/usr/bin/open")
+        .arg("-g")
+        .arg(&bundle)
+        .arg("--args")
+        .arg("--service-socket")
+        .arg(socket)
+        .status()
+        .await?;
+    anyhow::ensure!(
+        status.success(),
+        "opening {} failed: {status}",
+        bundle.display()
+    );
+    Ok(())
+}
+
 pub(crate) async fn send_request(socket: &Path, request: &Request) -> Option<Response> {
     let mut stream = UnixStream::connect(socket).await.ok()?;
     let frame = encode_frame(request).ok()?;

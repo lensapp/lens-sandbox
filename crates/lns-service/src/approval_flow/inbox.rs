@@ -522,6 +522,295 @@ pub fn get() -> Option<Arc<ApprovalInbox>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::approval_flow::protocol::Treatment;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn prompt(id: &str, host: &str) -> PendingPrompt {
+        PendingPrompt {
+            id: id.into(),
+            host: host.into(),
+            action: format!("CONNECT {host}:443"),
+            treatment: Treatment::Inspected,
+            run: None,
+            offer: None,
+            connect: None,
+            connect_seq: 0,
+        }
+    }
+
+    #[test]
+    fn granting_takes_the_card_and_carries_the_account_the_user_chose() {
+        let s = ApprovalInbox::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
+
+        assert!(s.grant("r1", "token", ConnectionChoice::Held("work".into())));
+
+        assert_eq!(
+            rx.try_recv().expect("a delivery"),
+            DecisionDelivery {
+                id: "r1".into(),
+                action: RequestAction::Grant {
+                    method: "token".into(),
+                    connection: ConnectionChoice::Held("work".into()),
+                },
+            }
+        );
+        assert_eq!(s.pending_count(), 0, "the grant answers this card");
+    }
+
+    #[test]
+    fn declining_keeps_the_card_because_the_ordinary_question_is_still_unanswered() {
+        // The hold already turned this request into a question; the session re-presents it without the offer.
+        let s = ApprovalInbox::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
+
+        assert!(s.decline("r1"));
+
+        assert_eq!(
+            rx.try_recv().expect("a delivery").action,
+            RequestAction::Decline
+        );
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    fn every_round_of_a_sign_in_keeps_the_card_that_began_it() {
+        // A sign-in takes as many rounds as the mechanism needs, and each one is drawn on this card; removing it would leave the exchange nowhere to continue.
+        let s = ApprovalInbox::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
+
+        assert!(s.begin_connect("r1", "sign-in".into(), "work".into()));
+        assert_eq!(
+            rx.try_recv().expect("a delivery").action,
+            RequestAction::BeginConnect {
+                method: "sign-in".into(),
+                label: "work".into(),
+            }
+        );
+        assert_eq!(s.pending_count(), 1);
+
+        assert!(s.open_connect_browser("r1"));
+        assert_eq!(
+            rx.try_recv().unwrap().action,
+            RequestAction::OpenConnectBrowser
+        );
+        assert_eq!(s.pending_count(), 1);
+
+        let values = lns_ipc::SecretValues(std::collections::BTreeMap::from([(
+            "device_code".to_string(),
+            "8C29-9212".to_string(),
+        )]));
+        assert!(s.answer_connect("r1", values.clone()));
+        assert_eq!(
+            rx.try_recv().expect("a delivery").action,
+            RequestAction::AnswerConnect { values }
+        );
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    fn answering_a_card_that_is_gone_delivers_nothing() {
+        let s = ApprovalInbox::new();
+        assert!(!s.grant("gone", "token", ConnectionChoice::None));
+        assert!(!s.decline("gone"));
+        assert!(!s.begin_connect("gone", "sign-in".into(), "work".into()));
+        assert!(!s.answer_connect("gone", lns_ipc::SecretValues::default()));
+    }
+
+    #[test]
+    fn presenting_a_card_again_replaces_what_it_shows() {
+        // A declined offer is re-presented as the ordinary question; an early return would leave the connector card on screen with both its buttons already spent.
+        let s = ApprovalInbox::new();
+        let (tx, _rx) = unbounded_channel();
+        let mut offered = prompt("r1", "api.some-provider.example");
+        offered.offer = Some(lns_ipc::ConnectorView {
+            description: None,
+            name: "some-provider".into(),
+            digest: "sha256:abc".into(),
+            serves: vec!["api.some-provider.example".into()],
+            methods: Vec::new(),
+            connections: Vec::new(),
+        });
+        s.insert_pending(offered, tx.clone());
+
+        s.insert_pending(prompt("r1", "api.some-provider.example"), tx);
+
+        let snapshot = s.snapshot();
+        assert_eq!(snapshot.pending.len(), 1, "still one card, not two");
+        assert!(
+            snapshot.pending[0].offer.is_none(),
+            "and it is the ordinary question now"
+        );
+    }
+
+    #[test]
+    fn insert_pending_dedupes_by_id() {
+        let s = ApprovalInbox::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx.clone());
+        s.insert_pending(prompt("r1", "a.test"), tx.clone());
+        s.insert_pending(prompt("r2", "b.test"), tx);
+        assert_eq!(s.pending_count(), 2);
+    }
+
+    #[test]
+    fn a_network_card_keeps_the_run_its_prompt_names() {
+        let s = ApprovalInbox::new();
+        let (tx, _rx) = unbounded_channel();
+        let mut named = prompt("r1", "a.test");
+        named.run = Some("some-run".into());
+        s.insert_pending(named, tx);
+        assert_eq!(
+            s.snapshot().pending[0].run.as_deref(),
+            Some("some-run"),
+            "the window must not drop the attribution the service put on the prompt"
+        );
+    }
+
+    #[test]
+    fn remove_pending_drops_only_matching_id() {
+        let s = ApprovalInbox::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx.clone());
+        s.insert_pending(prompt("r2", "b.test"), tx);
+        s.remove_pending("r1");
+        let snap = s.snapshot();
+        assert_eq!(snap.pending.len(), 1);
+        assert_eq!(snap.pending[0].id, "r2");
+    }
+
+    #[test]
+    fn remove_unknown_id_is_a_noop() {
+        let s = ApprovalInbox::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx);
+        s.remove_pending("never-was");
+        assert_eq!(s.pending_count(), 1);
+    }
+
+    #[test]
+    fn push_inform_appends_in_order() {
+        let s = ApprovalInbox::new();
+        s.push_inform("first".into());
+        s.push_inform("second".into());
+        let snap = s.snapshot();
+        assert_eq!(snap.informs, vec!["first".to_string(), "second".into()]);
+    }
+
+    #[test]
+    fn clear_informs_empties_the_list() {
+        let s = ApprovalInbox::new();
+        s.push_inform("warn".into());
+        s.clear_informs();
+        assert!(s.snapshot().informs.is_empty());
+    }
+
+    #[test]
+    fn dismiss_inform_removes_the_indexed_entry_and_preserves_the_rest() {
+        let s = ApprovalInbox::new();
+        s.push_inform("first".into());
+        s.push_inform("second".into());
+        s.push_inform("third".into());
+        s.dismiss_inform(1);
+        assert_eq!(
+            s.snapshot().informs,
+            vec!["first".to_string(), "third".into()],
+            "dismissing a stacked banner drops that banner, not the oldest"
+        );
+    }
+
+    #[test]
+    fn dismiss_inform_out_of_bounds_is_a_noop() {
+        let s = ApprovalInbox::new();
+        s.push_inform("only".into());
+        s.dismiss_inform(5);
+        assert_eq!(s.snapshot().informs, vec!["only".to_string()]);
+    }
+
+    #[test]
+    fn dismiss_inform_when_empty_is_a_noop() {
+        let s = ApprovalInbox::new();
+        s.dismiss_inform(0);
+        assert!(s.snapshot().informs.is_empty());
+    }
+
+    #[test]
+    fn snapshot_returns_pending_in_insertion_order() {
+        let s = ApprovalInbox::new();
+        let (tx, _rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx.clone());
+        s.insert_pending(prompt("r2", "b.test"), tx);
+        let snap = s.snapshot();
+        assert_eq!(snap.pending.len(), 2);
+        assert_eq!(snap.pending[0].id, "r1");
+        assert_eq!(snap.pending[1].id, "r2");
+    }
+
+    #[test]
+    fn decide_sends_delivery_on_matching_tx_and_removes_entry() {
+        let s = ApprovalInbox::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx);
+        assert!(s.decide("r1", Decision::AllowOnce));
+        assert_eq!(s.pending_count(), 0);
+        let got = rx.try_recv().expect("delivery");
+        assert_eq!(
+            got,
+            DecisionDelivery {
+                id: "r1".into(),
+                action: RequestAction::Decide(Decision::AllowOnce),
+            }
+        );
+    }
+
+    #[test]
+    fn dismiss_delivers_a_verdict_free_action_and_removes_the_entry() {
+        let s = ApprovalInbox::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx);
+
+        assert!(s.dismiss("r1"));
+
+        assert_eq!(s.pending_count(), 0);
+        assert_eq!(
+            rx.try_recv().expect("delivery"),
+            DecisionDelivery {
+                id: "r1".into(),
+                action: RequestAction::Dismiss,
+            },
+            "a closed card carries no decision to the session"
+        );
+    }
+
+    #[test]
+    fn decide_routes_to_the_tx_supplied_at_insert_not_a_sibling() {
+        let s = ApprovalInbox::new();
+        let (tx1, mut rx1) = unbounded_channel();
+        let (tx2, mut rx2) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx1);
+        s.insert_pending(prompt("r2", "b.test"), tx2);
+        assert!(s.decide("r1", Decision::DenyAlways));
+        assert_eq!(
+            rx1.try_recv().expect("rx1").action,
+            RequestAction::Decide(Decision::DenyAlways)
+        );
+        assert!(rx2.try_recv().is_err());
+    }
+
+    #[test]
+    fn decide_returns_false_for_unknown_id_and_emits_no_delivery() {
+        let s = ApprovalInbox::new();
+        let (tx, mut rx) = unbounded_channel();
+        s.insert_pending(prompt("r1", "a.test"), tx);
+        assert!(!s.decide("nope", Decision::AllowOnce));
+        assert_eq!(s.pending_count(), 1);
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn clearing_observed_notices_preserves_notices_that_arrived_later() {
         let inbox = super::ApprovalInbox::new();
@@ -538,7 +827,6 @@ mod tests {
             "a client dismisses only the notices it saw"
         );
     }
-    use super::*;
 
     #[test]
     fn native_sign_in_begins_without_collecting_outputs_and_keeps_the_card() {

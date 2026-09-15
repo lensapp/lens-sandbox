@@ -2,6 +2,7 @@ mod audit;
 mod codec;
 mod configuration;
 mod dashboard;
+mod desktop;
 mod ledger;
 mod live_approvals;
 mod paths;
@@ -51,3 +52,5 @@ pub use user_agent::{
     Identity, Method, PlatformInfo, Uname, env_os_to_uname_sysname, shell_basename_from,
     uname_fields_with, user_agent,
 };
+
+pub use desktop::desktop_bundle;

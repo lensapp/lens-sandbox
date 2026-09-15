@@ -32,6 +32,8 @@ trap 'rm -rf "$bundle_stage"' EXIT HUP INT TERM
 bundle_app="$bundle_stage/LNS.app"
 mkdir -p "$bundle_app/Contents/MacOS"
 mkdir -p "$bundle_app/Contents/Resources"
+install -m 644 "$bundle_scripts/install.sh" "$bundle_app/Contents/Resources/install.sh"
+install -m 644 "$bundle_scripts/quit.js" "$bundle_app/Contents/Resources/quit.js"
 install -m 644 "$bundle_scripts/../../../crates/lns-service/assets/lnsTemplate@2x.png" "$bundle_app/Contents/Resources/lnsTemplate.png"
 "${SWIFT:-swift}" "$bundle_scripts/render-icons.swift" "$bundle_app/Contents/Resources/lnsTemplate.png" "$bundle_stage/LNS.iconset"
 iconutil --convert icns --output "$bundle_app/Contents/Resources/LNS.icns" "$bundle_stage/LNS.iconset"
@@ -40,6 +42,7 @@ sed -e "s/@VERSION@/$bundle_version/g" -e "s/@BUILD_NUMBER@/$bundle_number/g" \
     "$bundle_scripts/../Info.plist" > "$bundle_app/Contents/Info.plist"
 
 sign_binary() {
+    if [ -n "${SIGN_KEYCHAIN:-}" ]; then set -- --keychain "$SIGN_KEYCHAIN" "$@"; fi
     if [ "$bundle_identity" = - ]; then
         codesign --force --sign "$bundle_identity" "$@"
     else
@@ -51,7 +54,9 @@ if [ -n "$bundle_helpers" ]; then
     mkdir -p "$bundle_app/Contents/Helpers"
     for bundle_helper in lns lns-service; do
         install -m 755 "$bundle_helpers/$bundle_helper" "$bundle_app/Contents/Helpers/$bundle_helper"
-        sign_binary --entitlements "$bundle_scripts/../../../crates/lns-cli/lns.entitlements" "$bundle_app/Contents/Helpers/$bundle_helper"
+        bundle_entitlements="$bundle_scripts/../../../crates/lns-cli/lns.entitlements"
+        if [ "$bundle_helper" = lns-service ]; then bundle_entitlements="$bundle_scripts/../service.entitlements"; fi
+        sign_binary --entitlements "$bundle_entitlements" "$bundle_app/Contents/Helpers/$bundle_helper"
         codesign --verify --strict "$bundle_app/Contents/Helpers/$bundle_helper"
     done
 fi

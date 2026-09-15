@@ -24,10 +24,15 @@ final class AppModel: ObservableObject {
     private var watching: Task<Void, Never>?
 
     convenience init() {
-        let path = ProcessInfo.processInfo.environment["LNS_SOCKET_PATH"]
+        let arguments = ProcessInfo.processInfo.arguments
+        let socketArgument = arguments.firstIndex(of: "--service-socket").flatMap { index in
+            arguments.indices.contains(index + 1) ? arguments[index + 1] : nil
+        }
+        let path = socketArgument ?? ProcessInfo.processInfo.environment["LNS_SOCKET_PATH"]
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support/run.lns/service.sock").path
-        let connection = ServiceConnection(path: path)
+        let connection = MatchingService(client: ServiceConnection(path: path),
+            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")
         let launch = ServiceLaunch(bundle: Bundle.main.bundleURL, socket: path, environment: ProcessInfo.processInfo.environment)
         let available = FileManager.default.isExecutableFile(atPath: launch.executable.path)
             && FileManager.default.isExecutableFile(atPath: launch.environment["LNS_SERVICE_BIN"] ?? "")

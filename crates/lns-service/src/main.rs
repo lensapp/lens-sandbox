@@ -6,7 +6,6 @@ use lns_service::{
     approval_flow::inbox::{self as approval_window, ApprovalInbox},
     ipc, log, paths,
     shutdown::Shutdown,
-    tray,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -25,14 +24,30 @@ fn main() -> anyhow::Result<()> {
 
     let ipc_shutdown = shutdown.clone();
     let ipc_socket = socket.clone();
+    #[cfg(not(target_os = "macos"))]
     let ipc_inbox = window_state.clone();
-    let ipc_handle =
-        thread::spawn(move || run_ipc_runtime(ipc_socket, ipc_shutdown, started_at, ipc_inbox));
+    let ipc_handle = thread::spawn(move || {
+        run_ipc_runtime(
+            ipc_socket,
+            ipc_shutdown,
+            started_at,
+            #[cfg(not(target_os = "macos"))]
+            ipc_inbox,
+        )
+    });
 
-    if tray::display_present() {
-        tray::run_tray(shutdown, ipc_handle, window_state)
+    #[cfg(target_os = "macos")]
+    {
+        shutdown.wait_sync();
+        ipc_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("the ipc thread panicked"))?
+    }
+    #[cfg(not(target_os = "macos"))]
+    if lns_service::tray::display_present() {
+        lns_service::tray::run_tray(shutdown, ipc_handle, window_state)
     } else {
-        tray::run_headless(shutdown, ipc_handle)
+        lns_service::tray::run_headless(shutdown, ipc_handle)
     }
 }
 
@@ -40,7 +55,7 @@ fn run_ipc_runtime(
     socket: std::path::PathBuf,
     shutdown: Arc<Shutdown>,
     started_at: Instant,
-    inbox: Arc<ApprovalInbox>,
+    #[cfg(not(target_os = "macos"))] inbox: Arc<ApprovalInbox>,
 ) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -48,7 +63,11 @@ fn run_ipc_runtime(
 
     rt.block_on(async {
         spawn_signal_listener(shutdown.clone());
-        tokio::spawn(tray::watch_approvals(inbox.watch(), shutdown.clone()));
+        #[cfg(not(target_os = "macos"))]
+        tokio::spawn(lns_service::tray::watch_approvals(
+            inbox.watch(),
+            shutdown.clone(),
+        ));
         tokio::spawn(lns_service::update_check::run_periodic(shutdown.clone()));
         // From here rather than from the first connect: a connection's values run out whether or not anybody signs in again, and a restarted service must still renew them (sandbox-spec §3.2.6).
         match lns_service::connector::mechanism::real::shared() {

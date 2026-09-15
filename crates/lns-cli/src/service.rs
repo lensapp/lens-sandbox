@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use lns_ipc::{SignalKind, StatusInfo};
 
 pub mod client;
@@ -81,6 +81,17 @@ fn require_running_check(alive: bool) -> Result<(), &'static str> {
 
 pub(super) async fn cmd_start(client: &impl ServiceClient) -> Result<()> {
     if client.ping().await {
+        let status = client
+            .status()
+            .await
+            .context("the running service did not report its version")?;
+        let expected = env!("CARGO_PKG_VERSION");
+        if status.version != expected {
+            anyhow::bail!(
+                "LNS {expected} cannot use service {}. Run `lns service stop` before starting this version; stopping interrupts running sandboxes.",
+                status.version
+            );
+        }
         println!("LNS is already running.");
         return Ok(());
     }
@@ -397,13 +408,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cmd_start_refuses_an_older_service_without_stopping_it() {
+        let client = FakeClient::default();
+        client.ping_responses.lock().unwrap().push_back(true);
+        *client.status_response.lock().unwrap() = Some(Some(StatusInfo {
+            pid: 42,
+            uptime_secs: 1,
+            version: "older".into(),
+        }));
+        let error = cmd_start(&client)
+            .await
+            .expect_err("an older service must not be reused");
+        assert!(error.to_string().contains("older"));
+        assert_eq!(client.calls(), vec!["ping", "status"]);
+    }
+
+    #[tokio::test]
     async fn cmd_start_reports_already_running_when_ping_succeeds() {
         let client = FakeClient::default();
         client.ping_responses.lock().unwrap().push_back(true);
 
+        *client.status_response.lock().unwrap() = Some(Some(StatusInfo {
+            pid: 42,
+            uptime_secs: 1,
+            version: env!("CARGO_PKG_VERSION").into(),
+        }));
         cmd_start(&client).await.expect("cmd_start should succeed");
 
-        assert_eq!(client.calls(), vec!["ping"]);
+        assert_eq!(client.calls(), vec!["ping", "status"]);
     }
 
     #[tokio::test]
@@ -806,10 +838,15 @@ mod tests {
         let _g = crate::test_env::EnvScope::unset("HOME");
         let client = FakeClient::default();
         client.ping_responses.lock().unwrap().push_back(true);
+        *client.status_response.lock().unwrap() = Some(Some(StatusInfo {
+            pid: 42,
+            uptime_secs: 1,
+            version: env!("CARGO_PKG_VERSION").into(),
+        }));
 
         cmd_enable(&client).await.expect("enable must not fail");
 
-        assert_eq!(client.calls(), vec!["ping"]);
+        assert_eq!(client.calls(), vec!["ping", "status"]);
     }
 
     #[tokio::test]
