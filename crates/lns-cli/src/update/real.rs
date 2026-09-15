@@ -117,13 +117,9 @@ pub(crate) async fn native_cli_directory(home: &std::path::Path) -> std::path::P
         .args(["read", "run.lns.desktop", "CLIInstallDirectory"])
         .output()
         .await;
-    if let Ok(output) = result
-        && output.status.success()
-    {
-        let path = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-        if path.is_absolute() {
-            return path;
-        }
-    }
-    home.join(".local/bin")
+    let preference = result
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    super::native::cli_directory(home, preference.as_deref())
 }

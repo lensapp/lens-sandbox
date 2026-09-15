@@ -4,6 +4,15 @@ use anyhow::Result;
 
 use super::{ManifestEntry, UpdateArgs};
 
+pub(super) fn cli_directory(home: &Path, preference: Option<&str>) -> std::path::PathBuf {
+    preference
+        .map(str::trim)
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".local/bin"))
+}
+
 pub(super) trait Host {
     async fn latest(&self) -> Result<ManifestEntry>;
     async fn download(&self, entry: &ManifestEntry) -> Result<Vec<u8>>;
@@ -31,6 +40,24 @@ pub(super) async fn run_with(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn cli_directory_only_accepts_an_absolute_preference() {
+        let home = Path::new("/home/person");
+        assert_eq!(
+            cli_directory(home, Some(" /custom tools/bin\n")),
+            Path::new("/custom tools/bin")
+        );
+        for preference in [
+            None,
+            Some(""),
+            Some("  \n"),
+            Some("relative/bin"),
+            Some("~/bin"),
+        ] {
+            assert_eq!(cli_directory(home, preference), home.join(".local/bin"));
+        }
+    }
 
     struct Fake {
         calls: RefCell<Vec<&'static str>>,
