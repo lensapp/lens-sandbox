@@ -773,7 +773,7 @@ jobs:
             || ! ok "${{ needs.verify-static-nft.result }}" \
             || ! ok "${{ needs.actions.result }}" \
             || ! ok "${{ needs['actions-staging'].result }}"; then
-            echo "One or more gates failed: lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} coverage-as-root=${{ needs['coverage-as-root'].result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }}"
+            echo "One or more gates failed: lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} macos-ui=${{ needs['macos-ui'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} coverage-as-root=${{ needs['coverage-as-root'].result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} verify-static-nft=${{ needs.verify-static-nft.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }}"
             exit 1
           fi
           # Guard against the changes detector itself failing (e.g.
@@ -784,5 +784,5 @@ jobs:
             echo "Changes detector failed: changes=${{ needs.changes.result }}"
             exit 1
           fi
-          echo "All gates passed (lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }})."
+          echo "All gates passed (lint=${{ needs.lint.result }} shell-tests-macos=${{ needs['shell-tests-macos'].result }} macos-ui=${{ needs['macos-ui'].result }} test=${{ needs.test.result }} coverage=${{ needs.coverage.result }} audit=${{ needs.audit.result }} check-release-build=${{ needs.check-release-build.result }} actions=${{ needs.actions.result }} actions-staging=${{ needs['actions-staging'].result }})."
 
