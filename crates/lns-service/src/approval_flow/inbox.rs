@@ -16,8 +16,13 @@ pub struct DecisionDelivery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestAction {
     OpenConnectBrowser,
-    BeginConnect { method: String, label: String },
-    AnswerConnect { values: lns_ipc::SecretValues },
+    BeginConnect {
+        method: String,
+        label: String,
+    },
+    AnswerConnect {
+        values: lns_ipc::SecretValues,
+    },
     Decide(Decision),
     /// Connect this run to the offered connector by the named method (§3.2.4).
     Grant {
@@ -257,7 +262,11 @@ impl ApprovalInbox {
 
     fn keep_and_deliver(&self, id: &str, action: RequestAction) -> bool {
         let g = self.lock();
-        let Some(entry) = g.pending.iter().find(|e| e.prompt.id == id && !e.submitting) else {
+        let Some(entry) = g
+            .pending
+            .iter()
+            .find(|e| e.prompt.id == id && !e.submitting)
+        else {
             return false;
         };
         let _ = entry.decision_tx.send(DecisionDelivery {
@@ -489,6 +498,8 @@ mod tests {
 
     fn connector_prompt() -> PendingPrompt {
         PendingPrompt {
+            connect: None,
+            connect_seq: 0,
             id: "request".into(),
             host: "api.example.com".into(),
             action: "CONNECT api.example.com:443".into(),
@@ -500,6 +511,10 @@ mod tests {
                 digest: "sha256:fixture".into(),
                 serves: vec!["api.example.com".into()],
                 methods: vec![lns_ipc::ConnectorMethodView {
+                    oauth: None,
+                    hosts: vec![],
+                    runs_programs: false,
+                    carries_code: false,
                     name: "token".into(),
                     label: "Token".into(),
                     auth_label: Some("Token".into()),

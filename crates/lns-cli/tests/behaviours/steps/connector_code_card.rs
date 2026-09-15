@@ -9,6 +9,7 @@ const DIGEST: &str = "sha256:abc";
 #[given(expr = "a connector whose method {string} is a code method")]
 fn a_connector_whose_method_is_a_code_method(world: &mut BehaviourWorld, method: String) {
     world.connector.held.push(lns_ipc::ConnectorView {
+        description: None,
         name: CONNECTOR.to_string(),
         digest: DIGEST.to_string(),
         serves: vec!["api.some-provider.example".to_string()],

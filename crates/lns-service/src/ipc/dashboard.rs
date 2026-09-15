@@ -202,6 +202,10 @@ mod tests {
                 serves: vec![],
                 connections: vec![],
                 methods: vec![ConnectorMethodView {
+                    oauth: None,
+                    hosts: vec![],
+                    runs_programs: false,
+                    carries_code: false,
                     name: "public".into(),
                     label: "Public".into(),
                     auth_label: None,

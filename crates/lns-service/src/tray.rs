@@ -2784,6 +2784,7 @@ mod tests {
 
     fn installed_at(digest: &str) -> lns_ipc::ConnectorView {
         lns_ipc::ConnectorView {
+            description: None,
             name: "some-provider".into(),
             digest: digest.into(),
             serves: Vec::new(),

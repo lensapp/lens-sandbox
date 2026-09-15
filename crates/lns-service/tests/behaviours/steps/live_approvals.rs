@@ -27,6 +27,8 @@ impl std::fmt::Debug for LiveApprovalRig {
 
 fn prompt(host: &str) -> PendingPrompt {
     PendingPrompt {
+        connect: None,
+        connect_seq: 0,
         id: "guest-request".into(),
         host: host.into(),
         action: format!("CONNECT {host}:443"),
