@@ -133,7 +133,17 @@ jobs:
       - name: Configure the trusted macOS signing team
         env:
           MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
-        run: python3 scripts/configure-macos-signing.py scripts/lns-install/lns-install.sh
+          ALLOW_LEGACY_INSTALLER: ${{ github.event_name == 'workflow_dispatch' && inputs.force_deploy_install }}
+        run: |
+          if [ "$ALLOW_LEGACY_INSTALLER" = true ] && [ ! -f scripts/configure-macos-signing.py ]; then
+            if grep -Fq '@MACOS_TEAM_ID@' scripts/lns-install/lns-install.sh; then
+              echo 'Native installer is missing its signing configuration helper.' >&2
+              exit 1
+            fi
+            echo 'Redeploying the unchanged legacy installer.'
+          else
+            python3 scripts/configure-macos-signing.py scripts/lns-install/lns-install.sh
+          fi
 
       - name: Validate script syntax
         run: bash -n scripts/lns-install/lns-install.sh
