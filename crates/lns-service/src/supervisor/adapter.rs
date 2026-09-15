@@ -497,9 +497,9 @@ mod tests {
         use lns_policy::Policy;
         use std::sync::Arc;
 
-        let window_state = ApprovalInbox::new();
+        let inbox = ApprovalInbox::new();
         let (decision_tx, decision_rx) = mpsc::unbounded_channel::<DecisionDelivery>();
-        let notifier = Arc::new(InboxNotifier::new(window_state, decision_tx));
+        let notifier = Arc::new(InboxNotifier::new(inbox, decision_tx));
         use crate::approval_flow::session::tests::CapturingStore;
         let store = Arc::new(CapturingStore::default());
         let (frame_tx, _frame_rx) = mpsc::unbounded_channel::<HostFrame>();
