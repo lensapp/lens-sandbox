@@ -3,6 +3,10 @@ set -eu
 install_test_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 install_test_tmp=$(mktemp -d)
 trap 'rm -rf "$install_test_tmp"' EXIT HUP INT TERM
+cp "$install_test_root/install.sh" "$install_test_tmp/install.sh"
+cp "$install_test_root/quit.js" "$install_test_tmp/quit.js"
+MACOS_TEAM_ID=TESTTEAM01 python3 "$install_test_root/../../../scripts/configure-macos-signing.py" "$install_test_tmp/install.sh"
+
 mkdir -p "$install_test_tmp/home" "$install_test_tmp/bin" "$install_test_tmp/source/LNS.app/Contents/Helpers" "$install_test_tmp/apps/LNS.app/Contents/Helpers"
 printf old > "$install_test_tmp/apps/LNS.app/marker"
 printf new > "$install_test_tmp/source/LNS.app/marker"
@@ -25,6 +29,12 @@ for install_test_command in codesign spctl osascript defaults; do
   cat > "$install_test_tmp/bin/$install_test_command" <<'COMMAND'
 #!/bin/sh
 printf '%s %s\n' "$(basename "$0")" "$*" >> "$INSTALL_TEST_LOG"
+if [ "$(basename "$0")" = codesign ]; then
+  case "$*" in
+    *'certificate leaf[subject.OU]'*)
+      case "$*" in *"${INSTALL_TEST_SIGNING_TEAM:-TESTTEAM01}"*) ;; *) exit 1;; esac;;
+  esac
+fi
 if [ "$(basename "$0")" = codesign ] && [ "${INSTALL_TEST_BAD_SIGNATURE:-0}" = 1 ]; then exit 1; fi
 COMMAND
   chmod +x "$install_test_tmp/bin/$install_test_command"
@@ -37,19 +47,23 @@ chmod +x "$install_test_tmp/bin/ditto"
 export PATH="$install_test_tmp/bin:$PATH"
 export INSTALL_TEST_LOG="$install_test_tmp/actions"
 export LNS_NO_SERVICE=1
-env HOME="$install_test_tmp/home" sh "$install_test_root/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0
+env HOME="$install_test_tmp/home" sh "$install_test_tmp/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0
 [ "$(cat "$install_test_tmp/apps/LNS.app/marker")" = new ]
 [ "$(readlink "$install_test_tmp/links/lns")" = "$install_test_tmp/apps/LNS.app/Contents/Helpers/lns" ]
 [ "$(readlink "$install_test_tmp/links/lns-service")" = "$install_test_tmp/apps/LNS.app/Contents/Helpers/lns-service" ]
 printf '%s\n' 'PASS: the complete app and CLI links are installed together'
+if INSTALL_TEST_SIGNING_TEAM=OTHERTEAM1 env HOME="$install_test_tmp/home" sh "$install_test_tmp/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0; then
+  echo 'FAIL: another signing team was accepted' >&2; exit 1
+fi
+printf '%s\n' 'PASS: another signing team cannot replace the installed app'
 printf preserved > "$install_test_tmp/apps/LNS.app/marker"
-if INSTALL_TEST_BAD_SIGNATURE=1 env HOME="$install_test_tmp/home" sh "$install_test_root/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0; then
+if INSTALL_TEST_BAD_SIGNATURE=1 env HOME="$install_test_tmp/home" sh "$install_test_tmp/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0; then
   echo 'FAIL: invalid signature was installed' >&2; exit 1
 fi
 [ "$(cat "$install_test_tmp/apps/LNS.app/marker")" = preserved ]
 printf '%s\n' 'PASS: signature failure leaves the installed app untouched'
 
-if LNS_NO_SERVICE=0 INSTALL_TEST_START_FAIL=1 env HOME="$install_test_tmp/home" sh "$install_test_root/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0; then
+if LNS_NO_SERVICE=0 INSTALL_TEST_START_FAIL=1 env HOME="$install_test_tmp/home" sh "$install_test_tmp/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0; then
   echo 'FAIL: startup failure was accepted' >&2; exit 1
 fi
 [ "$(cat "$install_test_tmp/apps/LNS.app/marker")" = preserved ]
@@ -58,13 +72,13 @@ printf '%s\n' 'PASS: startup failure restores the app and CLI links'
 if [ "$(tail -n 1 "$INSTALL_TEST_LOG")" != 'service stop' ]; then
   echo 'FAIL: rollback did not stop the replacement service' >&2; exit 1
 fi
-if INSTALL_TEST_RUNNING=true INSTALL_TEST_STOP_FAIL=1 env HOME="$install_test_tmp/home" sh "$install_test_root/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0; then
+if INSTALL_TEST_RUNNING=true INSTALL_TEST_STOP_FAIL=1 env HOME="$install_test_tmp/home" sh "$install_test_tmp/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0; then
   echo 'FAIL: an active service was replaced after stop failed' >&2; exit 1
 fi
 [ "$(cat "$install_test_tmp/apps/LNS.app/marker")" = preserved ]
 printf '%s\n' 'PASS: failed shutdown cannot replace the app'
 
-if INSTALL_TEST_INVALID_STATUS=1 env HOME="$install_test_tmp/home" sh "$install_test_root/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0; then
+if INSTALL_TEST_INVALID_STATUS=1 env HOME="$install_test_tmp/home" sh "$install_test_tmp/install.sh" "$install_test_tmp/source/LNS.app" "$install_test_tmp/apps/LNS.app" "$install_test_tmp/links" 0.25.0; then
   echo 'FAIL: missing service state was treated as stopped' >&2; exit 1
 fi
 [ "$(cat "$install_test_tmp/apps/LNS.app/marker")" = preserved ]

@@ -177,7 +177,9 @@ INSTALL_DIR="${INSTALL_DIR%/}"
 if [ "$OS" = darwin ] && [ "$ARCHIVE_EXTENSION" = zip ]; then
   ditto -x -k "${TMPDIR_INSTALL}/${ASSET_NAME}" "${TMPDIR_INSTALL}/native"
   NATIVE_APP="${TMPDIR_INSTALL}/native/LNS.app"
-  codesign --verify --deep --strict -R 'identifier "run.lns.desktop" and anchor apple generic' "$NATIVE_APP"
+  SIGNING_TEAM='@MACOS_TEAM_ID@'
+  printf '%s' "$SIGNING_TEAM" | LC_ALL=C grep -Eq '^[A-Z0-9]{10}$' || error 'This installer has no configured signing team.'
+  codesign --verify --deep --strict -R "identifier \"run.lns.desktop\" and anchor apple generic and certificate leaf[subject.OU] = \"$SIGNING_TEAM\"" "$NATIVE_APP"
   spctl --assess --type execute --verbose=2 "$NATIVE_APP"
   APP_DESTINATION="${APP_DIR:-${HOME}/Applications}/LNS.app"
   LNS_NO_SERVICE="${NO_SERVICE:-0}" sh "$NATIVE_APP/Contents/Resources/install.sh" "$NATIVE_APP" "$APP_DESTINATION" "$INSTALL_DIR" "$VERSION"

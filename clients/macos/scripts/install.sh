@@ -8,7 +8,9 @@ install_version=$4
 case "$install_app" in /*.app) ;; *) echo 'The app destination must be an absolute .app path.' >&2; exit 1;; esac
 case "$install_bin" in /*) ;; *) echo 'The CLI directory must be an absolute path.' >&2; exit 1;; esac
 [ ! -L "$install_app" ] || { echo 'Refusing to replace a symlinked app.' >&2; exit 1; }
-codesign --verify --deep --strict -R 'identifier "run.lns.desktop" and anchor apple generic' "$install_source"
+install_team='@MACOS_TEAM_ID@'
+printf '%s' "$install_team" | LC_ALL=C grep -Eq '^[A-Z0-9]{10}$' || { echo 'This installer has no configured signing team.' >&2; exit 1; }
+codesign --verify --deep --strict -R "identifier \"run.lns.desktop\" and anchor apple generic and certificate leaf[subject.OU] = \"$install_team\"" "$install_source"
 spctl --assess --type execute --verbose=2 "$install_source"
 [ "$("$install_source/Contents/Helpers/lns" --version)" = "lns $install_version" ] || {
     echo 'The downloaded CLI version does not match the release.' >&2; exit 1;

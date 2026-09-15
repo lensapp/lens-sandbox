@@ -130,6 +130,11 @@ jobs:
           # dispatch, fall back to the operator-provided tag.
           ref: ${{ needs.release-please.outputs.lns-install-tag || inputs.lns_install_tag }}
 
+      - name: Configure the trusted macOS signing team
+        env:
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: python3 scripts/configure-macos-signing.py scripts/lns-install/lns-install.sh
+
       - name: Validate script syntax
         run: bash -n scripts/lns-install/lns-install.sh
 
@@ -249,6 +254,12 @@ jobs:
           cache-workspaces: .
           cache-on-failure: true
 
+      - name: Configure the trusted macOS signing team before compiling the updater
+        if: matrix.os == 'darwin'
+        env:
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: python3 scripts/configure-macos-signing.py clients/macos/scripts/install.sh
+
       - name: Build lns
         # --locked makes the release build hermetic; the cargo-workspace plugin keeps the tag's Cargo.lock in sync.
         run: cargo build --release --locked --target ${{ matrix.target }} -p lns-cli
@@ -283,6 +294,7 @@ jobs:
       - name: Sign and notarize the native macOS app
         if: matrix.os == 'darwin'
         env:
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
           MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}

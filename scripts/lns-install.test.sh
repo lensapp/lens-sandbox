@@ -3,6 +3,9 @@ set -eu
 installer_test_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 installer_test_tmp=$(mktemp -d)
 trap 'rm -rf "$installer_test_tmp"' EXIT HUP INT TERM
+cp "$installer_test_root/scripts/lns-install/lns-install.sh" "$installer_test_tmp/install.sh"
+MACOS_TEAM_ID=TESTTEAM01 python3 "$installer_test_root/scripts/configure-macos-signing.py" "$installer_test_tmp/install.sh"
+
 mkdir -p "$installer_test_tmp/bin" "$installer_test_tmp/helpers" "$installer_test_tmp/LNS.app/Contents/Resources" "$installer_test_tmp/home"
 printf '#!/bin/sh\necho "lns 0.25.0"\n' > "$installer_test_tmp/helpers/lns"
 cp "$installer_test_tmp/helpers/lns" "$installer_test_tmp/helpers/lns-service"
@@ -46,6 +49,10 @@ cp -R "$INSTALLER_TEST_SOURCE/LNS.app" "$4/LNS.app"
 MOCK
 cat > "$installer_test_tmp/bin/codesign" <<'MOCK'
 #!/bin/sh
+case "$*" in
+  *'certificate leaf[subject.OU]'*)
+    case "$*" in *"${INSTALLER_TEST_SIGNING_TEAM:-TESTTEAM01}"*) ;; *) exit 1;; esac;;
+esac
 [ "${INSTALLER_TEST_BAD_SIGNATURE:-0}" != 1 ]
 MOCK
 printf '#!/bin/sh\nexit 0\n' > "$installer_test_tmp/bin/spctl"
@@ -65,21 +72,27 @@ export PATH="$installer_test_tmp/bin:$PATH" INSTALLER_TEST_SOURCE="$installer_te
 export VERSION=''
 export INSTALL_DIR="$installer_test_tmp/install" APP_DIR="$installer_test_tmp/apps" LNS_NO_SERVICE=1
 mkdir -p "$INSTALL_DIR"
-INSTALLER_TEST_EXTENSION=tar.gz env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_root/scripts/lns-install/lns-install.sh"
+INSTALLER_TEST_EXTENSION=tar.gz env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
 [ -x "$INSTALL_DIR/lns" ] && [ ! -e "$INSTALL_DIR/result" ]
 echo 'PASS: the installer follows the current tarball manifest before native publication'
-INSTALLER_TEST_EXTENSION=zip env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_root/scripts/lns-install/lns-install.sh"
+INSTALLER_TEST_EXTENSION=zip env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
 [ "$(cat "$INSTALL_DIR/result")" = native ]
 echo 'PASS: a native manifest selects the verified complete-app installer'
 rm "$INSTALL_DIR/result"
-if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_BAD_SIGNATURE=1 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_root/scripts/lns-install/lns-install.sh"; then
+if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_BAD_SIGNATURE=1 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"; then
   echo 'FAIL: unsigned native app was installed' >&2; exit 1
 fi
 [ ! -e "$INSTALL_DIR/result" ]
 echo 'PASS: native signature failure cannot fall back to installing loose helpers'
 
+if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_SIGNING_TEAM=OTHERTEAM1 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"; then
+  echo 'FAIL: native app from another signing team was installed' >&2; exit 1
+fi
+[ ! -e "$INSTALL_DIR/result" ]
+echo 'PASS: native app must be signed by the configured team'
+
 for installer_test_extension in tar.gz zip; do
-  INSTALLER_TEST_EXTENSION="$installer_test_extension" VERSION=v0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_root/scripts/lns-install/lns-install.sh"
+  INSTALLER_TEST_EXTENSION="$installer_test_extension" VERSION=v0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"
   if [ "$installer_test_extension" = zip ]; then
     [ "$(cat "$INSTALL_DIR/result")" = native ]
     rm "$INSTALL_DIR/result"
@@ -88,9 +101,9 @@ for installer_test_extension in tar.gz zip; do
   fi
   echo "PASS: pinned release selects its published $installer_test_extension asset"
 done
-if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_METADATA_FAIL=1 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_root/scripts/lns-install/lns-install.sh"; then
+if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_METADATA_FAIL=1 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_tmp/install.sh"; then
   echo 'FAIL: failed release lookup guessed an archive format' >&2; exit 1
 fi
 [ ! -e "$INSTALL_DIR/result" ]
 echo 'PASS: failed pinned release lookup aborts installation'
-echo "Results: 6 passed, 0 failed"
+echo "Results: 7 passed, 0 failed"

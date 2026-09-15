@@ -340,10 +340,23 @@ The `release` GitHub environment supplies these secrets to the macOS release job
 |---|---|
 | `MACOS_CERTIFICATE_P12` | Base64-encoded Developer ID Application certificate and private key export |
 | `MACOS_CERTIFICATE_PASSWORD` | Password for the P12 export |
+| `MACOS_TEAM_ID` | 10-character Apple Developer Team ID trusted by both installers |
 | `MACOS_SIGN_IDENTITY` | Exact Developer ID Application signing identity |
 | `MACOS_NOTARY_KEY_P8` | App Store Connect API private key, as its original multiline text |
 | `MACOS_NOTARY_KEY_ID` | API key ID |
 | `MACOS_NOTARY_ISSUER_ID` | API issuer ID |
+
+The installer publication job also requires `MACOS_TEAM_ID`. The workflow embeds
+it into the public installer and the bundled installer before compiling the CLI,
+so updates use the same pinned team. A missing or malformed team stops publication;
+the signed app must also pass that team's certificate requirement. Local ad-hoc
+builds keep an unconfigured installer and cannot install release updates. For a
+manual release build, configure the template from the repository root before
+building helpers:
+
+```sh
+MACOS_TEAM_ID=<team> python3 scripts/configure-macos-signing.py clients/macos/scripts/install.sh
+```
 
 The job imports credentials into a temporary keychain, builds the app with the
 release's CLI and service, notarizes and staples it, runs the bundled-service
