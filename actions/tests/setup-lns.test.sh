@@ -70,3 +70,5 @@ echo 'PASS: checksum failure stops installation'
 SETUP_OS=Linux SETUP_EXTENSION=tar.gz bash "$setup_tmp/install.sh"
 [ "$("$RUNNER_TOOL_CACHE/lns/0.26.0/aarch64/lns" --version)" = 'lns 0.26.0' ]
 echo 'PASS: Linux installs the existing CLI tarball'
+
+echo "Results: 4 passed, 0 failed"

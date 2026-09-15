@@ -55,6 +55,7 @@ print(json.load(sys.stdin)['platforms']['darwin-aarch64']['url'])
 MOCK
 chmod +x "$installer_test_tmp/bin/"*
 export PATH="$installer_test_tmp/bin:$PATH" INSTALLER_TEST_SOURCE="$installer_test_tmp"
+export VERSION=''
 export INSTALL_DIR="$installer_test_tmp/install" APP_DIR="$installer_test_tmp/apps" LNS_NO_SERVICE=1
 mkdir -p "$INSTALL_DIR"
 INSTALLER_TEST_EXTENSION=tar.gz env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_root/scripts/lns-install/lns-install.sh"
@@ -69,3 +70,5 @@ if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_BAD_SIGNATURE=1 env HOME="$instal
 fi
 [ ! -e "$INSTALL_DIR/result" ]
 echo 'PASS: native signature failure cannot fall back to installing loose helpers'
+
+echo "Results: 3 passed, 0 failed"

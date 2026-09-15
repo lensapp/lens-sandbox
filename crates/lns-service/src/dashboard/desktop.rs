@@ -1,5 +1,5 @@
 use super::{Filters, KINDS, visible_indices};
-use super::{Sandbox, approvals, format, live, sandboxes};
+use super::{Sandbox, approvals, format, sandboxes};
 
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Frame, Layout, Margin,
