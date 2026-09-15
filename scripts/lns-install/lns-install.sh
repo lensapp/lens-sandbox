@@ -126,6 +126,18 @@ if [ "$OS" = darwin ]; then
       *.tar.gz) ARCHIVE_EXTENSION=tar.gz ;;
       *) error "Unsupported macOS release archive: ${MANIFEST_URL}" ;;
     esac
+  else
+    RELEASE=$(fetch "https://api.github.com/repos/lensapp/lens-sandbox/releases/tags/lns-v${VERSION}") || \
+      error "Failed to look up release ${VERSION}."
+    ASSETS=$(printf '%s' "$RELEASE" | plutil -extract assets json -o - -) || \
+      error "The release has no asset list."
+    if printf '%s' "$ASSETS" | grep -Fq "\"name\":\"lns-${VERSION}-${PLATFORM}.zip\""; then
+      ARCHIVE_EXTENSION=zip
+    elif printf '%s' "$ASSETS" | grep -Fq "\"name\":\"lns-${VERSION}-${PLATFORM}.tar.gz\""; then
+      ARCHIVE_EXTENSION=tar.gz
+    else
+      error "Release ${VERSION} has no download for ${PLATFORM}."
+    fi
   fi
 fi
 ASSET_NAME="lns-${VERSION}-${PLATFORM}.${ARCHIVE_EXTENSION}"

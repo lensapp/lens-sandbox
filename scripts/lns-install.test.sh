@@ -24,6 +24,9 @@ while [ "$#" -gt 0 ]; do
   case "$1" in -A) shift 2;; -o) destination=$2; shift 2;; -*) shift;; *) url=$1; shift;; esac
 done
 case "$url" in
+  https://api.github.com/repos/lensapp/lens-sandbox/releases/tags/lns-v0.25.0)
+    [ "${INSTALLER_TEST_METADATA_FAIL:-0}" != 1 ] || exit 1
+    printf '{"assets":[{"name":"lns-0.25.0-darwin-aarch64.%s"}]}' "$INSTALLER_TEST_EXTENSION";;
   */lns-latest.json) printf '{"version":"0.25.0","platforms":{"darwin-aarch64":{"url":"https://get.lns.run/lns-0.25.0-darwin-aarch64.%s","sha256":"digest"}}}' "$INSTALLER_TEST_EXTENSION";;
   *.sha256) printf 'digest  archive\n' > "$destination";;
   *.tar.gz)
@@ -50,8 +53,12 @@ printf '#!/bin/sh\necho "digest  archive"\n' > "$installer_test_tmp/bin/sha256su
 cat > "$installer_test_tmp/bin/plutil" <<'MOCK'
 #!/usr/bin/env python3
 import json,sys
-assert sys.argv[1:] == ['-extract', 'platforms.darwin-aarch64.url', 'raw', '-o', '-', '-']
-print(json.load(sys.stdin)['platforms']['darwin-aarch64']['url'])
+data = json.load(sys.stdin)
+if sys.argv[2] == 'assets':
+    print(json.dumps(data['assets'], separators=(',', ':')))
+else:
+    assert sys.argv[1:] == ['-extract', 'platforms.darwin-aarch64.url', 'raw', '-o', '-', '-']
+    print(data['platforms']['darwin-aarch64']['url'])
 MOCK
 chmod +x "$installer_test_tmp/bin/"*
 export PATH="$installer_test_tmp/bin:$PATH" INSTALLER_TEST_SOURCE="$installer_test_tmp"
@@ -71,4 +78,19 @@ fi
 [ ! -e "$INSTALL_DIR/result" ]
 echo 'PASS: native signature failure cannot fall back to installing loose helpers'
 
-echo "Results: 3 passed, 0 failed"
+for installer_test_extension in tar.gz zip; do
+  INSTALLER_TEST_EXTENSION="$installer_test_extension" VERSION=v0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_root/scripts/lns-install/lns-install.sh"
+  if [ "$installer_test_extension" = zip ]; then
+    [ "$(cat "$INSTALL_DIR/result")" = native ]
+    rm "$INSTALL_DIR/result"
+  else
+    [ -x "$INSTALL_DIR/lns" ] && [ ! -e "$INSTALL_DIR/result" ]
+  fi
+  echo "PASS: pinned release selects its published $installer_test_extension asset"
+done
+if INSTALLER_TEST_EXTENSION=zip INSTALLER_TEST_METADATA_FAIL=1 VERSION=0.25.0 env HOME="$installer_test_tmp/home" TMPDIR="$installer_test_tmp" bash "$installer_test_root/scripts/lns-install/lns-install.sh"; then
+  echo 'FAIL: failed release lookup guessed an archive format' >&2; exit 1
+fi
+[ ! -e "$INSTALL_DIR/result" ]
+echo 'PASS: failed pinned release lookup aborts installation'
+echo "Results: 6 passed, 0 failed"
